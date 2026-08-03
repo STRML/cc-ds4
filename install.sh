@@ -283,7 +283,9 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
 
   <!-- These are the DS4_* knobs present when install.sh ran, e.g.
        DS4_IDLE_EXIT=0 to run forever. Set one by exporting it and re-running
-       install.sh, which rewrites the plist and reloads the agent. -->
+       install.sh, which rewrites the plist and reloads the agent. The
+       classifier routes to Anthropic via DS4_CLASSIFIER_TOKEN (claude
+       setup-token); export it before install.sh so the agent can serve it. -->
   <key>EnvironmentVariables</key>
   <dict>
     <!-- The agent env is sparse by default (no HOME, minimal PATH). The vision

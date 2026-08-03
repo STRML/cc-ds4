@@ -32,6 +32,7 @@ import ctypes, ctypes.util, http.server, json, os, re, socket, subprocess, sys, 
 # sibling module sits next to proxy.py (both in src/), so it imports without a
 # path bootstrap — the launch agent and the tests both resolve it the same way.
 import vision as _vision
+import classifier as _classifier
 
 HOME = os.path.expanduser("~")
 VERBOSE = os.environ.get("DS4_VERBOSE") == "1" or os.environ.get("DS4_DEBUG") == "1"
@@ -40,6 +41,16 @@ VERBOSE = os.environ.get("DS4_VERBOSE") == "1" or os.environ.get("DS4_DEBUG") ==
 # DS4_* at install). 0 restores the old pass-through — image blocks forwarded
 # unchanged.
 VISION = os.environ.get("DS4_VISION", "1") == "1"
+
+# Classifier routing: the auto-mode permission classifier (ds4-high + small
+# max_tokens + thinking off) is forwarded to the Anthropic subscription instead
+# of DeepSeek — the security gate should live in a trusted boundary. "ds4"
+# restores the old behavior; DS4_CLASSIFIER_MODEL overrides the Anthropic model
+# (haiku is the cheap, fast classifier). DS4_CLASSIFIER_TOKEN holds the
+# subscription token (claude setup-token); without it the classifier fails open
+# to ds4.
+CLASSIFIER_ROUTE = os.environ.get("DS4_CLASSIFIER", "anthropic")
+CLASSIFIER_MODEL = os.environ.get("DS4_CLASSIFIER_MODEL", "claude-haiku-4-5")
 
 # Below this many max_tokens, turn thinking off. Claude Code's utility calls
 # arrive with a few hundred tokens of budget; the main loop arrives at 32000.
@@ -513,6 +524,20 @@ def make_handler(name, cfg):
                 payload = None
 
             if isinstance(payload, dict):
+                # The classifier is the small ds4-high call that gates every
+                # tool call in auto mode. It is already an Anthropic-shaped
+                # request, so when the profile routes it to the subscription we
+                # forward it before the ds4 rewrite touches it (the ds4
+                # sentinel/effort logic must not see it). Fail open to ds4 on
+                # any failure. DS4_CLASSIFIER=ds4 opts out entirely.
+                if (CLASSIFIER_ROUTE == "anthropic"
+                        and _classifier.is_classifier(payload, NOTHINK_BELOW)):
+                    ep = _classifier.anthropic_endpoint(payload, CLASSIFIER_MODEL)
+                    if ep is not None:
+                        body2, token = ep
+                        if self._relay_anthropic(body2, token):
+                            return
+
                 note = rewrite(payload, cfg)
 
                 # vision: replace image blocks with text descriptions before
@@ -589,6 +614,54 @@ def make_handler(name, cfg):
             if VERBOSE and up.status != 200:
                 print(f"  [{name}] <- {up.status}", flush=True)
 
+            self._stream(up)
+
+        def _relay_anthropic(self, body, token):
+            """Forward a classifier request to the Anthropic subscription.
+
+            Returns True when the request was fully handled (the reply was
+            streamed back), False when it failed and the caller should fall
+            through to the ds4 relay. A 400 from Anthropic is streamed as-is —
+            the classifier's shape is Anthropic's own, so a 400 means Claude
+            Code sent something unexpected and failing open would mask it.
+            """
+            req = urllib.request.Request(
+                _classifier.CLASSIFIER_UPSTREAM, data=json.dumps(body).encode(),
+                method="POST")
+            req.add_header("authorization", "Bearer " + token)
+            req.add_header("anthropic-version", _classifier.ANTHROPIC_VERSION)
+            req.add_header("content-type", "application/json")
+            req.add_header("content-length", str(len(json.dumps(body))))
+            req.add_header("user-agent", UA)
+            try:
+                up = urllib.request.urlopen(req)
+            except urllib.error.HTTPError as e:
+                # A 400 is Anthropic rejecting the request shape — stream it so
+                # Claude Code sees the real error. Anything else fails open.
+                if e.code == 400:
+                    self.send_response(e.code)
+                    self.send_header("connection", "close")
+                    self.end_headers()
+                    try:
+                        self.wfile.write(e.read())
+                    finally:
+                        e.close()
+                    return True
+                if VERBOSE:
+                    print(f"  [{name}] classifier <- {e.code}, failing open to ds4", flush=True)
+                return False
+            except Exception as e:
+                if VERBOSE:
+                    print(f"  [{name}] classifier upstream failure: {e}, failing open to ds4",
+                          flush=True)
+                return False
+            if VERBOSE:
+                print(f"  [{name}] classifier -> Anthropic {up.status}", flush=True)
+            self._stream(up)
+            return True
+
+        def _stream(self, up):
+            """Stream an upstream response back to the client, then close it."""
             self.send_response(up.status)
             for k, v in up.headers.items():
                 if k.lower() not in ("transfer-encoding", "content-encoding", "connection"):
