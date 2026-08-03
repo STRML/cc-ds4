@@ -258,6 +258,24 @@ The proxies apply this at or below `max_tokens=8192` (`DS4_NOTHINK_BELOW`), whic
 separates the utility calls from the main loop with a wide margin. Nothing observed
 lands between the two.
 
+## The permission classifier routes to Anthropic
+
+The auto-mode permission classifier (the small `ds4-high` call that gates every tool
+call) is a security gate: it sees the intent of every tool call before anything else.
+Rather than send that intent to a China-hosted DeepSeek backend, the proxy forwards
+the classifier to your **Anthropic subscription** — a trusted boundary — and relays the
+reply. The classifier body is already an Anthropic-shaped request, so this is a relay
+swap, not a rewrite.
+
+- **Opt out** with `DS4_CLASSIFIER=ds4` (or a per-profile `classifier: "ds4"` row) to
+  keep the classifier on DeepSeek.
+- **Auth** is `DS4_CLASSIFIER_TOKEN`, a long-lived subscription token from
+  `claude setup-token`. Set it before running `install.sh` so it reaches the launchd
+  agent. Without it the classifier fails open to the ds4 path.
+- **Model** defaults to `claude-haiku-4-5` (`DS4_CLASSIFIER_MODEL` overrides). Small
+  and fast — the classification task is trivial.
+- Only the classifier moves. The main loop and subagents keep the DeepSeek routing.
+
 ## Things that cost real time to discover
 
 <details>
