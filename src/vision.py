@@ -65,12 +65,23 @@ def _child_cmd(img_path):
 
 
 def _env():
-    env = {k: v for k, v in os.environ.items()
-           if not (any(k.startswith(p) for p in _SCRUB_PREFIXES)
-                   or k in _SCRUB_EXACT)}
-    env["CLAUDE_CONFIG_DIR"] = ANTHROPIC_CONFIG_DIR
-    env["CLAUDE_CODE_SIMPLE"] = "1"
-    return env
+    """The child env: the parent env minus everything Claude/Anthropic/ds4.
+
+    A child that inherits the parent session's ANTHROPIC_BASE_URL/AUTH_TOKEN
+    routes to the text-only ds4 proxy (garbage descriptions) or, with those
+    stripped, gets "Not logged in". But a 4-key whitelist (HOME/PATH/TERM/
+    CLAUDE_CONFIG_DIR) is too sparse — the child needs the broader environment
+    (XPC_SESSION_*, security's keychain access) to reach the Anthropic OAuth
+    in the login keychain. Observed live: scrubbing the Claude/Anthropic/ds4/
+    cmux families and keeping everything else lets `claude -p` auth via the
+    keychain and hit real Anthropic Haiku.
+    """
+    return {k: v for k, v in os.environ.items()
+            if not (any(k.startswith(p) for p in _SCRUB_PREFIXES)
+                    or k in _SCRUB_EXACT
+                    or k.startswith("CMUX")
+                    or k in ("NODE_OPTIONS", "AI_AGENT"))}
+
 
 
 # One billed child per (cache_dir, key) — concurrent threads that miss the same
