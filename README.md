@@ -42,13 +42,14 @@ anything irreversible:
 |---|---|---|---|---|---|
 | `claude-ds4` | DeepSeek direct | `deepseek-v4-flash` / `-pro` | no | none | [prompt](profiles/deepseek-direct.md) |
 | `claude-or-ds4` | OpenRouter | `deepseek-v4-flash-0731` | **yes** | proxy on :8799 | [prompt](profiles/openrouter.md) |
+| `claude-nous` | Nous Portal | `deepseek-v4-flash-0731` | **yes** | proxy on :8800 | [prompt](profiles/nous.md) |
 | `claude-kimi` | Moonshot | `kimi-k3` / `k3` | n/a | none | [prompt](profiles/kimi.md) |
 
 Already have a profile and just want the corrected status line:
 
 ```sh
 git clone https://github.com/STRML/cc-ds4 && cd cc-ds4
-./install.sh --profile openrouter        # or --profile direct
+./install.sh --profile openrouter        # or --profile direct / --profile nous
 ```
 
 > [!WARNING]
@@ -132,6 +133,37 @@ Facts worth knowing before you rely on it:
   ZDR-eligible, send `provider: {"only": ["Novita"], "zdr": true}` and see whether it
   answers or returns "No endpoints found matching your data policy".
 
+## The `claude-nous` variant: Nous Portal
+
+[`claude-nous`](profiles/nous.md) is a third way to reach the same pinned
+`deepseek-v4-flash-0731` model, billed through [Nous Portal](https://portal.nousresearch.com)
+rather than OpenRouter or DeepSeek directly. Same per-profile isolation, same
+per-tier effort proxy — the differences are the point:
+
+- **It can be far cheaper.** Nous exposes the discounted per-token rate in its
+  `/v1/models` pricing (at the time of writing, 90% off the `-0731` list price).
+  The status line prices sessions at that rate, live. The discount is a promotion,
+  not a guarantee — for that reason treat `claude-nous` as opportunistic, and
+  re-check the fallback rates in `src/statusline/nous.py` if the pricing changes.
+- **No zero-data-retention control.** Nous 403s OpenRouter's
+  `provider: {zdr: true}` block (empty body — the portal rejects the unknown
+  `provider` field). The proxy runs with `DS4_ZDR=0`. Privacy-wise this is a
+  **direct-style** profile, not an OpenRouter-style one: requests are governed by
+  Nous's own, undisclosed retention policy. Do not reach for it with NDA data.
+- **A subscription, optionally topped up.** It exposes **no public credits or
+  balance endpoint**, so the status line shows only the session cost — no `📆 7d`
+  or `💳 left` segments. The balance lives in the portal dashboard.
+- **Cloudflare.** Nous sits behind Cloudflare, which 403s the stdlib's default
+  `urllib` User-Agent (`error code: 1010`). The proxy now sends a `curl`-style UA
+  (`DS4_UA`) on every outbound request — required for Nous, harmless for the other
+  profiles it forwards.
+- **Pinned build.** Like OpenRouter, Nous serves the dated `deepseek-v4-flash-0731`
+  at 1,048,576 context, so the build does not float. It also lists a
+  `~deepseek/...-latest` alias, which the setup deliberately avoids.
+
+Like the OpenRouter profile it needs the effort proxy running (on `:8800`); the
+launcher starts it on demand.
+
 ## Neither DeepSeek profile can see images
 
 Verified by sending a real PNG, not by reading capability metadata. An image with the
@@ -212,15 +244,17 @@ loudly with a 404; on the direct endpoint it does not fail at all.
 profiles/           setup prompts — paste one into Claude Code
   deepseek-direct.md    DeepSeek direct, no proxy. Fastest, least private.
   openrouter.md         OpenRouter, pinned -0731, ZDR, needs the proxy.
+  nous.md               Nous Portal, pinned -0731, no ZDR, needs the proxy.
   kimi.md               Moonshot's Kimi K3.
 src/
-  effort_proxy.py       tier to effort, ZDR routing, context and output guards, /__spend
+  effort_proxy.py       tier to effort, optional ZDR routing, context and output guards, /__spend
   statusline/
     common.py           transcript accounting and cost maths, shared
     direct.py           DeepSeek rates, balance-integrated spend
     openrouter.py       rates and spend from the proxy
+    nous.py             rates from the proxy; no credits/balance segments
 config/             cship configs with the Anthropic-only segments removed
-tests/              37 tests over the money maths and transcript parsing
+tests/              41 tests over the money maths and transcript parsing
 install.sh          point an existing profile at the corrected status line
 ```
 
@@ -233,7 +267,7 @@ cannot leak back into your primary install.
 The setup prompts handle this, but if the profile already exists:
 
 ```sh
-./install.sh --profile openrouter     # or: --profile direct
+./install.sh --profile openrouter     # or: --profile direct / --profile nous
 ./install.sh --profile direct --dry-run
 ```
 

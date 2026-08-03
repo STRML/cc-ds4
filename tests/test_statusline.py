@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from statusline.common import Statusline, base_model, harvest_usage, money  # noqa: E402
 from statusline.direct import RATES, DirectStatusline, week_spend  # noqa: E402
 from statusline.openrouter import FALLBACK_RATES, OpenRouterStatusline  # noqa: E402
+from statusline.nous import FALLBACK_RATES as NOUS_FALLBACK, NousStatusline  # noqa: E402
 
 MILLION = 1_000_000
 
@@ -277,6 +278,35 @@ class TestLabels(unittest.TestCase):
         p = {"model": {"id": "ds4-xhigh"}}
         sl.label(p, {})
         self.assertEqual(p["model"]["display_name"], "or-deepseek-v4-flash-0731 xhigh")
+
+
+class TestNousStatusline(unittest.TestCase):
+    def test_label_has_no_backend_prefix(self):
+        # Nous Portal is the only router on this profile, so the model name alone
+        # identifies it (OpenRouter tags "or-", direct tags "ds-").
+        sl = NousStatusline("/nonexistent")
+        sl._info = {"model": "deepseek/deepseek-v4-flash-0731"}
+        p = {"model": {"id": "ds4-xhigh"}}
+        sl.label(p, {})
+        self.assertEqual(p["model"]["display_name"], "deepseek-v4-flash-0731 xhigh")
+
+    def test_label_marks_dead_proxy(self):
+        sl = NousStatusline("/nonexistent")
+        sl._info = {}
+        p = {"model": {"id": "ds4-xhigh"}}
+        sl.label(p, {})
+        self.assertIn("(proxy?)", p["model"]["display_name"])
+
+    def test_account_is_empty(self):
+        # Nous is a subscription with no public credits endpoint.
+        sl = NousStatusline("/nonexistent")
+        sl._info = {"model": "deepseek/deepseek-v4-flash-0731"}
+        self.assertEqual(sl.account(), {})
+
+    def test_fallback_matches_discounted_list_price(self):
+        # 90%-off of the $0.10/$0.20 per-million prices.
+        self.assertAlmostEqual(NOUS_FALLBACK["prompt"] * 1e6, 0.01)
+        self.assertAlmostEqual(NOUS_FALLBACK["completion"] * 1e6, 0.02)
 
 
 class TestTailSegment(unittest.TestCase):

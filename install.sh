@@ -32,7 +32,10 @@ case "$PROFILE" in
   direct)     SCRIPT="$REPO/src/statusline/direct.py"
               CONFIG="$REPO/config/cship-direct.toml"
               DIR="${DIR:-$HOME/.claude-ds4}" ;;
-  *) echo "usage: $0 --profile openrouter|direct [--dir PATH] [--dry-run]" >&2; exit 2 ;;
+  nous)       SCRIPT="$REPO/src/statusline/nous.py"
+              CONFIG="$REPO/config/cship-nous.toml"
+              DIR="${DIR:-$HOME/.claude-nous}" ;;
+  *) echo "usage: $0 --profile openrouter|direct|nous [--dir PATH] [--dry-run]" >&2; exit 2 ;;
 esac
 
 [ -d "$DIR" ] || { echo "no profile at $DIR — create it first with profiles/*.md" >&2; exit 1; }
