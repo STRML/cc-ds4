@@ -72,6 +72,32 @@ class Malformed(unittest.TestCase):
         proxy.rewrite(p, proxy.PROFILES["direct"])
         self.assertEqual(p["messages"], "hello")
 
+    def test_messages_not_a_list_with_injection_enabled(self):
+        """A main-loop call (thinking on) with a non-list messages must not crash.
+
+        This is the path the small-call test misses: inject_missing_thinking runs
+        only when thinking is enabled, and it did m.get("role") on a str, raising
+        AttributeError. Regression for issue #3.
+        """
+        p = call(max_tokens=32000, messages="hello")
+        note = proxy.rewrite(p, proxy.PROFILES["direct"])
+        self.assertEqual(p["messages"], "hello")
+        self.assertIsNone(note)
+
+    def test_messages_list_containing_non_dict(self):
+        """A messages list with a non-dict entry must be skipped, not crash."""
+        msgs = [
+            {"role": "assistant",
+             "content": [{"type": "tool_use", "id": "t", "name": "f", "input": {}}]},
+            "bogus",
+        ]
+        p = call(max_tokens=32000, messages=msgs)
+        proxy.rewrite(p, proxy.PROFILES["direct"])
+        # The valid assistant tool_use still gets the placeholder; the string is
+        # left alone.
+        self.assertEqual(p["messages"][0]["content"][0]["type"], "thinking")
+        self.assertEqual(p["messages"][1], "bogus")
+
     def test_content_not_a_list(self):
         p = call(messages=[{"role": "assistant", "content": "plain"}])
         self.assertEqual(proxy.inject_missing_thinking(p), 0)

@@ -115,7 +115,7 @@ def inject_missing_thinking(payload):
     """
     n = 0
     for m in payload.get("messages") or []:
-        if m.get("role") != "assistant":
+        if not isinstance(m, dict) or m.get("role") != "assistant":
             continue
         blocks = m.get("content")
         if not isinstance(blocks, list):
