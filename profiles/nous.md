@@ -123,6 +123,14 @@ Each tier maps to a different effort, so `/model` actually changes how hard it t
 needs the proxy to inject `reasoning_effort` per request. Steps 6–8 build and launch
 it, exactly like the OpenRouter profile.
 
+Do not set `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` on this profile. It
+makes `/model` list the upstream's real catalog, and picking one sends a literal
+Anthropic model id (e.g. `sonnet`) through the proxy, which the `ds4-*` sentinel
+rewrite never catches — it bills real Anthropic rates on the nous portal. The
+proxy rewrites literal Anthropic ids defensively, but the picker should not
+expose them in the first place. Leave the flag unset so `/model` only offers the
+`ds4-*` tiers.
+
 The rest of this prompt assumes **Option B**. If the user picks A, set the model
 name directly and skip the proxy steps.
 
