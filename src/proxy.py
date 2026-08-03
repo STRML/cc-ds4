@@ -46,6 +46,25 @@ UA = os.environ.get("DS4_UA", "curl/8.4.0")
 
 EFFORT = {"ds4-max": "max", "ds4-xhigh": "xhigh", "ds4-high": "high", "ds4-low": "low"}
 
+# Transient upstream statuses to retry in the relay. A raw forward of any of
+# these kills the whole claude -p process ("Execution error") and loses the
+# worker's in-flight work; absorbing them here turns a blip into a success.
+# 524 is Cloudflare's origin-timeout; 429/529 are rate limit / overload.
+TRANSIENT_STATUS = {429, 502, 503, 524, 529}
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF = 1.5          # seconds, scaled by attempt number
+
+
+def should_retry(payload):
+    """True when a transient error on this request should be retried in-proxy.
+
+    The main thread (ds4-xhigh) has its own 10x-backoff retry, so retrying here
+    would double up. Subagent tiers (ds4-high/max/low via CLAUDE_CODE_SUBAGENT_MODEL)
+    die with "Execution error" on a raw forward, so they need the proxy guard.
+    """
+    tier = payload.get("model") if isinstance(payload, dict) else None
+    return isinstance(tier, str) and tier != "ds4-xhigh"
+
 # ZDR endpoints whose context is smaller than the 1M the profile advertises. A
 # long session that routes here overflows the endpoint rather than the declared
 # window. Recheck /api/v1/models/{id}/endpoints -> context_length when the
@@ -443,20 +462,45 @@ def make_handler(name, cfg):
             req.add_header("user-agent", UA)   # Cloudflare-safe; overrides the client's
             req.add_header("content-length", str(len(body)))
 
-            try:
-                up = urllib.request.urlopen(req)
-            except urllib.error.HTTPError as e:
-                up = e
-            except Exception as e:
-                msg = json.dumps(
-                    {"error": {"message": f"proxy upstream failure: {e}"}}).encode()
-                self.send_response(502)
-                self.send_header("content-type", "application/json")
-                self.send_header("content-length", str(len(msg)))
-                self.send_header("connection", "close")
-                self.end_headers()
-                self.wfile.write(msg)
-                return
+            # Transient upstream errors (rate limit / overload / cloudflare
+            # timeout) kill a claude -p subagent when forwarded raw: the worker
+            # dies with "Execution error" and loses whatever it was about to
+            # send. The main thread has its own 10x-backoff retry, so only
+            # retry subagent-tier requests here (the model sentinel tells which
+            # tier: subagents default to ds4-high via CLAUDE_CODE_SUBAGENT_MODEL,
+            # the main loop to ds4-xhigh via ANTHROPIC_MODEL). Non-transient
+            # statuses pass through unchanged.
+            do_retry = should_retry(payload)
+            up = None
+            last_err = None
+            for attempt in range(RETRY_ATTEMPTS if do_retry else 1):
+                try:
+                    up = urllib.request.urlopen(req)
+                    break
+                except urllib.error.HTTPError as e:
+                    last_err = e
+                    if e.code not in TRANSIENT_STATUS or attempt + 1 >= RETRY_ATTEMPTS:
+                        break
+                    if VERBOSE:
+                        print(f"  [{name}] <- {e.code}, retrying {attempt + 1}/{RETRY_ATTEMPTS}",
+                              flush=True)
+                    time.sleep(RETRY_BACKOFF * (attempt + 1))
+                except Exception as e:
+                    last_err = e
+                    break
+            if up is None:
+                if isinstance(last_err, urllib.error.HTTPError):
+                    up = last_err      # exhausted retries; forward the transient error
+                else:
+                    msg = json.dumps(
+                        {"error": {"message": f"proxy upstream failure: {last_err}"}}).encode()
+                    self.send_response(502)
+                    self.send_header("content-type", "application/json")
+                    self.send_header("content-length", str(len(msg)))
+                    self.send_header("connection", "close")
+                    self.end_headers()
+                    self.wfile.write(msg)
+                    return
 
             if VERBOSE and up.status != 200:
                 print(f"  [{name}] <- {up.status}", flush=True)

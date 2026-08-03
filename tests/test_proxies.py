@@ -553,5 +553,31 @@ class RewriteIsInPlace(unittest.TestCase):
         self.assertEqual(proxy.PROFILES, before)
 
 
+class RetryGuard(unittest.TestCase):
+    """Transient upstream errors are retried for subagents, not the main thread.
+
+    The main loop (ds4-xhigh) has its own 10x-backoff retry; retrying in the
+    proxy would double up. Subagents (ds4-high/max/low via
+    CLAUDE_CODE_SUBAGENT_MODEL) die with "Execution error" on a raw forward, so
+    the proxy absorbs the transient error for them.
+    """
+
+    def test_subagent_tiers_are_retried(self):
+        for tier in ("ds4-high", "ds4-low", "ds4-max"):
+            self.assertTrue(proxy.should_retry(call(model=tier)), tier)
+
+    def test_main_thread_tier_is_not_retried(self):
+        # the main loop sends ds4-xhigh (ANTHROPIC_MODEL)
+        self.assertFalse(proxy.should_retry(call(model="ds4-xhigh")))
+
+    def test_unknown_model_is_retried(self):
+        # defensive: a tier we do not recognize is a subagent tier
+        self.assertTrue(proxy.should_retry(call(model="ds4-sonnet")))
+
+    def test_absent_payload_is_not_retried(self):
+        self.assertFalse(proxy.should_retry(None))
+        self.assertFalse(proxy.should_retry({}))
+
+
 if __name__ == "__main__":
     unittest.main()
