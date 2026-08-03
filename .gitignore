@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Never commit anything that has touched a profile: these hold session cost state,
+# account balances, and a verbatim dump of a Claude Code payload.
+cost-state/
+spend-ledger.jsonl
+balance-cache.json
+last-statusline-input.json
+*.bak-*

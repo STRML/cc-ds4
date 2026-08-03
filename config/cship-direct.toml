@@ -1,0 +1,43 @@
+# cship config for the ds4 (DeepSeek direct) profile.
+# Derived from ~/.config/cship.toml. Two deliberate differences, same as the
+# or-ds4 profile:
+#
+#   1. $cship.usage_limits is DROPPED. cship fetches it from Anthropic over OAuth
+#      rather than from stdin, so it reports your Anthropic subscription's 5h/7d
+#      windows and credit balance, none of which apply when every request goes to
+#      DeepSeek. It cannot be corrected, only removed. ds4-statusline.py appends
+#      the real DeepSeek figures instead.
+#   2. $cship.cost is absent. cship formats cost to 2 decimals with no way to
+#      express "<$0.01", so a whole DeepSeek session renders as "$0.00". The
+#      wrapper renders cost itself, reusing the thresholds below.
+[cship]
+lines = [
+  "$starship_prompt",
+  " $cship.context_window.current_usage_input_tokens",
+  " $cship.model $cship.context_bar",
+]
+
+[cship.model]
+symbol = " "
+style  = "bold fg:#7aa2f7"
+
+[cship.context_bar]
+symbol             = " "
+format             = "[$symbol$value]($style)"
+width              = 10
+style              = "fg:#7dcfff"
+warn_threshold     = 40.0
+warn_style         = "fg:#e0af68"
+critical_threshold = 70.0
+critical_style     = "bold fg:#f7768e"
+
+# Read by ds4-statusline.py, which renders the cost segment itself. Thresholds are
+# rescaled from the Anthropic defaults: $2/$5 would never fire on DeepSeek, where a
+# long session runs cents.
+[cship.cost]
+symbol             = "💰 "
+style              = "fg:#a9b1d6"
+warn_threshold     = 0.25
+warn_style         = "fg:#e0af68"
+critical_threshold = 1.0
+critical_style     = "bold fg:#f7768e"
