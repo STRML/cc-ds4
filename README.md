@@ -171,26 +171,45 @@ per-tier effort proxy — the differences are the point:
 Like the OpenRouter profile it needs the effort proxy running (on `:31502`); the
 launcher starts it on demand.
 
-## Neither DeepSeek profile can see images
+## DeepSeek V4 is text-only — images are transcribed, not seen
 
-Verified by sending a real PNG, not by reading capability metadata. An image with the
-words "PURPLE 7391 / ZEBRA MARMALADE" plus a prompt asking for a transcription:
+DeepSeek V4 cannot see images. Verified by sending a real PNG, not by reading
+capability metadata: an image with the words "PURPLE 7391 / ZEBRA MARMALADE"
+plus a prompt asking for a transcription returned `NO IMAGE` on both DeepSeek
+direct models, and a `404 No endpoints found that support image input` on
+OpenRouter. No `deepseek*` model on any provider accepts image input.
 
-| endpoint | model | result |
-|---|---|---|
-| DeepSeek direct | `deepseek-v4-flash[1m]` | replied `NO IMAGE` |
-| DeepSeek direct | `deepseek-v4-pro[1m]` | replied `NO IMAGE` |
-| OpenRouter | `deepseek-v4-flash-0731` | HTTP 404, `No endpoints found that support image input` |
+The proxy turns that into something usable. When a request carries an image
+block, the proxy hands it to a local `claude -p --model haiku` child on your
+Anthropic profile (subscription credits, no new credential), gets a text
+description, and forwards the description to DeepSeek instead of the pixels.
+Descriptions are cached by content hash, so a repeated image (or the same
+screenshot in both a paste and a tool result) is described once.
 
-DeepSeek V4 is text-only, and no `deepseek*` model on OpenRouter accepts image input.
+**The description is a lossy proxy, not the image.** DeepSeek never receives the
+pixels — it reasons over a text description, so charts, UI layouts, and
+transcripts degrade. For pixel-faithful vision keep a vision-native profile
+(Kimi K3, Anthropic) for those turns.
 
-> [!CAUTION]
-> The direct endpoint drops image blocks **without any error**. The model then answers
-> from your surrounding text as though the image were absent, so a screenshot it never
-> received produces a confident wrong answer rather than a refusal.
+**It does not clear an already-poisoned transcript.** The rewrite happens per
+request; a session that already failed on an image keeps the image in its own
+history and will keep rewriting it. `/compact` or `/clear` clears a stuck
+session. (Before this feature, an image in the transcript made every later turn
+404 or silently drop — the image is what broke it.)
 
-Keep a vision-capable profile for those turns. On OpenRouter this at least fails
-loudly with a 404; on the direct endpoint it does not fail at all.
+Two knobs and two facts:
+
+- `DS4_VISION=0` restores the old pass-through (image blocks forwarded
+  unchanged — back to failing).
+- The image leaves the machine: it is sent to Anthropic through your `~/.claude`
+  profile for transcription. `vision-cache/` under the profile dir holds the
+  descriptions, keyed by content hash.
+- The transcription is untrusted data: an image can contain instructions. Treat
+  a description as evidence, not a directive.
+- The proxy's loopback listener is not authenticated, and the child loads your
+  real Anthropic profile — so any local process could in principle spend your
+  Anthropic quota via the vision path. This matches the pre-existing trust
+  model of the proxy.
 
 ## Thinking mode is on by default, and it eats the small calls
 
@@ -309,6 +328,8 @@ src/
   commands/
     ds4-effort.md       /ds4-effort slash command; the write side of the
                         per-profile effort override
+  vision.py             image blocks -> text via a local `claude -p --model haiku`
+                        child, content-hash cached, fail-open
   ds4-proxy-kickstart.sh   SessionStart hook that starts the proxy (see below)
   statusline/
     common.py           transcript accounting and cost maths, shared
@@ -316,7 +337,7 @@ src/
     openrouter.py       rates and spend from the proxy
     nous.py             rates from the proxy; no credits/balance segments
 config/             cship configs with the Anthropic-only segments removed
-tests/              80 tests over the money maths and transcript parsing
+tests/              tests over the money maths and transcript parsing
 install.sh          point an existing profile at the corrected status line
 ```
 

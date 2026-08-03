@@ -614,9 +614,11 @@ Tell them, concretely:
   say that an already-open terminal will not have picked it up yet.
 - That zero data retention is on by default, what it means (requests only reach
   endpoints contractually bound not to retain them), and that `DS4_ZDR=0` disables it.
-- That the model is text-only, so screenshots and diagrams will not work. On the
-  OpenRouter path this fails loudly with a 404; on DeepSeek direct the image is
-  dropped silently and the model answers as if it were never sent.
+- That the model is text-only, so images are transcribed to text by the proxy
+  (a local `claude -p --model haiku` on the Anthropic profile, cached by content
+  hash) before DeepSeek sees them. The description is a lossy proxy, not the
+  pixels. `DS4_VISION=0` restores the old behavior (image blocks forwarded
+  unchanged — 404 or silently dropped).
 - Where the key lives (`~/.claude-or-ds4/settings.json`, `env` block), that the file is
   chmod 600, and that nothing works until the placeholder is replaced if it's still
   there.

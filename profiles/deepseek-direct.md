@@ -10,9 +10,11 @@ agent with shell access) on the machine you want set up. It requires macOS or Li
 
 You are setting up an isolated Claude Code profile that runs **DeepSeek V4** against
 DeepSeek's own Anthropic-compatible endpoint, launched with a dedicated `claude-ds4`
-command. One small local proxy sits in the path, for one reason given in step 5; there
-is no gateway and no format translation. The user's normal `claude` command must keep
-working against Anthropic, completely untouched. Follow these instructions exactly.
+command. One small local proxy sits in the path: it disables thinking on small calls
+and transcribes image blocks to text before DeepSeek sees them (the model is
+text-only). There is no gateway and no format translation for text. The user's normal
+`claude` command must keep working against Anthropic, completely untouched. Follow
+these instructions exactly.
 Where a step says ASK, stop and ask the user.
 
 ## Non-negotiable safety rules
@@ -83,9 +85,14 @@ because several of these facts contradict what you would reasonably assume.
 - `reasoning_effort` (the OpenRouter spelling) is **silently ignored**. So are
   unknown parameter names generally. Do not rely on an absent error meaning success.
 - Also ignored: `anthropic-beta`, `anthropic-version`, `container`, `mcp_servers`,
-  `cache_control`, `top_k`, `disable_parallel_tool_use`, and image, document, and
+  `cache_control`, `top_k`, `disable_parallel_tool_use`, and document and
   redacted-thinking content blocks. `thinking` is supported but `budget_tokens` is
   ignored.
+- **Image blocks are transcribed, not passed through.** The endpoint drops an
+  image block without error. The proxy intercepts it first, sends it to a local
+  `claude -p --model haiku` on the Anthropic profile for a text description, and
+  forwards that (cached by content hash). `DS4_VISION=0` restores the old
+  silent-drop behavior.
 - **Thinking mode is on by default and it breaks Claude Code's small calls.** This is
   why this profile needs a proxy. Claude Code sends
   `thinking: {"type":"adaptive","display":"omitted"}`; DeepSeek does not implement
