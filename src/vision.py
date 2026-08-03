@@ -211,3 +211,112 @@ def cache_put(cache_dir, key, text):
                 pass
     except OSError:
         pass
+
+
+PLACEHOLDER = "[Image omitted: no usable description was available.]"
+
+
+def rewrite_images(payload, cache_dir):
+    """Swap image blocks for transcriptions in place. Returns (total, fresh).
+
+    Recurse into tool_result.content — that is where Claude Code puts
+    Read/screenshot/MCP images, and an image left nested there is silently
+    DROPPED upstream (a 200 with the evidence removed). A tool_result whose
+    content is a plain string falls through the list guard untouched. A
+    messages entry that is not a dict is skipped, matching proxy.rewrite.
+    """
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return 0, 0   # a non-list messages value must not crash the walker
+    total = fresh = 0
+    budget = [MAX_IMAGES_PER_REQUEST]
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        mt, mf = _rewrite_blocks(msg.get("content"), cache_dir, budget)
+        total += mt
+        fresh += mf
+    return total, fresh
+
+
+def _rewrite_blocks(content, cache_dir, budget=None):
+    """Return (total, fresh). Walk serially — a single request is bounded by
+    MAX_IMAGES_PER_REQUEST so a huge transcript can't hold the request for
+    minutes (each child can take up to 120s). Images beyond the budget are
+    placeholdered without spawning a child."""
+    if budget is None:
+        budget = [MAX_IMAGES_PER_REQUEST]
+    if not isinstance(content, list):
+        return 0, 0
+    total = fresh = 0
+    for i, block in enumerate(content):
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "image":
+            total += 1
+            if budget[0] <= 0:
+                content[i] = {"type": "text", "text": PLACEHOLDER}
+                continue
+            budget[0] -= 1
+            content[i], got = _swap_image(block, cache_dir)
+            fresh += got
+        elif kind == "tool_result":
+            st, sf = _rewrite_blocks(block.get("content"), cache_dir, budget)
+            total += st
+            fresh += sf
+    return total, fresh
+
+
+def _swap_image(block, cache_dir):
+    """Return (replacement_block, fresh). Never throws; fail-open. Every image
+    — including a malformed one — becomes a text block (description or
+    placeholder), so nothing image-shaped reaches the text-only upstream."""
+    try:
+        src = block.get("source")
+        if not isinstance(src, dict) or src.get("type") != "base64":
+            return {"type": "text", "text": PLACEHOLDER}, 0   # URL sources unsupported
+        data = src.get("data")
+        media_type = src.get("media_type")
+        if not isinstance(data, str) or not data or not isinstance(media_type, str) or not media_type:
+            return {"type": "text", "text": PLACEHOLDER}, 0   # missing/invalid metadata is malformed
+        import base64
+        try:
+            image_bytes = base64.b64decode(data, validate=True)
+        except Exception:
+            return {"type": "text", "text": PLACEHOLDER}, 0
+        if not image_bytes:               # strict decode yielded nothing
+            return {"type": "text", "text": PLACEHOLDER}, 0
+        text, fresh = transcribe(image_bytes, media_type, cache_dir)
+        if text is None:
+            text = PLACEHOLDER
+            fresh = 0
+        return {"type": "text", "text": f"[image transcribed by {VISION_MODEL}]\n{text}"}, fresh
+    except Exception:
+        return {"type": "text", "text": PLACEHOLDER}, 0
+
+
+def placeholder_remaining(payload):
+    """Replace any image block still present with the fail-open placeholder.
+    Called on the exception path so the upstream never receives an image block,
+    even if the describer walk throws mid-request. Guards a non-list messages
+    value exactly like rewrite_images."""
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        _scrub_blocks(msg.get("content"))
+
+
+def _scrub_blocks(content):
+    if not isinstance(content, list):
+        return
+    for i, block in enumerate(content):
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "image":
+            content[i] = {"type": "text", "text": PLACEHOLDER}
+        elif block.get("type") == "tool_result":
+            _scrub_blocks(block.get("content"))

@@ -84,6 +84,133 @@ class TranscribeTest(unittest.TestCase):
         self.assertEqual(mrun.call_args.kwargs["stdin"], subprocess.DEVNULL)
 
 
+class RewriteImagesTest(unittest.TestCase):
+    def _payload(self):
+        return {"messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}},
+        ]}]}
+
+    def _mock_bin(self):
+        return mock.patch.object(v, "CLAUDE_BIN", "/fake/claude")
+
+    def test_swaps_top_level_image_for_text(self):
+        with self._mock_bin(), mock.patch("subprocess.run") as mrun:
+            mrun.return_value.returncode = 0
+            mrun.return_value.stdout = json_result("a house")
+            p = self._payload()
+            total, fresh = v.rewrite_images(p, tempfile.mkdtemp())
+        self.assertEqual((total, fresh), (1, 1))
+        block = p["messages"][0]["content"][0]
+        self.assertEqual(block["type"], "text")
+        self.assertIn("a house", block["text"])
+
+    def test_recurses_into_tool_result(self):
+        # Sean's hard requirement: images nested in tool_result.content.
+        with self._mock_bin(), mock.patch("subprocess.run") as mrun:
+            mrun.return_value.returncode = 0
+            mrun.return_value.stdout = json_result("read image")
+            p = {"messages": [{"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1",
+                 "content": [{"type": "image", "source": {"type": "base64",
+                                 "media_type": "image/png", "data": "aGk="}}]}]}]}
+            total, fresh = v.rewrite_images(p, tempfile.mkdtemp())
+        self.assertEqual((total, fresh), (1, 1))
+        self.assertEqual(p["messages"][0]["content"][0]["content"][0]["type"], "text")
+
+    def test_string_tool_result_is_untouched(self):
+        p = {"messages": [{"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "plain text"}]}]}
+        total, fresh = v.rewrite_images(p, tempfile.mkdtemp())
+        self.assertEqual((total, fresh), (0, 0))
+        self.assertEqual(p["messages"][0]["content"][0]["content"], "plain text")
+
+    def test_cache_hit_does_not_re_describe(self):
+        cd = tempfile.mkdtemp()
+        with self._mock_bin(), mock.patch("subprocess.run") as mrun:
+            mrun.return_value.returncode = 0
+            mrun.return_value.stdout = json_result("a house")
+            v.rewrite_images(self._payload(), cd)      # miss -> describe
+        with self._mock_bin(), mock.patch("subprocess.run") as mrun:
+            v.rewrite_images(self._payload(), cd)      # hit -> no describe
+        self.assertFalse(mrun.called)
+
+    def test_fail_open_placeholder_on_error(self):
+        with self._mock_bin(), mock.patch("subprocess.run") as mrun:
+            mrun.return_value.returncode = 1
+            mrun.return_value.stdout = ""
+            p = self._payload()
+            total, fresh = v.rewrite_images(p, tempfile.mkdtemp())
+        self.assertEqual((total, fresh), (1, 0))
+        block = p["messages"][0]["content"][0]
+        self.assertEqual(block["type"], "text")
+        self.assertIn("no usable description", block["text"])
+
+    def test_malformed_image_block_becomes_placeholder(self):
+        # A malformed image left in the request is NOT fail-open for a text-only
+        # upstream — it becomes the placeholder and counts as handled.
+        p = {"messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png"}},  # no data
+        ]}]}
+        with self._mock_bin(), mock.patch("subprocess.run") as mrun:
+            total, fresh = v.rewrite_images(p, tempfile.mkdtemp())
+        self.assertEqual((total, fresh), (1, 0))
+        self.assertFalse(mrun.called)
+        self.assertIn("no usable description", p["messages"][0]["content"][0]["text"])
+
+    def test_non_dict_message_is_skipped(self):
+        # Mirrors proxy.rewrite's existing guard (test_proxy_edge.py:87).
+        p = {"messages": [
+            "bogus",
+            {"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64",
+                 "media_type": "image/png", "data": "aGk="}}]},
+        ]}
+        with self._mock_bin(), mock.patch("subprocess.run") as mrun:
+            mrun.return_value.returncode = 0
+            mrun.return_value.stdout = json_result("a house")
+            total, fresh = v.rewrite_images(p, tempfile.mkdtemp())
+        self.assertEqual((total, fresh), (1, 1))
+        self.assertEqual(p["messages"][0], "bogus")
+        self.assertEqual(p["messages"][1]["content"][0]["type"], "text")
+
+    def test_CLAUDECODE_inherited_does_not_break_child(self):
+        # The nested-session guard must scrub CLAUDECODE from the child env.
+        old = os.environ.get("CLAUDECODE")
+        os.environ["CLAUDECODE"] = "1"
+        try:
+            with self._mock_bin(), mock.patch("subprocess.run") as mrun:
+                mrun.return_value.returncode = 0
+                mrun.return_value.stdout = json_result("a house")
+                v.rewrite_images(self._payload(), tempfile.mkdtemp())
+            env = mrun.call_args.kwargs.get("env", {})
+            self.assertNotIn("CLAUDECODE", env)
+            self.assertNotIn("CLAUDECODE", str(env))
+        finally:
+            if old is None:
+                os.environ.pop("CLAUDECODE", None)
+            else:
+                os.environ["CLAUDECODE"] = old
+
+    def test_missing_media_type_is_placeholder_not_png(self):
+        # A JPEG payload with valid base64 but no media_type is malformed.
+        p = {"messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "data": "aGk="}}]}]}  # no media_type
+        with self._mock_bin(), mock.patch("subprocess.run") as mrun:
+            total, fresh = v.rewrite_images(p, tempfile.mkdtemp())
+        self.assertEqual((total, fresh), (1, 0))
+        self.assertFalse(mrun.called)                    # no child invoked
+        self.assertIn("no usable description", p["messages"][0]["content"][0]["text"])
+
+    def test_url_image_source_is_placeholder(self):
+        # URL sources are unsupported — they become the placeholder.
+        p = {"messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "url", "url": "https://x/i.png"}}]}]}
+        with self._mock_bin(), mock.patch("subprocess.run") as mrun:
+            total, fresh = v.rewrite_images(p, tempfile.mkdtemp())
+        self.assertEqual((total, fresh), (1, 0))
+        self.assertFalse(mrun.called)
+
+
 def json_result(text):
     return json.dumps({"result": text, "session_id": "s1", "is_error": False})
 
