@@ -267,6 +267,11 @@ class Statusline:
             out = self.render(data)
         except Exception:
             return
+        # A failing cship returns nothing (None). The bar fails open: print a
+        # blank line and exit 0, never crash.
+        if not out:
+            sys.stdout.write("\n")
+            return
         try:
             out = out.rstrip("\n") + self.tail_segment(cost, account)
         except Exception:
