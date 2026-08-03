@@ -14,7 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from statusline.common import Statusline, base_model, harvest_usage, money  # noqa: E402
+from statusline.common import Statusline, base_model, effort_override, harvest_usage, money  # noqa: E402
 from statusline.direct import RATES, DirectStatusline, week_spend  # noqa: E402
 from statusline.openrouter import FALLBACK_RATES, OpenRouterStatusline  # noqa: E402
 from statusline.nous import FALLBACK_RATES as NOUS_FALLBACK, NousStatusline  # noqa: E402
@@ -55,6 +55,21 @@ class TestBaseModel(unittest.TestCase):
     def test_handles_missing(self):
         self.assertEqual(base_model(None), "")
         self.assertEqual(base_model(""), "")
+
+
+class TestEffortOverride(unittest.TestCase):
+    def test_reads_valid_override(self):
+        with tempfile.TemporaryDirectory() as profile:
+            with open(os.path.join(profile, "effort-override"), "w") as fh:
+                fh.write("low\n")
+            self.assertEqual(effort_override(profile), "low")
+
+    def test_missing_or_invalid_override_is_ignored(self):
+        with tempfile.TemporaryDirectory() as profile:
+            self.assertIsNone(effort_override(profile))
+            with open(os.path.join(profile, "effort-override"), "w") as fh:
+                fh.write("bogus\n")
+            self.assertIsNone(effort_override(profile))
 
 
 class TestPublishedRates(unittest.TestCase):
@@ -280,6 +295,16 @@ class TestLabels(unittest.TestCase):
         sl.label(p, {})
         self.assertEqual(p["model"]["display_name"], "or-deepseek-v4-flash-0731 xhigh")
 
+    def test_openrouter_shows_effective_effort_override(self):
+        with tempfile.TemporaryDirectory() as profile:
+            with open(os.path.join(profile, "effort-override"), "w") as fh:
+                fh.write("low\n")
+            sl = OpenRouterStatusline(profile)
+            sl._info = {"model": "deepseek/deepseek-v4-flash-0731"}
+            p = {"model": {"id": "ds4-xhigh"}}
+            sl.label(p, {})
+            self.assertEqual(p["model"]["display_name"], "or-deepseek-v4-flash-0731 xhigh->low")
+
 
 class TestNousStatusline(unittest.TestCase):
     def test_label_carries_the_backend_prefix(self):
@@ -290,6 +315,16 @@ class TestNousStatusline(unittest.TestCase):
         p = {"model": {"id": "ds4-xhigh"}}
         sl.label(p, {})
         self.assertEqual(p["model"]["display_name"], "nous-deepseek-v4-flash-0731 xhigh")
+
+    def test_label_shows_effective_effort_override(self):
+        with tempfile.TemporaryDirectory() as profile:
+            with open(os.path.join(profile, "effort-override"), "w") as fh:
+                fh.write("low\n")
+            sl = NousStatusline(profile)
+            sl._info = {"model": "deepseek/deepseek-v4-flash-0731"}
+            p = {"model": {"id": "ds4-xhigh"}}
+            sl.label(p, {})
+            self.assertEqual(p["model"]["display_name"], "nous-deepseek-v4-flash-0731 xhigh->low")
 
     def test_every_profile_tags_its_backend(self):
         """A missing prefix on one bar makes two profiles indistinguishable."""
