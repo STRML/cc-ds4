@@ -224,5 +224,117 @@ class VisionRoutingTest(unittest.TestCase):
         self.assertEqual(sent["messages"][0]["content"][0]["type"], "image")
 
 
+class ClassifierRelayTest(unittest.TestCase):
+    """The auto-mode permission classifier forwards to Anthropic, not ds4.
+
+    The classifier is ds4-high + small max_tokens + thinking off. It is
+    already an Anthropic-shaped request; the relay points it at the
+    subscription with the DS4_CLASSIFIER_TOKEN bearer token. Any failure
+    fails open to the ds4 relay.
+    """
+
+    def _cfg(self, fake, classifier="anthropic"):
+        # The ds4 relay forwards to cfg["upstream"]; point it at the fake so
+        # the ds4 path stays offline too.
+        return dict(proxy.PROFILES["nous"], classifier=classifier,
+                    upstream=fake.url)
+
+    def _classifier_payload(self, **kw):
+        p = {"model": "ds4-high", "max_tokens": 2112,
+             "thinking": {"type": "disabled"},
+             "messages": [{"role": "user", "content": "hi"}]}
+        p.update(kw)
+        return p
+
+    def test_classifier_goes_to_anthropic_with_token(self):
+        from unittest import mock
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake.close)
+        srv = make_server(self._cfg(fake), fake)
+        self.addCleanup(srv.server_close)
+        with mock.patch.object(proxy, "CLASSIFIER_ROUTE", "anthropic"), \
+             mock.patch.object(proxy, "CLASSIFIER_MODEL", "claude-haiku-4-5"), \
+             mock.patch.object(proxy._classifier, "CLASSIFIER_UPSTREAM",
+                               fake.url + "/v1/messages"), \
+             mock.patch.object(proxy._classifier, "classifier_token",
+                               return_value="sk-ant-oat01-test"):
+            status, body = post(srv, "/v1/messages", self._classifier_payload())
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"ok": True})
+        req = fake.requests[0]
+        # the classifier hit the anthropic upstream (the FakeUpstream)
+        sent = json.loads(req["body"])
+        self.assertEqual(sent["model"], "claude-haiku-4-5")
+        self.assertNotIn("reasoning_effort", sent)
+        self.assertEqual(req["headers"].get("Authorization"), "Bearer sk-ant-oat01-test")
+        self.assertEqual(req["headers"].get("Anthropic-Version"), "2023-06-01")
+
+    def test_classifier_fails_open_to_ds4_without_token(self):
+        from unittest import mock
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake.close)
+        # ds4 upstream is the nous URL; the classifier upstream is separate.
+        srv = make_server(self._cfg(fake), fake)
+        self.addCleanup(srv.server_close)
+        with mock.patch.object(proxy, "CLASSIFIER_ROUTE", "anthropic"), \
+             mock.patch.object(proxy._classifier, "classifier_token", return_value=None):
+            status, _ = post(srv, "/v1/messages", self._classifier_payload())
+        self.assertEqual(status, 200)
+        # the request went to the ds4 upstream (the fake) — the sentinel was
+        # mapped to the profile's upstream model, so it is NOT the anthropic model
+        sent = json.loads(fake.requests[0]["body"])
+        self.assertEqual(sent["model"], proxy.PROFILES["nous"]["model"])
+        self.assertNotEqual(sent["model"], "claude-haiku-4-5")
+        self.assertEqual(fake.requests[0]["headers"].get("Authorization"), None)
+
+    def test_classifier_opt_out_stays_on_ds4(self):
+        from unittest import mock
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake.close)
+        srv = make_server(self._cfg(fake, classifier="ds4"), fake)
+        self.addCleanup(srv.server_close)
+        with mock.patch.object(proxy, "CLASSIFIER_ROUTE", "ds4"):
+            post(srv, "/v1/messages", self._classifier_payload())
+        sent = json.loads(fake.requests[0]["body"])
+        self.assertEqual(sent["model"], proxy.PROFILES["nous"]["model"])
+
+    def test_subagent_request_never_goes_to_anthropic(self):
+        from unittest import mock
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake.close)
+        srv = make_server(self._cfg(fake), fake)
+        self.addCleanup(srv.server_close)
+        with mock.patch.object(proxy, "CLASSIFIER_ROUTE", "anthropic"), \
+             mock.patch.object(proxy._classifier, "classifier_token",
+                               return_value="tok"):
+            post(srv, "/v1/messages",
+                 self._classifier_payload(max_tokens=32000,
+                                          thinking={"type": "adaptive"}))
+        sent = json.loads(fake.requests[0]["body"])
+        # subagent stays on ds4 — never reached the anthropic upstream
+        self.assertEqual(sent["model"], proxy.PROFILES["nous"]["model"])
+        self.assertEqual(fake.requests[0]["headers"].get("Authorization"), None)
+
+    def test_classifier_400_is_forwarded_not_failed_open(self):
+        from unittest import mock
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (400, {}, b'{"error":"bad"}'))})
+        self.addCleanup(fake.close)
+        srv = make_server(self._cfg(fake), fake)
+        self.addCleanup(srv.server_close)
+        with mock.patch.object(proxy, "CLASSIFIER_ROUTE", "anthropic"), \
+             mock.patch.object(proxy._classifier, "CLASSIFIER_UPSTREAM",
+                               fake.url + "/v1/messages"), \
+             mock.patch.object(proxy._classifier, "classifier_token",
+                               return_value="tok"):
+            status, body = post(srv, "/v1/messages", self._classifier_payload())
+        self.assertEqual(status, 400)
+        self.assertIn("bad", body)
+
+
 if __name__ == "__main__":
     unittest.main()
