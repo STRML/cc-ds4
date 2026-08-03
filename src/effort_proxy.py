@@ -13,6 +13,10 @@ PORT = int(os.environ.get("DS4_PROXY_PORT", "8799"))
 VERBOSE = os.environ.get("DS4_VERBOSE") == "1" or os.environ.get("DS4_DEBUG") == "1"
 # Route only to zero-data-retention endpoints. Set DS4_ZDR=0 to turn it off.
 ZDR = os.environ.get("DS4_ZDR", "1") == "1"
+# Cloudflare 403s the stdlib's default urllib User-Agent ("error code: 1010"),
+# which hits Nous Portal and intermittently OpenRouter. Send a browser/curl-style
+# UA on every outbound request; a curl UA is proven to pass. DS4_UA overrides.
+UA = os.environ.get("DS4_UA", "curl/8.4.0")
 
 # ZDR endpoints whose context is smaller than the 1M this profile advertises.
 # settings.json tells Claude Code the window is 1048576; if a request lands here
@@ -58,23 +62,34 @@ _lock = threading.Lock()
 def _get_json(path, timeout=6):
     req = urllib.request.Request(UPSTREAM.rstrip("/") + path)
     req.add_header("authorization", "Bearer " + API_KEY)
+    req.add_header("user-agent", UA)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
 
 
 def pricing():
-    """Per-token rates. /api/v1/models reports the CHEAPEST endpoint, which under
-    ZDR routing is where most traffic actually lands, so it is the right estimate
-    here — but it is an estimate, not a bill."""
+    """Per-token rates for REAL_MODEL, cached.
+
+    OpenRouter serves per-deployment data under /v1/models/{id}/endpoints; we take
+    the CHEAPEST endpoint, which under ZDR routing is where most traffic lands, so
+    it is the right estimate there — an estimate, not a bill. Nous Portal has no
+    per-endpoint sub-resource (404) and instead publishes the price directly on
+    each model in /v1/models (already the 90%-off discounted rate). Both expose the
+    same prompt/completion/input_cache_read keys, so we try the former and fall
+    back to the latter."""
     with _lock:
         if _cache["pricing"]:
             return _cache["pricing"]
     try:
         d = _get_json(f"/v1/models/{REAL_MODEL}/endpoints")["data"]
         p = min(d["endpoints"], key=lambda e: float(e["pricing"]["prompt"]))["pricing"]
-        out = {k: float(p[k]) for k in ("prompt", "completion", "input_cache_read") if k in p}
     except Exception:
-        return None
+        try:
+            d = _get_json("/v1/models")["data"]
+            p = next(m["pricing"] for m in d if m.get("id") == REAL_MODEL)
+        except Exception:
+            return None
+    out = {k: float(p[k]) for k in ("prompt", "completion", "input_cache_read") if k in p}
     with _lock:
         _cache["pricing"] = out
     return out
@@ -225,6 +240,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         for k, v in self.headers.items():
             if k.lower() not in ("host", "content-length", "accept-encoding"):
                 req.add_header(k, v)
+        req.add_header("user-agent", UA)   # Cloudflare-safe; overrides the client's
         req.add_header("content-length", str(len(body)))
 
         try:
