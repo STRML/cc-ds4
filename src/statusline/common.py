@@ -29,6 +29,7 @@ RESET = "\x1b[0m"
 WARN_AT = 0.25
 CRIT_AT = 1.00
 WEEK = 7 * 86400
+EFFORT_LEVELS = ("max", "xhigh", "high", "medium", "low", "minimal", "none")
 
 # Claude Code's usage field names -> our rate keys.
 USAGE_FIELDS = {
@@ -46,6 +47,16 @@ def base_model(name):
     accepts and strips it. It is not part of the model's identity for pricing.
     """
     return re.sub(r"\[[^\]]*\]$", "", name or "").strip()
+
+
+def effort_override(profile):
+    """Return the proxy's effective per-profile effort override, if valid."""
+    try:
+        with open(os.path.join(os.path.expanduser(profile), "effort-override")) as fh:
+            value = fh.read().strip()
+        return value if value in EFFORT_LEVELS else None
+    except OSError:
+        return None
 
 
 def money(v):

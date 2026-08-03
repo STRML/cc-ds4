@@ -18,7 +18,7 @@ import urllib.request
 # realpath, not abspath: install.sh symlinks this into the profile directory and
 # abspath would resolve the bootstrap against the profile instead of the checkout.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-from statusline.common import Statusline, selftest_payload  # noqa: E402
+from statusline.common import Statusline, effort_override, selftest_payload  # noqa: E402
 
 # deepseek/deepseek-v4-flash-0731 discounted (90%-off) rates, USD per token. Only a
 # fallback — the proxy serves live figures pulled from Nous's /v1/models.
@@ -66,6 +66,9 @@ class NousStatusline(Statusline):
             return
         sentinel = m.get("id") or ""
         tier = sentinel[4:] if sentinel.startswith("ds4-") else ""
+        override = effort_override(self.profile)
+        if override and tier and override != tier:
+            tier = f"{tier}->{override}"
         real = self.info().get("model")
         if real:
             m["display_name"] = f"{self.prefix}{real.split('/')[-1]} {tier}".strip()
