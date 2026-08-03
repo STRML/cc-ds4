@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""One proxy for every DeepSeek V4 profile.
+
+Each profile gets its own listener on its own port, so `settings.json` on each
+side is unchanged and unaware this is shared. What varies between them is a row
+in PROFILES, not a separate script.
+
+Why any proxy exists at all:
+
+  * V4 is in thinking mode by default and Claude Code cannot turn it off. It
+    sends thinking={"type":"adaptive"}, which no provider serving this model
+    implements. A main-loop request at max_tokens=32000 is unaffected; a small
+    utility call is not, because the thinking block consumes the whole budget
+    before the tool call is emitted. Measured on the direct endpoint at
+    max_tokens=512 with a forced tool decision: 3 of 5 truncated, two of those
+    with no tool_use block at all. The permission classifier behind
+    `defaultMode: auto` is one of these calls, so the symptom is intermittent
+    classifier errors. thinking={"type":"disabled"} clears it, and every
+    endpoint here honours that spelling even though none honours its own.
+  * Claude Code exposes model tiers but no per-tier effort knob, so the
+    OpenRouter and Nous profiles map a `ds4-*` sentinel model name onto
+    reasoning_effort.
+  * OpenRouter needs a per-request zero-data-retention block.
+  * The status line needs real pricing, which /__spend serves.
+
+Run it with no arguments. It serves every profile in PROFILES whose directory
+exists, and exits once none of them is in use.
+"""
+import http.server, json, os, subprocess, threading, time, urllib.request, urllib.error
+
+HOME = os.path.expanduser("~")
+VERBOSE = os.environ.get("DS4_VERBOSE") == "1" or os.environ.get("DS4_DEBUG") == "1"
+
+# Below this many max_tokens, turn thinking off. Claude Code's utility calls
+# arrive with a few hundred tokens of budget; the main loop arrives at 32000.
+# Nothing observed lands in between, so the exact value is not delicate.
+NOTHINK_BELOW = int(os.environ.get("DS4_NOTHINK_BELOW", "8192"))
+
+# Exit once no profile is in use for this long. 0 disables and runs forever.
+IDLE_EXIT = int(os.environ.get("DS4_IDLE_EXIT", "900"))
+
+# Cloudflare 403s the stdlib's default urllib User-Agent ("error code: 1010"),
+# which hits Nous Portal and intermittently OpenRouter. A curl UA is proven to
+# pass, and is harmless on the endpoints that never cared.
+UA = os.environ.get("DS4_UA", "curl/8.4.0")
+
+EFFORT = {"ds4-max": "max", "ds4-xhigh": "xhigh", "ds4-high": "high", "ds4-low": "low"}
+
+# ZDR endpoints whose context is smaller than the 1M the profile advertises. A
+# long session that routes here overflows the endpoint rather than the declared
+# window. Recheck /api/v1/models/{id}/endpoints -> context_length when the
+# provider list changes.
+LOW_CONTEXT = ["Io Net"]
+
+WEEK = 7 * 86400
+LEDGER_MIN_INTERVAL = 300      # don't sample spend more than once every 5 min
+CREDITS_TTL = 60               # /__spend is hit on every status line render
+
+PROFILES = {
+    "direct": {
+        "port": 31500,
+        "dir": f"{HOME}/.claude-ds4",
+        "upstream": "https://api.deepseek.com/anthropic",
+        # DeepSeek's own endpoint takes real model names and ignores
+        # reasoning_effort, so no sentinel rewriting here.
+        "model": None,
+        "zdr": False,
+        "spend": False,
+        "max_out": None,
+        # Only this endpoint requires an assistant tool_use message to replay its
+        # thinking block. Claude Code 2.x does replay it, so this is a guard
+        # against a path that drops it, not a fix for an observed failure.
+        "inject": True,
+    },
+    "openrouter": {
+        "port": 31501,
+        "dir": f"{HOME}/.claude-or-ds4",
+        "upstream": "https://openrouter.ai/api",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "zdr": True,
+        "spend": True,
+        # Smallest max_completion_tokens in the ZDR pool (DeepInfra, Io Net).
+        "max_out": 65536,
+        "inject": False,
+    },
+    "nous": {
+        "port": 31502,
+        "dir": f"{HOME}/.claude-nous",
+        "upstream": "https://inference-api.nousresearch.com",
+        "model": "deepseek/deepseek-v4-flash-0731",
+        # Nous 403s any provider block, zdr or otherwise.
+        "zdr": False,
+        "spend": True,
+        "max_out": 65536,
+        "inject": False,
+    },
+}
+
+DISABLED = {"type": "disabled"}
+PLACEHOLDER = {"type": "thinking", "thinking": "(elided)", "signature": "ds4-proxy"}
+
+_last_seen = time.time()
+_lock = threading.Lock()
+_cache = {}                    # (name, kind) -> cached value
+
+
+# ── request rewriting ────────────────────────────────────────────────────────
+
+def inject_missing_thinking(payload):
+    """Count of assistant tool_use messages given a placeholder thinking block.
+
+    DeepSeek 400s on a history where one is missing, and does not validate the
+    signature, so a placeholder is enough.
+    """
+    n = 0
+    for m in payload.get("messages") or []:
+        if m.get("role") != "assistant":
+            continue
+        blocks = m.get("content")
+        if not isinstance(blocks, list):
+            continue
+        kinds = {b.get("type") for b in blocks if isinstance(b, dict)}
+        if "tool_use" in kinds and "thinking" not in kinds:
+            blocks.insert(0, dict(PLACEHOLDER))
+            n += 1
+    return n
+
+
+def rewrite(payload, cfg):
+    """Edit payload in place for one profile. Returns a log line, or None."""
+    notes = []
+
+    if cfg["model"]:
+        tier = payload.get("model")
+        effort = EFFORT.get(tier)
+        if effort:
+            payload["model"] = cfg["model"]
+            payload["reasoning_effort"] = effort
+            notes.append(f"{tier} -> {cfg['model']} effort={effort}")
+
+    if cfg["zdr"]:
+        prov = payload.get("provider")
+        if not isinstance(prov, dict):
+            prov = {}
+        prov["zdr"] = True
+        prov["data_collection"] = "deny"
+        ignore = [p for p in prov.get("ignore", []) if p not in LOW_CONTEXT]
+        prov["ignore"] = ignore + LOW_CONTEXT
+        payload["provider"] = prov
+
+    want = payload.get("max_tokens")
+    if isinstance(want, int):
+        if cfg["max_out"] and want > cfg["max_out"]:
+            payload["max_tokens"] = cfg["max_out"]
+            notes.append(f"clamped max_tokens {want} -> {cfg['max_out']}")
+        elif want <= NOTHINK_BELOW:
+            payload["thinking"] = dict(DISABLED)
+            notes.append(f"max_tokens={want} -> thinking disabled")
+
+    # With thinking off the endpoint stops asking for the block, so only repair
+    # a history on requests that still have thinking on.
+    if cfg["inject"] and payload.get("thinking") != DISABLED:
+        n = inject_missing_thinking(payload)
+        if n:
+            notes.append(f"injected {n} missing thinking block(s)")
+
+    return ", ".join(notes) or None
+
+
+# ── spend reporting, for the status line ─────────────────────────────────────
+
+def api_key(cfg):
+    """Server-side key. A status line render carries no client credentials."""
+    k = os.environ.get("OPENROUTER_API_KEY")
+    if k:
+        return k
+    try:
+        with open(os.path.join(cfg["dir"], "settings.json")) as fh:
+            return json.load(fh)["env"].get("ANTHROPIC_AUTH_TOKEN") or ""
+    except Exception:
+        return ""
+
+
+def get_json(cfg, path, timeout=6):
+    req = urllib.request.Request(cfg["upstream"].rstrip("/") + path)
+    req.add_header("authorization", "Bearer " + api_key(cfg))
+    req.add_header("user-agent", UA)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def pricing(name, cfg):
+    """Per-token rates, cached forever.
+
+    OpenRouter serves per-deployment data under /v1/models/{id}/endpoints, and
+    the cheapest endpoint is where ZDR routing mostly lands, so it is the right
+    estimate there. Nous has no such sub-resource and publishes the price on the
+    model itself in /v1/models, already discounted. Same key names either way.
+    """
+    with _lock:
+        if _cache.get((name, "pricing")):
+            return _cache[(name, "pricing")]
+    try:
+        d = get_json(cfg, f"/v1/models/{cfg['model']}/endpoints")["data"]
+        p = min(d["endpoints"], key=lambda e: float(e["pricing"]["prompt"]))["pricing"]
+    except Exception:
+        try:
+            d = get_json(cfg, "/v1/models")["data"]
+            p = next(m["pricing"] for m in d if m.get("id") == cfg["model"])
+        except Exception:
+            return None
+    out = {k: float(p[k]) for k in ("prompt", "completion", "input_cache_read") if k in p}
+    with _lock:
+        _cache[(name, "pricing")] = out
+    return out
+
+
+def credits(name, cfg):
+    """(total_credits, total_usage), cached. Absent on providers without it."""
+    now = time.time()
+    with _lock:
+        entry = _cache.get((name, "credits"))
+    if entry and now - entry[0] < CREDITS_TTL:
+        return entry[1]
+    try:
+        d = get_json(cfg, "/v1/credits")["data"]
+        val = (float(d["total_credits"]), float(d["total_usage"]))
+    except Exception:
+        return None
+    with _lock:
+        _cache[(name, "credits")] = (now, val)
+    return val
+
+
+def ledger_append(cfg, usage, now):
+    """Sample lifetime usage so a rolling 7-day figure survives restarts."""
+    ledger = os.path.join(cfg["dir"], "spend-ledger.jsonl")
+    try:
+        last = 0.0
+        if os.path.exists(ledger):
+            with open(ledger, "rb") as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - 4096))
+                tail = fh.read().splitlines()
+            for raw in reversed(tail):
+                try:
+                    last = json.loads(raw)["t"]
+                    break
+                except Exception:
+                    continue
+        if now - last < LEDGER_MIN_INTERVAL:
+            return
+        with open(ledger, "a") as fh:
+            fh.write(json.dumps({"t": now, "usage": usage}) + "\n")
+    except OSError:
+        pass
+
+
+def week_spend(cfg, usage, now):
+    """(spend_over_7d, is_partial). Partial = ledger is younger than a week."""
+    try:
+        rows = []
+        with open(os.path.join(cfg["dir"], "spend-ledger.jsonl")) as fh:
+            for raw in fh:
+                try:
+                    r = json.loads(raw)
+                    rows.append((float(r["t"]), float(r["usage"])))
+                except Exception:
+                    continue
+    except OSError:
+        return None, True
+    if not rows:
+        return None, True
+    rows.sort()
+    base = [u for t, u in rows if t <= now - WEEK]
+    if base:
+        return max(0.0, usage - base[-1]), False
+    return max(0.0, usage - rows[0][1]), True
+
+
+def spend(name, cfg):
+    now = time.time()
+    out = {"model": cfg["model"], "zdr": cfg["zdr"]}
+    p = pricing(name, cfg)
+    if p:
+        out["pricing"] = p
+    c = credits(name, cfg)
+    if c:
+        total, usage = c
+        out["remaining"] = total - usage
+        out["usage"] = usage
+        ledger_append(cfg, usage, now)
+        wk, partial = week_spend(cfg, usage, now)
+        if wk is not None:
+            out["week"] = wk
+            out["week_partial"] = partial
+    return out
+
+
+# ── lifecycle ────────────────────────────────────────────────────────────────
+
+def sessions_live(cfg):
+    """True if any registered session PID is alive. Clears tokens that are not.
+
+    The directory is .ds4-sessions, never sessions: the latter is Claude Code's
+    own state directory and nothing here may reap a file it did not create.
+    """
+    d = os.path.join(cfg["dir"], ".ds4-sessions")
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return False
+    live = False
+    for n in names:
+        try:
+            pid = int(n)
+        except ValueError:
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            try:
+                os.unlink(os.path.join(d, n))
+            except OSError:
+                pass
+            continue
+        except OSError:
+            pass          # PermissionError and friends still mean it exists
+        live = True
+    return live
+
+
+def claude_running(cfg):
+    """True if a live claude process is using this profile.
+
+    The check that does not depend on the launcher: `ps -E` prints each
+    process's environment and Claude Code is started with CLAUDE_CONFIG_DIR set,
+    so a session is visible however it was launched. Session tokens stay as a
+    second signal because `ps -E` is macOS spelling. A substring match can only
+    be over-eager, which just means staying up slightly longer than needed.
+    """
+    try:
+        out = subprocess.run(["ps", "-E", "-ax", "-o", "command="],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             timeout=10).stdout.decode("utf8", "replace")
+    except Exception:
+        return False
+    return f"CLAUDE_CONFIG_DIR={cfg['dir']}" in out
+
+
+def anything_in_use(served):
+    return any(sessions_live(cfg) or claude_running(cfg) for cfg in served.values())
+
+
+def idle_watch(served):
+    # Poll no slower than half the timeout, so a short DS4_IDLE_EXIT is honoured
+    # promptly instead of being rounded up to the poll interval.
+    every = max(1, min(30, IDLE_EXIT // 2))
+    while IDLE_EXIT > 0:
+        time.sleep(every)
+        if time.time() - _last_seen < IDLE_EXIT or anything_in_use(served):
+            continue
+        print(f"no profile in use and idle for {IDLE_EXIT}s, exiting", flush=True)
+        os._exit(0)
+
+
+# ── serving ──────────────────────────────────────────────────────────────────
+
+def make_handler(name, cfg):
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def _json(self, status, obj):
+            msg = json.dumps(obj).encode()
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(msg)))
+            self.send_header("connection", "close")
+            self.end_headers()
+            self.wfile.write(msg)
+
+        def _touch(self):
+            global _last_seen
+            _last_seen = time.time()
+
+        def do_GET(self):
+            self._touch()
+            if self.path != "/__spend" or not cfg["spend"]:
+                self._json(404, {"error": {"message": "not found"}})
+                return
+            self._json(200, spend(name, cfg))
+
+        def do_POST(self):
+            self._touch()
+            body = self.rfile.read(int(self.headers.get("content-length", 0)))
+            try:
+                payload = json.loads(body)
+            except ValueError:
+                payload = None
+
+            if isinstance(payload, dict):
+                note = rewrite(payload, cfg)
+                body = json.dumps(payload).encode()
+                if VERBOSE and note:
+                    print(f"  [{name}] {note}", flush=True)
+
+            req = urllib.request.Request(
+                cfg["upstream"].rstrip("/") + self.path, data=body, method="POST")
+            for k, v in self.headers.items():
+                if k.lower() not in ("host", "content-length", "accept-encoding"):
+                    req.add_header(k, v)
+            req.add_header("user-agent", UA)   # Cloudflare-safe; overrides the client's
+            req.add_header("content-length", str(len(body)))
+
+            try:
+                up = urllib.request.urlopen(req)
+            except urllib.error.HTTPError as e:
+                up = e
+            except Exception as e:
+                msg = json.dumps(
+                    {"error": {"message": f"proxy upstream failure: {e}"}}).encode()
+                self.send_response(502)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(msg)))
+                self.send_header("connection", "close")
+                self.end_headers()
+                self.wfile.write(msg)
+                return
+
+            if VERBOSE and up.status != 200:
+                print(f"  [{name}] <- {up.status}", flush=True)
+
+            self.send_response(up.status)
+            for k, v in up.headers.items():
+                if k.lower() not in ("transfer-encoding", "content-encoding", "connection"):
+                    self.send_header(k, v)
+            self.send_header("connection", "close")
+            self.end_headers()
+            while True:
+                chunk = up.read(8192)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+            up.close()
+
+    return Handler
+
+
+def serve(name, cfg):
+    port = int(os.environ.get(f"DS4_PORT_{name.upper()}", cfg["port"]))
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), make_handler(name, cfg))
+    print(f"  {name:<11} :{port} -> {cfg['upstream']}", flush=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+
+def main():
+    # An absent profile directory means that profile is not installed here.
+    # Binding its port anyway would be a lie to anyone checking with nc.
+    served = {n: c for n, c in PROFILES.items() if os.path.isdir(c["dir"])}
+    if not served:
+        raise SystemExit("no profile directories found; nothing to serve")
+
+    print(f"ds4 proxy: no thinking at or below max_tokens={NOTHINK_BELOW}, "
+          f"idle exit {IDLE_EXIT}s", flush=True)
+    for name, cfg in served.items():
+        serve(name, cfg)
+
+    threading.Thread(target=idle_watch, args=(served,), daemon=True).start()
+    while True:
+        time.sleep(3600)
+
+
+if __name__ == "__main__":
+    main()

@@ -42,11 +42,11 @@ jobs:
       - name: each proxy binds its port and forwards
         run: |
           set -euo pipefail
-          for spec in "src/thinking_proxy.py 31500" "src/effort_proxy.py 31501"; do
-            set -- $spec
-            script=$1; port=$2
-            DS4_IDLE_EXIT=0 DS4_PROFILE=/tmp/no-such-profile python3 "$script" &
-            pid=$!
+          # One process serves every profile whose directory exists, so make one.
+          mkdir -p "$HOME/.claude-ds4" "$HOME/.claude-or-ds4" "$HOME/.claude-nous"
+          DS4_IDLE_EXIT=0 python3 src/proxy.py &
+          pid=$!
+          for port in 31500 31501 31502; do
             for _ in $(seq 40); do
               python3 -c "import socket,sys; sys.exit(socket.socket().connect_ex(('127.0.0.1',$port)))" && break
               sleep 0.25
@@ -55,9 +55,9 @@ jobs:
               -X POST "http://127.0.0.1:$port/v1/messages" \
               -H 'content-type: application/json' \
               -d '{"model":"ds4-low","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}' || true)
-            echo "$script -> HTTP $code"
+            echo "port $port -> HTTP $code"
             # Any status proves it bound, parsed the body, and reached upstream.
             # 000 means curl got no response at all, which is the real failure.
             test "$code" != "000"
-            kill $pid
           done
+          kill $pid

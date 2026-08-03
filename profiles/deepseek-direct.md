@@ -234,58 +234,50 @@ errors. `CLAUDE_CODE_EFFORT_LEVEL` accepts `low`, `medium`, `high`, `xhigh`; `ma
 normally session-only but persists when set through this variable, and it overrides
 the in-session `/effort` command.
 
-## Step 5 — The thinking proxy
+## Step 5 — The proxy
 
-V4 keeps thinking whatever Claude Code asks for, and that breaks every small call it
-makes. The endpoint-facts section above has the measurements. The short version: at
-`max_tokens=512`, 3 of 5 forced tool decisions came back truncated, and the permission
-classifier behind `defaultMode: auto` is exactly that shape. Sending
-`thinking: {"type":"disabled"}` on those calls fixes it. Nothing else needs to change,
-so the proxy is a pass-through that rewrites one field.
+Every profile here routes through one shared proxy, `src/proxy.py`. It listens on
+a separate port per profile (31500 for this one), so this profile's
+`settings.json` is unaware it is shared. What differs between profiles is a row in
+that file's `PROFILES` table, not a separate script.
 
-The proxy is `src/thinking_proxy.py` in this repo. Copy it verbatim to
-`~/.claude-ds4/ds4-thinking-proxy.py` rather than retyping it. If this machine has a
-checkout, `./install.sh --profile direct` puts it there as a symlink instead, so
-`git pull` updates it.
+What it does for this profile:
 
 | Concern | Behaviour |
 |---|---|
 | small calls | `max_tokens` at or below 8192 gets `thinking: {"type":"disabled"}`; `DS4_NOTHINK_BELOW` moves the line |
 | main loop | arrives at 32000, passed through untouched, thinking intact |
-| history repair | gives any assistant `tool_use` message a placeholder `thinking` block if it has none; `DS4_INJECT_THINKING=0` disables |
+| history repair | gives any assistant `tool_use` message a placeholder `thinking` block if it has none, which only this endpoint requires |
+| model names | passed through: DeepSeek takes real names and ignores `reasoning_effort` |
 | debugging | `DS4_DEBUG=1` logs each rewrite and any non-200 status |
 
-The history repair is a guard, not a fix for an observed failure. Claude Code 2.x does
-replay thinking blocks, verified on the wire. It is there because a path that ever
-drops one 400s the session outright, and the repair costs nothing: DeepSeek does not
-validate the signature.
-
-Make it executable and confirm it starts:
+`./install.sh --profile direct` is what installs it: it points `settings.json` at
+`http://127.0.0.1:31500`, and on macOS writes and loads a single launch agent,
+`com.strml.cc-ds4.proxy`, that runs it. Confirm it answers:
 
 ```bash
-chmod +x ~/.claude-ds4/ds4-thinking-proxy.py
-python3 ~/.claude-ds4/ds4-thinking-proxy.py &
+launchctl kickstart gui/$(id -u)/com.strml.cc-ds4.proxy
 sleep 1
 curl -s -o /dev/null -w "proxy responded: %{http_code}\n" -X POST \
   http://127.0.0.1:31500/v1/messages -H 'content-type: application/json' \
   -d '{"model":"deepseek-v4-flash","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
-A 401 here is expected and correct without a key in the header — it proves the proxy
+A 401 is expected and correct without a key in the header: it proves the proxy
 forwarded upstream.
 
-**Nothing works when the proxy is down.** Every request gets connection-refused, which
-looks exactly like a broken endpoint or a bad key. Check `nc -z 127.0.0.1 31500` before
-investigating anything else. Step 8 wires the launcher to start it automatically.
+**Nothing works when the proxy is down.** Every request gets connection-refused,
+which looks exactly like a bad endpoint or a bad key. Check `nc -z 127.0.0.1 31500`
+before investigating anything else, and read `~/.claude-ds4-proxy.log`.
 
-To confirm the rewrite reaches the wire rather than trusting the banner, send a small
-request with `DS4_DEBUG=1` set and read the log line:
+The proxy exits on its own once no profile is in use and nothing has come through
+for `DS4_IDLE_EXIT` seconds (default 900). It counts a profile as in use when a
+session token under `<profile>/.ds4-sessions` has a live PID, or when `ps` shows a
+`claude` process with that `CLAUDE_CONFIG_DIR`. Set `DS4_IDLE_EXIT=0` to disable
+that and run forever. Without a launcher there is nothing to start it again, so
+step 8 matters.
 
-```bash
-DS4_DEBUG=1 python3 ~/.claude-ds4/ds4-thinking-proxy.py
-# ...
-#   max_tokens=512 -> thinking disabled
-```
+On Linux, or without launchd, run it yourself: `python3 src/proxy.py &`.
 
 ## Step 6 — SessionStart notice
 
@@ -351,48 +343,64 @@ chmod 600 ~/.claude-ds4/.claude.json
 
 ## Step 8 — Launcher
 
-The ccam alias from step 2 is not enough, because this profile is dead without the
-proxy. Override it with a launcher that starts the proxy first and refuses to run if
-it never comes up.
+The ccam alias is not enough: this profile is dead without the proxy, and the
+proxy has to be told a session started or it will time out under one. Override
+the alias with a launcher that does both.
 
-Fish — write `~/.config/fish/conf.d/zz-ds4-proxy.fish`. **The filename must sort after
-`ccam.fish`**, because ccam defines `claude-ds4` as a plain alias in a loop over the
-accounts registry and the last definition wins. A file in `fish/functions/` will not
-work: fish skips autoload entirely when a function is already defined.
-
-If the OpenRouter profile is also installed, both launchers live in this one file.
+Fish — write `~/.config/fish/conf.d/zz-ds4-proxy.fish`. **The filename must sort
+after `ccam.fish`**, because ccam defines these as plain aliases in a loop and the
+last definition wins. A file in `fish/functions/` will not work: fish skips
+autoload entirely when a function is already defined. One file covers every
+profile, so if another is already installed, add a function to it rather than
+starting a second file.
 
 ```fish
-function __ds4_direct_proxy_up --description 'Start the ds4 thinking proxy unless it is already listening'
-    if nc -z 127.0.0.1 31500 2>/dev/null
-        return 0
-    end
+set -g __ds4_label com.strml.cc-ds4.proxy
 
-    # Supervisor loop, not a bare nohup, so a mid-session exit restarts in place.
-    fish -c 'while true
-                 /usr/bin/python3 $HOME/.claude-ds4/ds4-thinking-proxy.py
-                 sleep 1
-             end' >>$HOME/.claude-ds4/proxy.log 2>&1 &
-    disown
-
-    for i in (seq 40)
-        nc -z 127.0.0.1 31500 2>/dev/null; and return 0
-        sleep 0.25
+function __ds4_up --description 'Kickstart the shared proxy and wait for a port: <port> <name>'
+    set -l port $argv[1]
+    set -l name $argv[2]
+    if not nc -z 127.0.0.1 $port 2>/dev/null
+        launchctl kickstart gui/(id -u)/$__ds4_label 2>/dev/null
+        for i in (seq 40)
+            nc -z 127.0.0.1 $port 2>/dev/null; and break
+            sleep 0.25
+        end
     end
-    echo "claude-ds4: proxy never came up on :31500 — see ~/.claude-ds4/proxy.log" >&2
-    return 1
+    if not nc -z 127.0.0.1 $port 2>/dev/null
+        echo "$name: proxy never came up on :$port — see ~/.claude-ds4-proxy.log" >&2
+        return 1
+    end
 end
 
-function claude-ds4 --description 'Claude Code on the DeepSeek direct profile (auto-starts the thinking proxy)'
-    __ds4_direct_proxy_up; or return 1
-    env CLAUDE_CONFIG_DIR=$HOME/.claude-ds4 command claude $argv
+function __ds4_run --description 'Register a session, run claude, deregister: <dir> <port> <name>'
+    set -l dir $argv[1]
+    set -l port $argv[2]
+    set -l name $argv[3]
+    __ds4_up $port $name; or return 1
+
+    # The token is what stops the idle timer reaping the proxy under an open but
+    # quiet session. .ds4-sessions, never sessions: the latter is Claude Code's own.
+    set -l token $dir/.ds4-sessions/$fish_pid
+    mkdir -p $dir/.ds4-sessions
+    touch $token
+
+    env CLAUDE_CONFIG_DIR=$dir command claude $argv[4..]
+    set -l rc $status
+    # Ctrl-C kills claude and fish resumes here, so this runs on that path too. A
+    # hard-killed shell leaves the token; the proxy clears it once the PID dies.
+    rm -f $token
+    return $rc
 end
 
-function claude-ds4-stop --description 'Stop the ds4 thinking proxy'
-    # Matches both the supervisor loop and the python child, since the
-    # supervisor's command line contains the script path too.
-    pkill -f 'ds4-thinking-proxy.py' >/dev/null 2>&1
-    echo "ds4 thinking proxy stopped"
+function claude-ds4 --description 'Claude Code on the DeepSeek direct profile'
+    __ds4_run $HOME/.claude-ds4 31500 claude-ds4 $argv
+end
+
+# One process, so this takes every profile down with it.
+function claude-ds4-stop --description 'Stop the shared ds4 proxy'
+    launchctl kill TERM gui/(id -u)/$__ds4_label 2>/dev/null
+    echo "ds4 proxy stopped (all profiles)"
 end
 ```
 
@@ -401,20 +409,24 @@ zsh/bash equivalent:
 ```bash
 claude-ds4() {
   if ! nc -z 127.0.0.1 31500 2>/dev/null; then
-    ( while true; do /usr/bin/python3 "$HOME/.claude-ds4/ds4-thinking-proxy.py"; sleep 1; done ) \
-      >>"$HOME/.claude-ds4/proxy.log" 2>&1 &
-    disown
+    launchctl kickstart "gui/$(id -u)/com.strml.cc-ds4.proxy" 2>/dev/null
     for _ in $(seq 40); do nc -z 127.0.0.1 31500 2>/dev/null && break; sleep 0.25; done
   fi
   nc -z 127.0.0.1 31500 2>/dev/null || { echo "proxy never came up on :31500" >&2; return 1; }
+  mkdir -p "$HOME/.claude-ds4/.ds4-sessions"
+  local token="$HOME/.claude-ds4/.ds4-sessions/$$"
+  touch "$token"
   CLAUDE_CONFIG_DIR="$HOME/.claude-ds4" claude "$@"
+  local rc=$?
+  rm -f "$token"
+  return $rc
 }
 ```
 
-The port is fixed rather than dynamic because `settings.json` has to carry a literal
-base URL before Claude Code starts. 31500 and 31501 sit below the ephemeral range on
+Ports are fixed rather than dynamic because `settings.json` has to carry a literal
+base URL before Claude Code starts. 31500-31502 sit below the ephemeral range on
 both Linux (32768-60999) and macOS (49152-65535), so an outbound connection cannot
-take the port first.
+take one first.
 
 ## Step 9 — Disable claude-switch
 

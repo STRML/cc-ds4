@@ -1,32 +1,30 @@
 #!/usr/bin/env bash
-# Install the proxy and a corrected status line into an existing Claude Code profile.
+# Install the status line into a Claude Code profile, and the shared proxy agent.
 #
 # This does not create the profile. Use the setup prompt in profiles/ for that;
-# this installs the two pieces that get updates.
+# this installs the pieces that get updates.
 #
 #   ./install.sh --profile openrouter          # ~/.claude-or-ds4
 #   ./install.sh --profile direct              # ~/.claude-ds4
+#   ./install.sh --profile nous                # ~/.claude-nous
 #   ./install.sh --profile direct --dir ~/.claude-something-else
 #   ./install.sh --profile direct --no-proxy   # status line only
 #
-# The proxy and the status line are symlinked into the profile directory, so the
-# profile is the interface and this checkout is the source of truth: `git pull`
-# updates both without re-running anything. That is the same shape as the profile's
-# other entries, which are symlinks into ~/.claude.
+# One proxy process serves every profile, each on its own port, so a profile's
+# settings.json is unchanged and unaware it is shared. src/proxy.py holds the
+# table. On macOS this also writes and loads a single launch agent that runs it.
 #
-# It matters that settings.json and the launcher both point at the PROFILE path
-# rather than at the checkout. The launcher is hand-copied out of a doc into a
-# shell config, and $HOME/.claude-ds4/... is the same string on every machine.
-#
-# The cship config is copied, not linked, since it is meant to be edited.
-#
-# A setup done straight from profiles/*.md copies the proxy in rather than linking
-# it, because there may be no checkout on that machine. Running this afterwards
-# replaces that copy with a symlink and says so.
+# The status line is symlinked into the profile directory, so the profile is the
+# interface and this checkout is the source of truth: git pull updates it. It
+# matters that settings.json points at the PROFILE path, since that string is the
+# same on every machine. The cship config is copied, not linked, since it is
+# meant to be edited.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILE="" DIR="" DRY=0 WANT_PROXY=1
+LABEL="com.strml.cc-ds4.proxy"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,7 +32,7 @@ while [ $# -gt 0 ]; do
     --dir)      DIR="${2:-}"; shift 2 ;;
     --dry-run)  DRY=1; shift ;;
     --no-proxy) WANT_PROXY=0; shift ;;
-    -h|--help)  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)  sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -42,24 +40,18 @@ done
 case "$PROFILE" in
   openrouter) SCRIPT="$REPO/src/statusline/openrouter.py"
               CONFIG="$REPO/config/cship-openrouter.toml"
-              PROXY_SRC="$REPO/src/effort_proxy.py"
-              PROXY_DST="ds4-effort-proxy.py"
               PORT=31501
               LAUNCHER="claude-or-ds4"
               DOC="openrouter.md"
               DIR="${DIR:-$HOME/.claude-or-ds4}" ;;
   direct)     SCRIPT="$REPO/src/statusline/direct.py"
               CONFIG="$REPO/config/cship-direct.toml"
-              PROXY_SRC="$REPO/src/thinking_proxy.py"
-              PROXY_DST="ds4-thinking-proxy.py"
               PORT=31500
               LAUNCHER="claude-ds4"
               DOC="deepseek-direct.md"
               DIR="${DIR:-$HOME/.claude-ds4}" ;;
   nous)       SCRIPT="$REPO/src/statusline/nous.py"
               CONFIG="$REPO/config/cship-nous.toml"
-              PROXY_SRC="$REPO/src/effort_proxy.py"
-              PROXY_DST="ds4-effort-proxy.py"
               PORT=31502
               LAUNCHER="claude-nous"
               DOC="nous.md"
@@ -79,13 +71,14 @@ echo "profile:  $DIR"
 echo "bar:      $BAR_DST -> $SCRIPT"
 echo "config:   $DIR/cship.toml  (from $(basename "$CONFIG"))"
 if [ "$WANT_PROXY" = 1 ]; then
-  echo "proxy:    $DIR/$PROXY_DST -> $PROXY_SRC  (:$PORT)"
+  echo "proxy:    $REPO/src/proxy.py  (this profile on :$PORT)"
   echo "base URL: http://127.0.0.1:$PORT"
+  [ "$(uname)" = Darwin ] && echo "agent:    $PLIST"
 fi
 [ "$DRY" = 1 ] && { echo "(dry run, nothing written)"; exit 0; }
 
-# Say so when we replace a real file, since that is someone's hand-copied setup
-# from the profile prompt and the symlink silently changes where updates come from.
+# Say so when we replace a real file: that is someone's hand-copied setup from the
+# profile prompt, and the symlink silently changes where updates come from.
 link() {
   local src="$1" dst="$2"
   if [ -f "$dst" ] && [ ! -L "$dst" ]; then
@@ -97,7 +90,17 @@ link() {
 
 cp "$CONFIG" "$DIR/cship.toml"
 link "$SCRIPT" "$BAR_DST"
-[ "$WANT_PROXY" = 1 ] && link "$PROXY_SRC" "$DIR/$PROXY_DST"
+
+# A previous release gave each profile its own proxy copy. One process serves them
+# all now, so leaving those behind means a stale second binder fighting for the port.
+# -e is false for a dangling symlink, and after the merge these point at deleted
+# files, so -L has to be tested too or the stale links survive the upgrade.
+for old in "$DIR/ds4-effort-proxy.py" "$DIR/ds4-thinking-proxy.py" "$DIR/nous-effort-proxy.py"; do
+  if [ -e "$old" ] || [ -L "$old" ]; then
+    rm -f "$old"
+    echo "removed:  $old (superseded by the shared proxy)"
+  fi
+done
 
 BACKUP="$SETTINGS.bak-$(date +%Y%m%d%H%M%S)"
 cp -p "$SETTINGS" "$BACKUP"
@@ -120,25 +123,75 @@ os.chmod(p, 0o600)
 PY
 
 echo "backup:   $BACKUP"
+
+if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
+  mkdir -p "$(dirname "$PLIST")"
+  cat > "$PLIST" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$LABEL</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>$REPO/src/proxy.py</string>
+  </array>
+
+  <!-- KeepAlive must be this dict, not <false/>. With RunAtLoad and KeepAlive
+       both off, launchd sees a job with no demand criteria and SIGTERMs it a
+       couple of minutes after kickstart. SuccessfulExit=false gives it a reason
+       to leave a running job alone, while still not restarting the clean exit(0)
+       the idle timer performs. A crash exits nonzero and does get restarted. -->
+  <key>RunAtLoad</key>
+  <false/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>$HOME/.claude-ds4-proxy.log</string>
+  <key>StandardErrorPath</key>
+  <string>$HOME/.claude-ds4-proxy.log</string>
+</dict>
+</plist>
+PLISTEOF
+  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  echo "agent:    loaded $LABEL"
+
+  # Old per-profile agents from before the merge would fight for the same ports.
+  for old in thinking-proxy effort-proxy nous-proxy; do
+    if launchctl print "gui/$(id -u)/com.strml.cc-ds4.$old" >/dev/null 2>&1; then
+      launchctl bootout "gui/$(id -u)/com.strml.cc-ds4.$old" 2>/dev/null || true
+      rm -f "$HOME/Library/LaunchAgents/com.strml.cc-ds4.$old.plist"
+      echo "removed:  agent com.strml.cc-ds4.$old (superseded)"
+    fi
+  done
+fi
+
 echo
-echo "Verify it renders before walking away — a wrapper that fails open turns a"
-echo "syntax error into a blank bar and exit 0:"
+echo "Verify the bar renders before walking away — a wrapper that fails open turns"
+echo "a syntax error into a blank bar and exit 0:"
 echo
 echo "  $BAR_DST"
 
 if [ "$WANT_PROXY" = 1 ]; then
   cat <<EOF
 
-The profile now routes through the proxy, and NOTHING WORKS until something
-starts it. Every request gets connection-refused, which looks exactly like a bad
-key. Check it first:
+The profile routes through the proxy, and NOTHING WORKS until it is running.
+Every request gets connection-refused, which looks exactly like a bad key:
 
   nc -z 127.0.0.1 $PORT
 
-If you do not already have a '$LAUNCHER' function that starts the proxy, add the
-one from profiles/$DOC (the Launcher step). A bare ccam alias is not enough. To
-start it by hand right now:
+The '$LAUNCHER' function in profiles/$DOC (the Launcher step) starts it and
+registers a session so it is not reaped mid-use. A bare ccam alias is not
+enough. To start it by hand right now:
 
-  python3 $DIR/$PROXY_DST &
+  launchctl kickstart gui/$(id -u)/$LABEL     # or: python3 $REPO/src/proxy.py &
 EOF
 fi

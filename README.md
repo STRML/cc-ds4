@@ -299,8 +299,8 @@ profiles/           setup prompts — paste one into Claude Code
   nous.md               Nous Portal, pinned -0731, no ZDR, needs the proxy.
   kimi.md               Moonshot's Kimi K3.
 src/
-  effort_proxy.py       tier to effort, optional ZDR routing, guards, thinking off, /__spend
-  thinking_proxy.py     direct profile: thinking off on small calls, history repair
+  proxy.py              one process, one port per profile: thinking off on small
+                        calls, tier to effort, ZDR routing, guards, /__spend
   statusline/
     common.py           transcript accounting and cost maths, shared
     direct.py           DeepSeek rates, balance-integrated spend
@@ -331,7 +331,7 @@ It installs three things and backs up `settings.json` first:
 | | where it lands | why |
 |---|---|---|
 | status line | `<profile>/ds4-statusline.py` → this checkout | `git pull` updates it |
-| proxy | `<profile>/ds4-thinking-proxy.py` or `ds4-effort-proxy.py` → this checkout | same |
+| proxy | one launch agent running `src/proxy.py` from this checkout | serves every profile, one port each |
 | `cship.toml` | copied into the profile directory | meant to be edited |
 
 The first two are symlinks, matching how the rest of the profile directory already

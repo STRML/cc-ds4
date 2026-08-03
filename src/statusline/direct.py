@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Statusline for the DeepSeek-direct profile (claude-ds4).
 
-This profile's proxy is thinking_proxy.py, which serves no /__spend, so both
-numbers come from DeepSeek's own API rather than from the proxy. That is what
+The shared proxy serves no /__spend for this profile, so both numbers come
+from DeepSeek's own API rather than from the proxy. That is what
 differs from the OpenRouter sibling:
 
   * Rates are hardcoded. DeepSeek publishes no pricing endpoint — /models returns

@@ -228,56 +228,52 @@ Notes:
 - If the sandbox blocks writes to `~/.claude-nous`, rerun with sandbox disabled for
   that one call.
 
-## Step 6 — The effort proxy (Option B only)
+## Step 6 — The proxy
 
-Copy it from this repo rather than retyping it:
+Every profile here routes through one shared proxy, `src/proxy.py`. It listens on
+a separate port per profile (31502 for this one), so this profile's
+`settings.json` is unaware it is shared. What differs between profiles is a row in
+that file's `PROFILES` table, not a separate script.
 
-```bash
-cp /path/to/cc-ds4/src/effort_proxy.py ~/.claude-nous/nous-effort-proxy.py
-chmod +x ~/.claude-nous/nous-effort-proxy.py
-```
-
-Start it pointed at Nous, on port 31502, with ZDR off (Nous rejects the `provider`
-block):
-
-```bash
-DS4_UPSTREAM=https://inference-api.nousresearch.com \
-DS4_MODEL=deepseek/deepseek-v4-flash-0731 \
-DS4_PROXY_PORT=31502 \
-DS4_ZDR=0 \
-python3 ~/.claude-nous/nous-effort-proxy.py
-```
-
-What the proxy does for this profile:
+What it does for this profile:
 
 | Concern | Behaviour |
 |---|---|
-| tier → effort | rewrites the `ds4-*` sentinel to the real slug, injects `reasoning_effort` (Nous accepts it) |
-| provider routing | **off** — `DS4_ZDR=0`. Nous 403s any `provider` block (`zdr`, `data_collection`, …) |
-| Cloudflare | sends a `curl`-style `User-Agent` (`DS4_UA`, default `curl/8.4.0`); without it every call 403s `error code: 1010` |
+| tier → effort | rewrites the `ds4-*` sentinel to the real slug and injects `reasoning_effort` (Nous accepts it) |
+| small calls | `max_tokens` at or below 8192 gets `thinking: {"type":"disabled"}`; `DS4_NOTHINK_BELOW` moves the line |
+| provider routing | **off** — Nous 403s any `provider` block (`zdr`, `data_collection`, …) |
 | output ceiling | clamps `max_tokens` to 65536 |
+| Cloudflare | sends a `curl`-style `User-Agent` (`DS4_UA`, default `curl/8.4.0`); without it every call 403s `error code: 1010` |
 | cost reporting | serves `GET /__spend` with live discounted rates; **no** credits/7-day fields (no public endpoint) |
-| debugging | `DS4_VERBOSE=1` logs `-> model=… effort=… max_tokens=…` and `<- status` |
+| debugging | `DS4_DEBUG=1` logs each rewrite and any non-200 status |
 
-Confirm it is up (expect a clean HTML-blocked 4xx only if the UA is wrong; a normal
-start prints the banner):
-
-```bash
-sleep 1; cat ~/.claude-nous/proxy.log
-```
-
-Point a request at it — a 401 is expected if the auth header is missing; with the
-key it answers:
+`./install.sh --profile nous` is what installs it: it points `settings.json` at
+`http://127.0.0.1:31502`, and on macOS writes and loads a single launch agent,
+`com.strml.cc-ds4.proxy`, that runs it. Confirm it answers:
 
 ```bash
-curl -s http://127.0.0.1:31502/__spend
-# e.g. {"model":"deepseek/deepseek-v4-flash-0731","zdr":false,
-#       "pricing":{"prompt":1e-08,"completion":2e-08,"input_cache_read":0.0}}
+launchctl kickstart gui/$(id -u)/com.strml.cc-ds4.proxy
+sleep 1
+curl -s -o /dev/null -w "proxy responded: %{http_code}\n" -X POST \
+  http://127.0.0.1:31502/v1/messages -H 'content-type: application/json' \
+  -d '{"model":"ds4-low","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
-**Nothing works when the proxy is down** — every request gets connection-refused,
-which looks exactly like a broken provider or a bad key. Step 8 wires the launcher
-to start it automatically.
+A 401 is expected and correct without a key in the header: it proves the proxy
+forwarded upstream.
+
+**Nothing works when the proxy is down.** Every request gets connection-refused,
+which looks exactly like a bad endpoint or a bad key. Check `nc -z 127.0.0.1 31502`
+before investigating anything else, and read `~/.claude-ds4-proxy.log`.
+
+The proxy exits on its own once no profile is in use and nothing has come through
+for `DS4_IDLE_EXIT` seconds (default 900). It counts a profile as in use when a
+session token under `<profile>/.ds4-sessions` has a live PID, or when `ps` shows a
+`claude` process with that `CLAUDE_CONFIG_DIR`. Set `DS4_IDLE_EXIT=0` to disable
+that and run forever. Without a launcher there is nothing to start it again, so
+step 8 matters.
+
+On Linux, or without launchd, run it yourself: `python3 src/proxy.py &`.
 
 ## Step 7 — Skip onboarding
 
@@ -286,75 +282,92 @@ echo '{"hasCompletedOnboarding": true}' > ~/.claude-nous/.claude.json
 chmod 600 ~/.claude-nous/.claude.json
 ```
 
-## Step 8 — Create the launcher
+## Step 8 — Launcher
 
-The generated ccam alias is not enough: this profile is dead without the proxy.
-Override it with a launcher that starts the proxy first and refuses to run if it
-never comes up.
+The ccam alias is not enough: this profile is dead without the proxy, and the
+proxy has to be told a session started or it will time out under one. Override
+the alias with a launcher that does both.
 
-Fish — write `~/.config/fish/conf.d/zz-nous-proxy.fish`. **The filename must sort
-after `ccam.fish`**, because ccam defines the command as a plain alias in a loop over
-the accounts registry and the last definition wins. A file in `fish/functions/` will
-not work: fish skips autoload entirely when a function is already defined.
+Fish — write `~/.config/fish/conf.d/zz-ds4-proxy.fish`. **The filename must sort
+after `ccam.fish`**, because ccam defines these as plain aliases in a loop and the
+last definition wins. A file in `fish/functions/` will not work: fish skips
+autoload entirely when a function is already defined. One file covers every
+profile, so if another is already installed, add a function to it rather than
+starting a second file.
 
 ```fish
-function __nous_proxy_up --description 'Start the nous effort proxy unless it is already listening'
-    if nc -z 127.0.0.1 31502 2>/dev/null
-        return 0
+set -g __ds4_label com.strml.cc-ds4.proxy
+
+function __ds4_up --description 'Kickstart the shared proxy and wait for a port: <port> <name>'
+    set -l port $argv[1]
+    set -l name $argv[2]
+    if not nc -z 127.0.0.1 $port 2>/dev/null
+        launchctl kickstart gui/(id -u)/$__ds4_label 2>/dev/null
+        for i in (seq 40)
+            nc -z 127.0.0.1 $port 2>/dev/null; and break
+            sleep 0.25
+        end
     end
-    fish -c 'while true
-                 set -x DS4_UPSTREAM https://inference-api.nousresearch.com
-                 set -x DS4_MODEL deepseek/deepseek-v4-flash-0731
-                 set -x DS4_PROXY_PORT 31502
-                 set -x DS4_ZDR 0
-                 /usr/bin/python3 $HOME/.claude-nous/nous-effort-proxy.py
-                 sleep 1
-             end' >>$HOME/.claude-nous/proxy.log 2>&1 &
-    disown
-    for i in (seq 40)
-        nc -z 127.0.0.1 31502 2>/dev/null; and return 0
-        sleep 0.25
+    if not nc -z 127.0.0.1 $port 2>/dev/null
+        echo "$name: proxy never came up on :$port — see ~/.claude-ds4-proxy.log" >&2
+        return 1
     end
-    echo "claude-nous: proxy never came up on :31502 — see ~/.claude-nous/proxy.log" >&2
-    return 1
 end
 
-function claude-nous --description 'Claude Code on the Nous Portal DeepSeek profile'
-    __nous_proxy_up; or return 1
-    env CLAUDE_CONFIG_DIR=$HOME/.claude-nous command claude $argv
+function __ds4_run --description 'Register a session, run claude, deregister: <dir> <port> <name>'
+    set -l dir $argv[1]
+    set -l port $argv[2]
+    set -l name $argv[3]
+    __ds4_up $port $name; or return 1
+
+    # The token is what stops the idle timer reaping the proxy under an open but
+    # quiet session. .ds4-sessions, never sessions: the latter is Claude Code's own.
+    set -l token $dir/.ds4-sessions/$fish_pid
+    mkdir -p $dir/.ds4-sessions
+    touch $token
+
+    env CLAUDE_CONFIG_DIR=$dir command claude $argv[4..]
+    set -l rc $status
+    # Ctrl-C kills claude and fish resumes here, so this runs on that path too. A
+    # hard-killed shell leaves the token; the proxy clears it once the PID dies.
+    rm -f $token
+    return $rc
 end
 
-function claude-nous-stop --description 'Stop the nous effort proxy'
-    pkill -f 'nous-effort-proxy.py' >/dev/null 2>&1
+function claude-nous --description 'Claude Code on the Nous Portal profile'
+    __ds4_run $HOME/.claude-nous 31502 claude-nous $argv
+end
+
+# One process, so this takes every profile down with it.
+function claude-ds4-stop --description 'Stop the shared ds4 proxy'
+    launchctl kill TERM gui/(id -u)/$__ds4_label 2>/dev/null
+    echo "ds4 proxy stopped (all profiles)"
 end
 ```
 
-zsh/bash — same idea in `~/.zshrc` or `~/.bashrc`:
+zsh/bash equivalent:
 
 ```bash
 claude-nous() {
   if ! nc -z 127.0.0.1 31502 2>/dev/null; then
-    ( export DS4_UPSTREAM=https://inference-api.nousresearch.com \
-             DS4_MODEL=deepseek/deepseek-v4-flash-0731 \
-             DS4_PROXY_PORT=31502 DS4_ZDR=0
-      while true; do python3 "$HOME/.claude-nous/nous-effort-proxy.py"; sleep 1; done ) \
-      >>"$HOME/.claude-nous/proxy.log" 2>&1 &
-    disown
+    launchctl kickstart "gui/$(id -u)/com.strml.cc-ds4.proxy" 2>/dev/null
     for _ in $(seq 40); do nc -z 127.0.0.1 31502 2>/dev/null && break; sleep 0.25; done
   fi
   nc -z 127.0.0.1 31502 2>/dev/null || { echo "proxy never came up on :31502" >&2; return 1; }
-  CLAUDE_CONFIG_DIR="$HOME/.claude-nous" command claude "$@"
+  mkdir -p "$HOME/.claude-nous/.ds4-sessions"
+  local token="$HOME/.claude-nous/.ds4-sessions/$$"
+  touch "$token"
+  CLAUDE_CONFIG_DIR="$HOME/.claude-nous" claude "$@"
+  local rc=$?
+  rm -f "$token"
+  return $rc
 }
 ```
 
-Two decisions worth flagging to the user:
-
-- **The proxy outlives the session.** Tearing it down when Claude exits would kill
-  it out from under a second concurrent session, so it keeps running.
-  `claude-nous-stop` when you want the port back.
-- The launcher only takes effect in a **new** shell. An already-open terminal still
-  holds the old alias, launches without the proxy, and gets connection-refused. That
-  is the single most likely thing to go wrong right after setup.
+Ports are fixed rather than dynamic because `settings.json` has to carry a literal
+base URL before Claude Code starts. 31500-31502 sit below the ephemeral range on
+both Linux (32768-60999) and macOS (49152-65535), so an outbound connection cannot
+take one first.
 
 ## Step 9 — Disable claude-switch
 
