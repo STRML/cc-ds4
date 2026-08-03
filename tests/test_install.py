@@ -1,0 +1,184 @@
+"""Regression tests for install.sh's agent and proxy handling.
+
+These shell out to the real install.sh against throwaway profile dirs. They never
+touch the live launchd agent: a stub launchctl on PATH records invocations and
+answers like the real tool for an unloaded job, HOME is redirected so the plist
+lands in a temp LaunchAgents dir, and uname is stubbed so the launchd branch is
+exercised on Linux CI as well as macOS.
+
+Run: python3 -m unittest discover -s tests -v
+"""
+import json
+import os
+import plistlib
+import subprocess
+import tempfile
+import textwrap
+import unittest
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+INSTALL = os.path.join(REPO, "install.sh")
+
+PROFILE_DIRS = {
+    "direct": ".claude-ds4",
+    "openrouter": ".claude-or-ds4",
+    "nous": ".claude-nous",
+}
+
+
+def _write_settings(profile_dir):
+    os.makedirs(profile_dir, exist_ok=True)
+    with open(os.path.join(profile_dir, "settings.json"), "w") as fh:
+        json.dump({"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}}, fh)
+
+
+def _write_stub(bindir, name, body):
+    path = os.path.join(bindir, name)
+    with open(path, "w") as fh:
+        fh.write(body)
+    os.chmod(path, 0o755)
+
+
+class InstallTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = os.path.join(self.tmp.name, "home")
+        os.makedirs(self.home)
+        self.bindir = os.path.join(self.tmp.name, "bin")
+        os.makedirs(self.bindir)
+        self.log = os.path.join(self.tmp.name, "launchctl.log")
+        self.state = os.path.join(self.tmp.name, "unloaded")
+
+        # print must exit 113 for a job that is not loaded, exactly like the
+        # real launchctl. install.sh uses that for the legacy-agent sweep and
+        # this stub for the (always silent) unload-wait loop. bootout is what
+        # unloads the fake job, so a print before the first bootout can report
+        # it running via FAKE_LAUNCHD_RUNNING.
+        _write_stub(self.bindir, "launchctl", textwrap.dedent(f"""\
+            #!/usr/bin/env bash
+            echo "$@" >> "{self.log}"
+            case "$1" in
+              bootout)
+                touch "{self.state}"
+                exit 0
+                ;;
+              print)
+                if [ ! -e "{self.state}" ] && [ "${{FAKE_LAUNCHD_RUNNING:-0}}" = 1 ]; then
+                  printf '\\tstate = running\\n'
+                  exit 0
+                fi
+                exit 113
+                ;;
+              *)
+                exit 0
+                ;;
+            esac
+            """))
+        # install.sh gates the launchd branch on `uname` = Darwin. Stub it so the
+        # branch is taken on Linux CI too; the rest of the script does not care
+        # about the real kernel.
+        _write_stub(self.bindir, "uname", "#!/usr/bin/env bash\necho Darwin\n")
+
+    def run_install(self, profile, *extra, env=None):
+        profile_dir = os.path.join(self.home, PROFILE_DIRS[profile])
+        _write_settings(profile_dir)
+        full_env = dict(os.environ)
+        full_env["HOME"] = self.home
+        full_env["PATH"] = self.bindir + os.pathsep + full_env["PATH"]
+        if env:
+            full_env.update(env)
+        return subprocess.run(
+            ["bash", INSTALL, "--profile", profile, *extra],
+            capture_output=True, text=True, env=full_env,
+        )
+
+    def launchctl_calls(self):
+        if not os.path.exists(self.log):
+            return []
+        with open(self.log) as fh:
+            return [line.split() for line in fh.read().splitlines()]
+
+    def plist_path(self):
+        return os.path.join(self.home, "Library", "LaunchAgents",
+                            "com.strml.cc-ds4.proxy.plist")
+
+    def read_plist(self):
+        with open(self.plist_path(), "rb") as fh:
+            return plistlib.load(fh)
+
+    def test_plist_unchanged_skips_reload(self):
+        # The shared agent serves every profile, so a no-op reinstall must not
+        # bootout the live job. First run writes and loads; second must skip.
+        first = self.run_install("direct")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn("agent:    loaded", first.stdout)
+
+        second = self.run_install("direct")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("agent:    unchanged, not reloaded", second.stdout)
+
+        bootouts = [c for c in self.launchctl_calls() if c[0] == "bootout"]
+        self.assertEqual(len(bootouts), 1, bootouts)
+
+    def test_reload_kickstarts_a_running_job(self):
+        # When the plist genuinely changes and the old job was running, reload
+        # must bring it back: the kickstart is what stops live sessions dropping.
+        proc = self.run_install("direct", env={"FAKE_LAUNCHD_RUNNING": "1"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("agent:    loaded", proc.stdout)
+        calls = self.launchctl_calls()
+        self.assertIn("kickstart", [c[0] for c in calls], calls)
+        bootouts = [c for c in calls if c[0] == "bootout"]
+        self.assertEqual(len(bootouts), 1, bootouts)
+
+    def test_plist_environment_variables(self):
+        # A DS4_* knob exported at install time must reach the agent. Without the
+        # EnvironmentVariables block the knobs proxy.py reads are all dead.
+        proc = self.run_install("nous", env={"DS4_IDLE_EXIT": "0", "DS4_DEBUG": "1"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        env = self.read_plist()["EnvironmentVariables"]
+        self.assertEqual(env["DS4_IDLE_EXIT"], "0")
+        self.assertEqual(env["DS4_DEBUG"], "1")
+        # A non-DS4 variable must not be swept into the agent.
+        self.assertNotIn("FAKE_LAUNCHD_RUNNING", env)
+
+    def test_plist_changed_by_new_knob_reloads(self):
+        # Adding a knob changes the plist, so the agent reloads; an unchanged
+        # plist with a new knob would silently leave the old environment live.
+        self.run_install("direct")
+        before = len([c for c in self.launchctl_calls() if c[0] == "bootout"])
+        proc = self.run_install("direct", env={"DS4_IDLE_EXIT": "0"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("agent:    loaded", proc.stdout)
+        after = len([c for c in self.launchctl_calls() if c[0] == "bootout"])
+        self.assertEqual(after, before + 1, self.launchctl_calls())
+
+    def test_no_proxy_does_not_delete_proxy_files(self):
+        # --no-proxy leaves the proxy files alone: an earlier run's base URL
+        # still points at the proxy port, so removing them would break it.
+        profile_dir = os.path.join(self.home, PROFILE_DIRS["direct"])
+        os.makedirs(profile_dir, exist_ok=True)
+        stale = os.path.join(profile_dir, "ds4-effort-proxy.py")
+        with open(stale, "w") as fh:
+            fh.write("")
+
+        proc = self.run_install("direct", "--no-proxy")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(os.path.exists(stale), "stale proxy removed under --no-proxy")
+
+        # A normal install does remove it, so the guard is real and not a no-op.
+        proc = self.run_install("direct")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(os.path.exists(stale))
+
+    def test_dir_is_rejected(self):
+        # --dir writes a base URL for a port that nothing binds, because
+        # src/proxy.py serves only the three fixed profile directories.
+        proc = self.run_install("direct", "--dir", "/tmp/somewhere-else")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--dir is not supported", proc.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -347,6 +347,11 @@ step 8 matters.
 
 On Linux, or without launchd, run it yourself: `python3 src/proxy.py &`.
 
+Setting a knob under launchd: the plist bakes in whatever `DS4_*` variables are
+exported when install.sh runs. For example, `DS4_IDLE_EXIT=0 ./install.sh
+--profile openrouter` makes the agent run forever (also replaces the plist and
+reloads the agent, which drops any live session on all three profiles).
+
 ## Step 7 — Skip onboarding
 
 ```bash

@@ -41,8 +41,9 @@ this repo's other two DeepSeek profiles. Two things are worth knowing before set
 - **It has no zero-data-retention control.** OpenRouter's `provider: {zdr: true}`
   block gets a **403** from Nous (an empty `error code: 1010` is Cloudflare; a 403
   with no body field is the portal rejecting the `provider` field). So this profile
-  runs with ZDR **off** (`DS4_ZDR=0`). Treat it like the direct profile for privacy,
-  not like the OpenRouter one.
+  has ZDR **off** and `DS4_ZDR=0` is already the effective state (the switch can
+  only turn the block off, never on where the profile rejects it). Treat it like
+  the direct profile for privacy, not like the OpenRouter one.
 - **No credits/balance endpoint.** It is a flat subscription (optionally topped up),
   but there is no public `/credits`-style endpoint, so the status line shows only
   session cost — no `📆 7d` or `💳 left` segments. The dashboard at
@@ -223,8 +224,8 @@ Notes:
   This is the same trap documented for the OpenRouter profile.
 - The key is the file's `ANTHROPIC_AUTH_TOKEN`, chmod 600. The proxy forwards the
   auth header Claude Code sends, so nothing else needs the key. The proxy's own
-  server-side calls (pricing) use the same file or a `OPENROUTER_API_KEY`/`DS4_API_KEY`
-  env var, but pricing here needs no auth anyway.
+  server-side calls (pricing) use the same file or a per-profile
+  `DS4_KEY_NOUS` env var, but pricing here needs no auth anyway.
 - If the sandbox blocks writes to `~/.claude-nous`, rerun with sandbox disabled for
   that one call.
 
@@ -274,6 +275,14 @@ that and run forever. Without a launcher there is nothing to start it again, so
 step 8 matters.
 
 On Linux, or without launchd, run it yourself: `python3 src/proxy.py &`.
+
+Setting a knob under launchd: the plist bakes in whatever `DS4_*` variables are
+exported when install.sh runs. For example, `DS4_IDLE_EXIT=0 ./install.sh
+--profile nous` makes the agent run forever (also replaces the plist and reloads
+the agent, which drops any live session on all three profiles). The proxy has to
+restart to pick a knob up, because it reads them once at startup. Running the
+proxy by hand instead picks them up from the shell: `DS4_DEBUG=1 python3
+src/proxy.py`.
 
 ## Step 7 — Skip onboarding
 

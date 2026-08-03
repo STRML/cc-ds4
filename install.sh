@@ -7,12 +7,12 @@
 #   ./install.sh --profile openrouter          # ~/.claude-or-ds4
 #   ./install.sh --profile direct              # ~/.claude-ds4
 #   ./install.sh --profile nous                # ~/.claude-nous
-#   ./install.sh --profile direct --dir ~/.claude-something-else
 #   ./install.sh --profile direct --no-proxy   # status line only
 #
 # One proxy process serves every profile, each on its own port, so a profile's
 # settings.json is unchanged and unaware it is shared. src/proxy.py holds the
-# table. On macOS this also writes and loads a single launch agent that runs it.
+# table and fixes the profile directories, so --dir is not accepted. On macOS
+# this also writes and loads a single launch agent that runs it.
 #
 # The status line is symlinked into the profile directory, so the profile is the
 # interface and this checkout is the source of truth: git pull updates it. It
@@ -29,7 +29,10 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile)  PROFILE="${2:-}"; shift 2 ;;
-    --dir)      DIR="${2:-}"; shift 2 ;;
+    --dir)      echo "--dir is not supported: src/proxy.py only serves the three fixed profile directories" >&2
+                echo "  (~/.claude-ds4, ~/.claude-or-ds4, ~/.claude-nous)" >&2
+                echo "  use one of those profiles or pick a different machine" >&2
+                exit 2 ;;
     --dry-run)  DRY=1; shift ;;
     --no-proxy) WANT_PROXY=0; shift ;;
     -h|--help)  sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -56,7 +59,7 @@ case "$PROFILE" in
               LAUNCHER="claude-nous"
               DOC="nous.md"
               DIR="${DIR:-$HOME/.claude-nous}" ;;
-  *) echo "usage: $0 --profile openrouter|direct|nous [--dir PATH] [--no-proxy] [--dry-run]" >&2; exit 2 ;;
+  *) echo "usage: $0 --profile openrouter|direct|nous [--no-proxy] [--dry-run]" >&2; exit 2 ;;
 esac
 
 [ -d "$DIR" ] || { echo "no profile at $DIR — create it first with profiles/*.md" >&2; exit 1; }
@@ -99,12 +102,16 @@ link "$SCRIPT" "$BAR_DST"
 # all now, so leaving those behind means a stale second binder fighting for the port.
 # -e is false for a dangling symlink, and after the merge these point at deleted
 # files, so -L has to be tested too or the stale links survive the upgrade.
-for old in "$DIR/ds4-effort-proxy.py" "$DIR/ds4-thinking-proxy.py" "$DIR/nous-effort-proxy.py"; do
-  if [ -e "$old" ] || [ -L "$old" ]; then
-    rm -f "$old"
-    echo "removed:  $old (superseded by the shared proxy)"
-  fi
-done
+# Guarded by WANT_PROXY: --no-proxy leaves the files (and the base URL above)
+# intact so the status line still points at a live proxy.
+if [ "$WANT_PROXY" = 1 ]; then
+  for old in "$DIR/ds4-effort-proxy.py" "$DIR/ds4-thinking-proxy.py" "$DIR/nous-effort-proxy.py"; do
+    if [ -e "$old" ] || [ -L "$old" ]; then
+      rm -f "$old"
+      echo "removed:  $old (superseded by the shared proxy)"
+    fi
+  done
+fi
 
 BACKUP="$SETTINGS.bak-$(date +%Y%m%d%H%M%S)"
 cp -p "$SETTINGS" "$BACKUP"
@@ -137,7 +144,30 @@ echo "backup:   $BACKUP"
 
 if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   mkdir -p "$(dirname "$PLIST")"
-  cat > "$PLIST" <<PLISTEOF
+
+  # The plist carries the DS4_* knobs into the agent. src/proxy.py reads them at
+  # startup, and launchd starts the agent from its own environment, so anything
+  # exported when install.sh runs is baked in. Sweep the whole DS4_* namespace so
+  # a knob proxy.py adds later works without a second edit here. Values are XML
+  # entities only; the rest of the heredoc body is not re-expanded.
+  PLIST_ENV=""
+  while IFS= read -r kv; do
+    case "$kv" in
+      DS4_*=*)
+        key="${kv%%=*}"
+        val="${kv#*=}"
+        val="${val//&/&amp;}"
+        val="${val//</&lt;}"
+        val="${val//>/&gt;}"
+        PLIST_ENV+="    <key>${key}</key>
+    <string>${val}</string>
+"
+        ;;
+    esac
+  done < <(env)
+
+  PLIST_TMP="$(mktemp "${TMPDIR:-/tmp}/$LABEL.plist.XXXXXX")"
+  cat > "$PLIST_TMP" <<PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -150,6 +180,13 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
     <string>/usr/bin/python3</string>
     <string>$REPO/src/proxy.py</string>
   </array>
+
+  <!-- These are the DS4_* knobs present when install.sh ran, e.g.
+       DS4_IDLE_EXIT=0 to run forever. Set one by exporting it and re-running
+       install.sh, which rewrites the plist and reloads the agent. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+$PLIST_ENV  </dict>
 
   <!-- KeepAlive must be this dict, not <false/>. With RunAtLoad and KeepAlive
        both off, launchd sees a job with no demand criteria and SIGTERMs it a
@@ -171,9 +208,41 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
 </dict>
 </plist>
 PLISTEOF
-  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
-  echo "agent:    loaded $LABEL"
+
+  if cmp -s "$PLIST_TMP" "$PLIST"; then
+    rm -f "$PLIST_TMP"
+    echo "agent:    unchanged, not reloaded"
+  else
+    mv "$PLIST_TMP" "$PLIST"
+    # One process serves every profile, so only take it down when the plist
+    # actually changed. Record whether it was running first, so a reload can
+    # bring it back and not drop live sessions; RunAtLoad=false means a freshly
+    # bootstrapped job is parked, so "running" has to be captured pre-bootout.
+    was_running=0
+    if launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -q 'state = running'; then
+      was_running=1
+    fi
+    # bootout is async and a job that does not exist is not an error, so both
+    # exit states are fine.
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+    # Wait for the old job to really leave, else bootstrap on the same label
+    # races it and fails under set -e mid-install. bootout is async, so the exit
+    # status is unreliable mid-drain; key on the state line instead.
+    n=0
+    while launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -q 'state ='; do
+      n=$((n + 1))
+      [ "$n" -ge 20 ] && break
+      sleep 0.25
+    done
+    if launchctl bootstrap "gui/$(id -u)" "$PLIST"; then
+      if [ "$was_running" = 1 ]; then
+        launchctl kickstart "gui/$(id -u)/$LABEL" 2>/dev/null || true
+      fi
+      echo "agent:    loaded $LABEL"
+    else
+      echo "agent:    plist written but launchctl bootstrap failed (exit $?); re-run install.sh or kickstart manually" >&2
+    fi
+  fi
 
   # Old per-profile agents from before the merge would fight for the same ports.
   for old in thinking-proxy effort-proxy nous-proxy; do

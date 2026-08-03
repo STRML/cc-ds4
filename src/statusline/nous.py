@@ -38,7 +38,8 @@ class NousStatusline(Statusline):
 
     def __init__(self, profile_dir="~/.claude-nous", port=None, **kw):
         super().__init__(profile_dir, **kw)
-        port = port or os.environ.get("NOUS_PROXY_PORT", "31502")
+        # New name matches proxy.py; the old one stays so an existing shell export still works.
+        port = port or os.environ.get("DS4_PORT_NOUS") or os.environ.get("NOUS_PROXY_PORT") or "31502"
         self.spend_url = f"http://127.0.0.1:{port}/__spend"
         self._info = None
 

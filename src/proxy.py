@@ -26,7 +26,7 @@ Why any proxy exists at all:
 Run it with no arguments. It serves every profile in PROFILES whose directory
 exists, and exits once none of them is in use.
 """
-import http.server, json, os, subprocess, threading, time, urllib.request, urllib.error
+import http.server, json, os, re, subprocess, sys, threading, time, urllib.request, urllib.error
 
 HOME = os.path.expanduser("~")
 VERBOSE = os.environ.get("DS4_VERBOSE") == "1" or os.environ.get("DS4_DEBUG") == "1"
@@ -102,6 +102,7 @@ PLACEHOLDER = {"type": "thinking", "thinking": "(elided)", "signature": "ds4-pro
 _last_seen = time.time()
 _lock = threading.Lock()
 _cache = {}                    # (name, kind) -> cached value
+_inflight = 0                  # relayed requests open; idle_watch must not exit while nonzero
 
 
 # ── request rewriting ────────────────────────────────────────────────────────
@@ -138,7 +139,9 @@ def rewrite(payload, cfg):
             payload["reasoning_effort"] = effort
             notes.append(f"{tier} -> {cfg['model']} effort={effort}")
 
-    if cfg["zdr"]:
+    # DS4_ZDR only ever disables ZDR, never enables it on a profile whose table
+    # row does not support it (Nous 403s any provider block at all).
+    if cfg["zdr"] and os.environ.get("DS4_ZDR", "1") != "0":
         prov = payload.get("provider")
         if not isinstance(prov, dict):
             prov = {}
@@ -153,9 +156,11 @@ def rewrite(payload, cfg):
         if cfg["max_out"] and want > cfg["max_out"]:
             payload["max_tokens"] = cfg["max_out"]
             notes.append(f"clamped max_tokens {want} -> {cfg['max_out']}")
-        elif want <= NOTHINK_BELOW:
+        # Decide thinking from the post-clamp value so a NOTHINK_BELOW raised
+        # above max_out still disables thinking on a clamped request.
+        if payload["max_tokens"] <= NOTHINK_BELOW:
             payload["thinking"] = dict(DISABLED)
-            notes.append(f"max_tokens={want} -> thinking disabled")
+            notes.append(f"max_tokens={payload['max_tokens']} -> thinking disabled")
 
     # With thinking off the endpoint stops asking for the block, so only repair
     # a history on requests that still have thinking on.
@@ -169,21 +174,26 @@ def rewrite(payload, cfg):
 
 # ── spend reporting, for the status line ─────────────────────────────────────
 
-def api_key(cfg):
-    """Server-side key. A status line render carries no client credentials."""
-    k = os.environ.get("OPENROUTER_API_KEY")
-    if k:
-        return k
+def api_key(name, cfg):
+    """Server-side key, read from the profile's settings.json.
+
+    One process serves every profile, so the key must come from the profile's
+    own file, never from a process-wide variable that any profile can reach.
+    DS4_KEY_<NAME> is a per-profile override on top of that file.
+    """
     try:
         with open(os.path.join(cfg["dir"], "settings.json")) as fh:
-            return json.load(fh)["env"].get("ANTHROPIC_AUTH_TOKEN") or ""
+            k = json.load(fh)["env"].get("ANTHROPIC_AUTH_TOKEN")
+            if k:
+                return k
     except Exception:
-        return ""
+        pass
+    return os.environ.get(f"DS4_KEY_{name.upper()}", "")
 
 
-def get_json(cfg, path, timeout=6):
+def get_json(name, cfg, path, timeout=6):
     req = urllib.request.Request(cfg["upstream"].rstrip("/") + path)
-    req.add_header("authorization", "Bearer " + api_key(cfg))
+    req.add_header("authorization", "Bearer " + api_key(name, cfg))
     req.add_header("user-agent", UA)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
@@ -201,11 +211,11 @@ def pricing(name, cfg):
         if _cache.get((name, "pricing")):
             return _cache[(name, "pricing")]
     try:
-        d = get_json(cfg, f"/v1/models/{cfg['model']}/endpoints")["data"]
+        d = get_json(name, cfg, f"/v1/models/{cfg['model']}/endpoints")["data"]
         p = min(d["endpoints"], key=lambda e: float(e["pricing"]["prompt"]))["pricing"]
     except Exception:
         try:
-            d = get_json(cfg, "/v1/models")["data"]
+            d = get_json(name, cfg, "/v1/models")["data"]
             p = next(m["pricing"] for m in d if m.get("id") == cfg["model"])
         except Exception:
             return None
@@ -223,7 +233,7 @@ def credits(name, cfg):
     if entry and now - entry[0] < CREDITS_TTL:
         return entry[1]
     try:
-        d = get_json(cfg, "/v1/credits")["data"]
+        d = get_json(name, cfg, "/v1/credits")["data"]
         val = (float(d["total_credits"]), float(d["total_usage"]))
     except Exception:
         return None
@@ -336,8 +346,8 @@ def claude_running(cfg):
     The check that does not depend on the launcher: `ps -E` prints each
     process's environment and Claude Code is started with CLAUDE_CONFIG_DIR set,
     so a session is visible however it was launched. Session tokens stay as a
-    second signal because `ps -E` is macOS spelling. A substring match can only
-    be over-eager, which just means staying up slightly longer than needed.
+    second signal because `ps -E` is macOS spelling. A boundary match keeps a
+    backup directory with this one as a prefix from pinning the proxy up.
     """
     try:
         out = subprocess.run(["ps", "-E", "-ax", "-o", "command="],
@@ -345,7 +355,7 @@ def claude_running(cfg):
                              timeout=10).stdout.decode("utf8", "replace")
     except Exception:
         return False
-    return f"CLAUDE_CONFIG_DIR={cfg['dir']}" in out
+    return bool(re.search(re.escape("CLAUDE_CONFIG_DIR=" + cfg["dir"]) + r"(?=\s|$)", out))
 
 
 def anything_in_use(served):
@@ -358,7 +368,9 @@ def idle_watch(served):
     every = max(1, min(30, IDLE_EXIT // 2))
     while IDLE_EXIT > 0:
         time.sleep(every)
-        if time.time() - _last_seen < IDLE_EXIT or anything_in_use(served):
+        with _lock:
+            open_req = _inflight
+        if time.time() - _last_seen < IDLE_EXIT or anything_in_use(served) or open_req:
             continue
         print(f"no profile in use and idle for {IDLE_EXIT}s, exiting", flush=True)
         os._exit(0)
@@ -386,15 +398,31 @@ def make_handler(name, cfg):
             global _last_seen
             _last_seen = time.time()
 
+        def _count(self, n):
+            global _inflight
+            with _lock:
+                _inflight += n
+
         def do_GET(self):
             self._touch()
-            if self.path != "/__spend" or not cfg["spend"]:
-                self._json(404, {"error": {"message": "not found"}})
-                return
-            self._json(200, spend(name, cfg))
+            self._count(1)
+            try:
+                if self.path != "/__spend" or not cfg["spend"]:
+                    self._json(404, {"error": {"message": "not found"}})
+                    return
+                self._json(200, spend(name, cfg))
+            finally:
+                self._count(-1)
 
         def do_POST(self):
             self._touch()
+            self._count(1)
+            try:
+                self._relay()
+            finally:
+                self._count(-1)
+
+        def _relay(self):
             body = self.rfile.read(int(self.headers.get("content-length", 0)))
             try:
                 payload = json.loads(body)
@@ -439,22 +467,30 @@ def make_handler(name, cfg):
                     self.send_header(k, v)
             self.send_header("connection", "close")
             self.end_headers()
-            while True:
-                chunk = up.read(8192)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                self.wfile.flush()
-            up.close()
+            try:
+                while True:
+                    chunk = up.read(8192)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            finally:
+                up.close()
 
     return Handler
 
 
 def serve(name, cfg):
+    """Bind one listener. False on bind failure so the rest still get served."""
     port = int(os.environ.get(f"DS4_PORT_{name.upper()}", cfg["port"]))
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), make_handler(name, cfg))
+    try:
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), make_handler(name, cfg))
+    except OSError as e:
+        print(f"  {name:<11} :{port} FAILED to bind: {e}", file=sys.stderr, flush=True)
+        return False
     print(f"  {name:<11} :{port} -> {cfg['upstream']}", flush=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return True
 
 
 def main():
@@ -466,8 +502,9 @@ def main():
 
     print(f"ds4 proxy: no thinking at or below max_tokens={NOTHINK_BELOW}, "
           f"idle exit {IDLE_EXIT}s", flush=True)
-    for name, cfg in served.items():
-        serve(name, cfg)
+    bound = [serve(name, cfg) for name, cfg in served.items()]
+    if not any(bound):
+        raise SystemExit("no profile bound; nothing to serve")
 
     threading.Thread(target=idle_watch, args=(served,), daemon=True).start()
     while True:

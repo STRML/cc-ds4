@@ -152,9 +152,11 @@ per-tier effort proxy — the differences are the point:
   re-check the fallback rates in `src/statusline/nous.py` if the pricing changes.
 - **No zero-data-retention control.** Nous 403s OpenRouter's
   `provider: {zdr: true}` block (empty body — the portal rejects the unknown
-  `provider` field). The proxy runs with `DS4_ZDR=0`. Privacy-wise this is a
-  **direct-style** profile, not an OpenRouter-style one: requests are governed by
-  Nous's own, undisclosed retention policy. Do not reach for it with NDA data.
+  `provider` field), so this profile never sends one (`DS4_ZDR=0` is its effective
+  state, and the switch only ever turns the block off, never on where it 403s).
+  Privacy-wise this is a **direct-style** profile, not an OpenRouter-style one:
+  requests are governed by Nous's own, undisclosed retention policy. Do not reach
+  for it with NDA data.
 - **A subscription, optionally topped up.** It exposes **no public credits or
   balance endpoint**, so the status line shows only the session cost — no `📆 7d`
   or `💳 left` segments. The balance lives in the portal dashboard.

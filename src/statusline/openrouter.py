@@ -35,7 +35,8 @@ class OpenRouterStatusline(Statusline):
 
     def __init__(self, profile_dir="~/.claude-or-ds4", port=None, **kw):
         super().__init__(profile_dir, **kw)
-        port = port or os.environ.get("DS4_PROXY_PORT", "31501")
+        # New name matches proxy.py; the old one stays so an existing shell export still works.
+        port = port or os.environ.get("DS4_PORT_OPENROUTER") or os.environ.get("DS4_PROXY_PORT") or "31501"
         self.spend_url = f"http://127.0.0.1:{port}/__spend"
         self._info = None
 

@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
@@ -342,6 +343,51 @@ class TestTailSegment(unittest.TestCase):
         crit = self.sl.tail_segment(2.00, {})
         self.assertNotEqual(cheap[:12], warn[:12])
         self.assertNotEqual(warn[:12], crit[:12])
+
+
+class TestSpendPort(unittest.TestCase):
+    """The statuslines must read the same port env names as proxy.py.
+
+    proxy.py reads DS4_PORT_<NAME>. These statuslines used to read stale names
+    (DS4_PROXY_PORT / NOUS_PROXY_PORT), so overriding a port moved the listener
+    without moving the reader and the bar silently lost its spend segments.
+    """
+    PORT_KEYS = ("DS4_PORT_OPENROUTER", "DS4_PROXY_PORT",
+                 "DS4_PORT_NOUS", "NOUS_PROXY_PORT")
+
+    def make(self, cls, **env):
+        # Clear the sibling port vars so "unset" really means unset, not "still
+        # leaking from the test process environment".
+        with mock.patch.dict(os.environ, env):
+            for k in self.PORT_KEYS:
+                if k not in env:
+                    os.environ.pop(k, None)
+            return cls("/nonexistent")
+
+    def test_openrouter_new_name_wins_over_old(self):
+        sl = self.make(OpenRouterStatusline, DS4_PORT_OPENROUTER="31999",
+                       DS4_PROXY_PORT="31998")
+        self.assertEqual(sl.spend_url, "http://127.0.0.1:31999/__spend")
+
+    def test_openrouter_old_name_still_works(self):
+        sl = self.make(OpenRouterStatusline, DS4_PROXY_PORT="31998")
+        self.assertEqual(sl.spend_url, "http://127.0.0.1:31998/__spend")
+
+    def test_openrouter_defaults_when_neither_set(self):
+        sl = self.make(OpenRouterStatusline)
+        self.assertEqual(sl.spend_url, "http://127.0.0.1:31501/__spend")
+
+    def test_nous_new_name_wins_over_old(self):
+        sl = self.make(NousStatusline, DS4_PORT_NOUS="31997", NOUS_PROXY_PORT="31996")
+        self.assertEqual(sl.spend_url, "http://127.0.0.1:31997/__spend")
+
+    def test_nous_old_name_still_works(self):
+        sl = self.make(NousStatusline, NOUS_PROXY_PORT="31996")
+        self.assertEqual(sl.spend_url, "http://127.0.0.1:31996/__spend")
+
+    def test_nous_defaults_when_neither_set(self):
+        sl = self.make(NousStatusline)
+        self.assertEqual(sl.spend_url, "http://127.0.0.1:31502/__spend")
 
 
 if __name__ == "__main__":

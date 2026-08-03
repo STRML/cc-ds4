@@ -8,12 +8,17 @@ high and the main loop loses reasoning on every turn.
 Run: python3 -m unittest discover -s tests -v
 """
 import copy
+import http.server
+import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import urllib.request
 
 SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 sys.path.insert(0, SRC)
@@ -33,6 +38,22 @@ def call(model="deepseek-v4-flash", **kw):
          "messages": [{"role": "user", "content": "hi"}]}
     p.update(kw)
     return p
+
+
+class EnvVarMixin:
+    """setenv with automatic restore, for tests that flip process-wide vars."""
+
+    def setenv(self, key, val):
+        old = os.environ.get(key)
+        os.environ[key] = val
+        self.addCleanup(self._restore_env, key, old)
+
+    @staticmethod
+    def _restore_env(key, old):
+        if old is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old
 
 
 class ProfileTable(unittest.TestCase):
@@ -100,11 +121,21 @@ class ThinkingRewrite(unittest.TestCase):
         self.assertEqual(p["thinking"], ADAPTIVE)
 
     def test_a_clamped_call_still_keeps_thinking(self):
-        """A clamp lands far above the threshold, so the two must not both fire."""
+        """At the default threshold a clamp to 65536 lands above it, so thinking
+        stays on. A raised NOTHINK_BELOW is what makes the two compose."""
         p = call(max_tokens=999999)
         proxy.rewrite(p, OPENROUTER)
         self.assertEqual(p["max_tokens"], OPENROUTER["max_out"])
         self.assertEqual(p["thinking"], ADAPTIVE)
+
+    def test_clamp_and_thinking_disable_compose_when_threshold_is_raised(self):
+        """NOTHINK_BELOW above max_out must disable thinking on a clamped call."""
+        self.addCleanup(setattr, proxy, "NOTHINK_BELOW", proxy.NOTHINK_BELOW)
+        proxy.NOTHINK_BELOW = 70000
+        p = call(max_tokens=999999)
+        proxy.rewrite(p, OPENROUTER)
+        self.assertEqual(p["max_tokens"], OPENROUTER["max_out"])
+        self.assertEqual(p["thinking"], DISABLED)
 
 
 class EffortMapping(unittest.TestCase):
@@ -145,6 +176,22 @@ class ProviderRouting(unittest.TestCase):
 
     def test_nous_gets_no_provider_block(self):
         """Nous 403s any provider block at all."""
+        p = call(max_tokens=32000)
+        proxy.rewrite(p, NOUS)
+        self.assertNotIn("provider", p)
+
+
+class ZdrSwitch(EnvVarMixin, unittest.TestCase):
+    """DS4_ZDR only ever disables the block, never enables it where unsupported."""
+
+    def test_ds4_zdr_0_drops_the_openrouter_block(self):
+        self.setenv("DS4_ZDR", "0")
+        p = call(max_tokens=32000)
+        proxy.rewrite(p, OPENROUTER)
+        self.assertNotIn("provider", p)
+
+    def test_ds4_zdr_1_cannot_inject_into_nous(self):
+        self.setenv("DS4_ZDR", "1")
         p = call(max_tokens=32000)
         proxy.rewrite(p, NOUS)
         self.assertNotIn("provider", p)
@@ -254,6 +301,34 @@ class SessionTokens(unittest.TestCase):
         self.assertNotIn('os.path.join(cfg["dir"], "sessions")', src)
 
 
+class ApiKeySource(EnvVarMixin, unittest.TestCase):
+    """The key is per-profile: settings.json first, then a namespaced override."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.cfg = dict(DIRECT, dir=self.dir)
+        self.setenv("DS4_KEY_DIRECT", "ds4-key-env")
+
+    def write_settings(self, token):
+        with open(os.path.join(self.dir, "settings.json"), "w") as fh:
+            json.dump({"env": {"ANTHROPIC_AUTH_TOKEN": token}}, fh)
+
+    def test_settings_token_is_used(self):
+        self.write_settings("ds4-key-settings")
+        self.assertEqual(proxy.api_key("direct", self.cfg), "ds4-key-settings")
+
+    def test_settings_token_wins_over_env_override(self):
+        self.write_settings("ds4-key-settings")
+        self.assertEqual(proxy.api_key("direct", self.cfg), "ds4-key-settings")
+
+    def test_env_override_is_the_fallback(self):
+        self.assertEqual(proxy.api_key("direct", self.cfg), "ds4-key-env")
+
+    def test_missing_key_is_empty_string(self):
+        self.setenv("DS4_KEY_DIRECT", "")
+        self.assertEqual(proxy.api_key("direct", self.cfg), "")
+
+
 class LauncherIndependentLiveness(unittest.TestCase):
     """The proxy must notice a session started without the launcher.
 
@@ -301,6 +376,139 @@ class LauncherIndependentLiveness(unittest.TestCase):
         served = {"a": dict(DIRECT, dir="/tmp/ds4-nothing-here"),
                   "b": dict(DIRECT, dir=self.MARKER)}
         self.assertTrue(proxy.anything_in_use(served))
+
+    def test_does_not_match_a_directory_that_has_this_one_as_prefix(self):
+        """A backup at <marker>-backup is a different profile, not this one."""
+        self.assertFalse(proxy.claude_running(
+            dict(DIRECT, dir=self.MARKER + "-backup")))
+
+
+class ServeTolerance(unittest.TestCase):
+    """One busy port must not stop the other profiles from binding."""
+
+    def test_a_busy_port_returns_false_and_does_not_raise(self):
+        holder = socket.socket()
+        holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        self.addCleanup(holder.close)
+        busy = holder.getsockname()[1]
+        self.assertFalse(proxy.serve("direct", dict(DIRECT, port=busy)))
+
+    def test_a_free_port_returns_true(self):
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        self.assertTrue(proxy.serve("direct", dict(DIRECT, port=port)))
+
+
+class _SlowUpstream:
+    """Responds to a POST, then dribbles the body so the relay stays open."""
+
+    def __init__(self, hold=5):
+        self.hold = hold
+        self.srv = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), self._handler)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def _handler(self, *a, **kw):
+        return _SlowHandler(self.hold, *a, **kw)
+
+
+class _SlowHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def __init__(self, hold, *a, **kw):
+        self.hold = hold
+        super().__init__(*a, **kw)
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("content-length", 0)))
+        body = b"y" * 100000
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body[:8192])
+        self.wfile.flush()
+        time.sleep(self.hold)
+        self.wfile.write(body[8192:])
+        self.wfile.flush()
+
+    def log_message(self, *a):
+        pass
+
+
+class InflightIdle(unittest.TestCase):
+    """idle_watch must not exit while a request is still being relayed.
+
+    The relay is held open against a slow local upstream, and IDLE_EXIT is
+    cranked down to 1 so idle_watch wants to leave. os._exit is patched to
+    raise, because a broken fix exiting mid-relay would otherwise just kill
+    the whole test process with a clean exit status.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._idle = proxy.IDLE_EXIT
+        proxy.IDLE_EXIT = 1
+        self.addCleanup(setattr, proxy, "IDLE_EXIT", self._idle)
+        proxy._inflight = 0
+        self.addCleanup(setattr, proxy, "_inflight", 0)
+        self._exit = os._exit
+
+        def boom(code):
+            raise AssertionError(f"idle_watch exited ({code}) with a relay open")
+
+        os._exit = boom
+        self.addCleanup(setattr, os, "_exit", self._exit)
+
+    def test_idle_watch_survives_a_streamed_relay(self):
+        up = _SlowUpstream()
+        self.addCleanup(up.close)
+        cfg = dict(DIRECT, dir=self.tmpdir,
+                   upstream=f"http://127.0.0.1:{up.port}")
+        srv = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), proxy.make_handler("direct", cfg))
+        proxy_port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+
+        client_done = threading.Event()
+
+        def client():
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{proxy_port}/v1/messages",
+                    data=json.dumps(call()).encode(), method="POST")
+                urllib.request.urlopen(req, timeout=15).read()
+            finally:
+                client_done.set()
+
+        threading.Thread(target=client, daemon=True).start()
+        deadline = time.time() + 10
+        while time.time() < deadline and proxy._inflight < 1:
+            time.sleep(0.05)
+        self.assertGreaterEqual(proxy._inflight, 1)
+
+        watched = threading.Thread(target=proxy.idle_watch,
+                                   args=({"direct": cfg},), daemon=True)
+        watched.start()
+        time.sleep(2.2)   # two idle_watch polls at IDLE_EXIT=1
+        self.assertTrue(watched.is_alive(),
+                        "idle_watch exited while a relay was still open")
+
+        proxy.IDLE_EXIT = self._idle   # stop idle_watch wanting to leave
+        self.assertTrue(client_done.wait(15))
+        self.assertEqual(proxy._inflight, 0)
+        watched.join(2)
+        self.assertTrue(watched.is_alive())
 
 
 class SymlinkedInvocation(unittest.TestCase):
