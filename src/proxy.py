@@ -28,8 +28,18 @@ exists, and exits once none of them is in use.
 """
 import http.server, json, os, re, subprocess, sys, threading, time, urllib.request, urllib.error
 
+# Vision: translate image blocks into text descriptions before forwarding. The
+# sibling module sits next to proxy.py (both in src/), so it imports without a
+# path bootstrap — the launch agent and the tests both resolve it the same way.
+import vision as _vision
+
 HOME = os.path.expanduser("~")
 VERBOSE = os.environ.get("DS4_VERBOSE") == "1" or os.environ.get("DS4_DEBUG") == "1"
+
+# Gate the vision rewrite. Read at process startup (the launchd agent bakes
+# DS4_* at install). 0 restores the old pass-through — image blocks forwarded
+# unchanged.
+VISION = os.environ.get("DS4_VISION", "1") == "1"
 
 # Below this many max_tokens, turn thinking off. Claude Code's utility calls
 # arrive with a few hundred tokens of budget; the main loop arrives at 32000.
@@ -504,6 +514,26 @@ def make_handler(name, cfg):
 
             if isinstance(payload, dict):
                 note = rewrite(payload, cfg)
+
+                # vision: replace image blocks with text descriptions before
+                # the body is serialized, so the upstream never receives an
+                # image-shaped block. (When DS4_VISION=0 this is skipped and
+                # the old pass-through — image blocks forwarded unchanged — is
+                # restored, deliberately.)
+                if VISION:
+                    cache_dir = os.path.join(cfg["dir"], "vision-cache")
+                    try:
+                        total, fresh = _vision.rewrite_images(payload, cache_dir)
+                        if VERBOSE and total:
+                            print(f"  [{name}] vision: {total} image(s), {fresh} fresh", flush=True)
+                    except Exception as e:
+                        # Fail open, but never forward an image block: replace
+                        # any that remain with the placeholder so the request
+                        # is total.
+                        _vision.placeholder_remaining(payload)
+                        if VERBOSE:
+                            print(f"  [{name}] vision failed open: {e}", flush=True)
+
                 body = json.dumps(payload).encode()
                 if VERBOSE and note:
                     print(f"  [{name}] {note}", flush=True)

@@ -25,50 +25,76 @@ claude → proxy (per profile) → sees image block(s) in request body
               └─ miss → describe via the profile's vision route → cache → swap → forward to DeepSeek
 ```
 
-### Per-profile vision config
+### Describer — one local `claude -p` for every profile
 
-A new `vision` row in `PROFILES`:
+Every profile uses the same local `claude -p --model haiku` child on the
+Anthropic profile (subscription credits, no new credential, no upstream vision
+model). `DS4_VISION` gates the rewrite globally (`DS4_VISION=0` restores the
+old pass-through). There is **no per-profile `vision` flag** — all profiles are
+treated identically.
 
-| profile | describer | how the description is obtained |
-|---|---|---|
-| `openrouter` | luna (upstream, profile's key) | base64 image → luna `/v1/messages` → description |
-| `nous` | luna (upstream, profile's key) | same, over the Nous base URL |
-| `direct` | local `claude -p --model haiku` (Anthropic OAuth) | decode to temp file → child `Read` tool → description |
-| all | cache | content-hash key, LRU + TTL, per-profile dir |
+### The `claude -p` spawn (proven recipe, from cc-debate + Sean's gist)
 
-- `openrouter` and `nous` send the image to luna over the **profile's own key** (`api_key(name, cfg)` — the same path that already serves spend, never a process-wide var). The session still runs on DeepSeek; only the *description* touches luna.
-- `direct` has no upstream vision model, so it describes locally with a spawned `claude -p` on an **Anthropic profile** (subscription credits, no new credential).
-- A profile with `vision` off (or absent) keeps today's exact code path — the rewrite is a no-op.
+- `claude -p` cannot carry image bytes: it serializes images as `[Image #1]` text
+  markers, and there is no image/attachment flag. So the proxy decodes the base64
+  to a temp file in an isolated `TemporaryDirectory` and the child's **`Read`
+  tool** pulls the real pixels. The child's `cwd` is that temp dir, so its only
+  readable context is the image (`--allowedTools` is a permission pre-approval,
+  not a filesystem sandbox).
+- The child is forced onto the Anthropic profile via `CLAUDE_CONFIG_DIR=$HOME/.claude`
+  and its env is scrubbed of inherited `ANTHROPIC_*`/`CLAUDE_CODE_*`/`DS4_*`
+  (and `CLAUDECODE`, the nested-session guard) so it never routes back to a ds4
+  profile or touches a ds4 key.
+- Spawn shape: `claude -p --settings '{"disableAllHooks":true}' --model haiku
+  --tools Read --allowedTools "Read(<tmp>/*)" --add-dir <tmp>
+  --disable-slash-commands --strict-mcp-config --append-system-prompt '...'
+  --no-session-persistence --output-format json "Read <img> and describe the
+  image."` with `stdin=DEVNULL` (an expired-OAuth prompt crashes the child
+  instead of hanging the proxy) and `CLAUDE_CODE_SIMPLE=1`.
+- **`CLAUDE_BIN`** resolves the absolute `claude` binary (`DS4_CLAUDE_BIN` baked
+  by install.sh, validated against a vanished cmux shim, else `shutil.which`).
+  Under launchd the bare name is not on PATH; without it vision fails open.
+- **Auth:** the Anthropic profile is OAuth. The launchd agent may not unlock the
+  login keychain, so a launchd-safe credential is an implementation-time probe.
 
-### The `claude -p` direct path (verified constraints)
+### The image-rewrite machinery (ported from Sean's gist)
 
-- `claude -p` cannot carry image bytes: it serializes images as `[Image #1]` text markers, and there is no image/attachment flag. So the proxy writes the decoded image to a temp file and lets the child's **`Read` tool** pull the bytes.
-- The child must not inherit the ds4 config-dir, so it is spawned with an **explicit Anthropic `--settings`** (`~/.claude/settings.json` by default; `DS4_HAIKU_SETTINGS` override).
-- The Anthropic profile is **OAuth** (no base URL, no auth token), so `claude -p --settings ~/.claude/settings.json --model haiku` uses the machine's Anthropic subscription. **Haiku is the cheap describer.**
-- Spawn shape: `claude -p --bare --settings <anthropic-settings> --model haiku --add-dir <tmpdir> --allowedTools 'Read(<tmpdir>/*)' --append-system-prompt 'Describe this image for a text-only model.' <image path>`.
-  - `--bare` skips hooks, plugins, LSP, and background prefetch, keeping the child fast and hermetic.
-  - `--add-dir` grants `Read` access to the temp file; the prompt points at the path.
-- **Risk: launchd → keychain.** The proxy runs under a launchd agent, which may not unlock the login keychain, so the OAuth login may not resolve there. Mitigation: probe during implementation; if the keychain fails under launchd, expose `DS4_HAIKU_SETTINGS` pointing at an API-key settings file as the escape hatch. On the interactive path the proxy is spawned from a shell where the keychain is unlocked, so it works there.
-
-### Luna on openrouter / nous
-
-The exact luna model id is **read from the profile's `/v1/models` at first use** (pick the entry whose id contains `luna` and whose input modalities include image), rather than hardcoded. If no such model exists, the profile degrades to fail-open placeholder behavior. This avoids guessing the id in config.
+- **`rewrite_images(payload, cache_dir)`** walks every message's `content` and
+  **recurses into `tool_result.content`** — Sean's hard requirement (images
+  nested there are where `Read`/screenshot/MCP images land; leaving one is
+  silently DROPPED upstream). A non-list `messages` value is skipped. A
+  `MAX_IMAGES_PER_REQUEST` budget bounds the serial describe work.
+- **`_swap_image`** requires `source.type == "base64"`, a string `data`, and a
+  nonempty `media_type` (else placeholder); strict `b64decode(validate=True)`.
+  URL sources are unsupported.
+- **`transcribe`** returns `(text, fresh)` — `fresh` is always an int `0`/`1`,
+  never `None`. Single-flighted per `(cache_dir, key)`.
+- **Fail-open everywhere:** any failure swaps in a neutral placeholder
+  (`[Image omitted: no usable description was available.]`) and the request is
+  forwarded. `placeholder_remaining` scrubs any remaining image block on the
+  exception path so no image-shaped block reaches the text-only upstream.
 
 ## Cache
 
-- **Dir:** `<profile>/.ds4-vision/` (same `.ds4-*` hygiene as `.ds4-sessions` — never touches Claude Code's own state dirs).
-- **Key:** SHA-256 of the image block's `data` + `media_type`.
+- **Dir:** `<profile>/vision-cache/`.
+- **Key:** SHA-256 over **model + prompt salt + `media_type` + raw image bytes**
+  (a describer or prompt change invalidates old entries).
 - **Value:** the description text.
-- **Policy:** LRU cap (e.g. 256 entries) + TTL (e.g. 30 days). Repeated images across a session, or the same screenshot pasted twice, hit cache instead of re-describing.
+- **Policy:** TTL-on-read (30 days) in `cache_get` — a stale entry is deleted
+  and treated as a miss. Atomic writes via tmpfile+`os.replace`. No separate
+  eviction pass (a bounded-entry cap was dropped as unneeded complexity).
 - Cache is best-effort: corruption or unreadable entries are treated as misses.
 
 ## Failure handling — fail open, never brick
 
-The vision call has a timeout (upstream HTTP and the `claude -p` child both bounded). Any failure — timeout, missing describer, no luna model, child exit nonzero — swaps in a **neutral placeholder** and forwards the request to DeepSeek anyway:
+Any failure — timeout, missing `claude`, malformed image, child exit nonzero —
+swaps in a **neutral placeholder** and forwards the request to DeepSeek anyway:
 
-> `[Image N — text-only model; the attached image could not be described. Describe or OCR it yourself.]`
+> `[Image omitted: no usable description was available.]`
 
-A hard error is never returned. This is what unbricks the original loop: once the image becomes text (or a placeholder), the poisoned history stops 404ing and the session proceeds.
+A hard error is never returned, and no image-shaped block reaches the upstream.
+The rewrite is **per-request**: it does not clear an already-poisoned transcript
+(that needs `/compact`/`/clear` client-side).
 
 ## Honest ceiling
 
@@ -76,18 +102,20 @@ The description is a **lossy proxy, not pixels**. DeepSeek never sees the image;
 
 ## Security / privacy notes
 
-- Images sent to luna on `openrouter`/`nous` leave the machine and are billed to the profile's key. That is the privacy cost of vision on those profiles and should be surfaced in the README.
-- The `direct` path is **local**: the image stays on the machine, described by a local `claude -p` child under the Anthropic subscription. No image bytes leave except through the child.
-- No unscoped key reach is introduced: upstream vision uses the profile's own `api_key(name, cfg)`, never a process-wide variable.
+- **Every profile's image is described locally** by a `claude -p` child under the Anthropic subscription. No image bytes leave the machine except through that child — which is exactly what it exists to do.
+- The child is forced onto the Anthropic profile (`CLAUDE_CONFIG_DIR=$HOME/.claude`) and its env is scrubbed of `ANTHROPIC_*`/`CLAUDE_CODE_*`/`DS4_*`/`CLAUDECODE`, so it never touches a ds4 key.
+- The transcription is **untrusted data** — an image can contain instructions. The description must be treated as evidence, not a directive.
+- **Known limitations (accepted, documented in the README):** the proxy's loopback listener is not authenticated (any local process could spend Anthropic quota via vision); `--allowedTools` is additive, not a filesystem sandbox, so a prompt-injected image could direct the child to read a user-readable file. These are inherent to the design (the child loads the real Anthropic profile) and are not expanded into a full auth/sandbox system here.
 
 ## Scope / non-goals
 
 - **Not** switching profiles or adding a vision-native profile.
 - **Not** passing pixels to DeepSeek (impossible — text-only).
 - **Not** OCR as the direct fallback (out of scope; the `claude -p` child handles direct).
+- **Not** clearing an already-poisoned transcript — that requires `/compact`/`/clear` client-side.
 
 ## Testing
 
-- Unit tests over the image-block rewrite: cache hit, cache miss (describer called once), fail-open (describer error → placeholder, request still forwarded), malformed image block.
+- Unit tests over the image-block rewrite: cache hit, cache miss (describer called once), fail-open (describer error → placeholder), malformed image block, `tool_result` recursion, non-list messages guard, `CLAUDECODE` scrub, `--no-session-persistence` + `stdin=DEVNULL`, `CLAUDE_BIN` missing.
 - The `claude -p` spawn is **mocked** in tests so the suite stays offline and deterministic.
-- Existing 154-test suite stays green.
+- Existing suite stays green.

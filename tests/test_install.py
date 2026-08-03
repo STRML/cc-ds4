@@ -79,6 +79,10 @@ class InstallTest(unittest.TestCase):
         # branch is taken on Linux CI too; the rest of the script does not care
         # about the real kernel.
         _write_stub(self.bindir, "uname", "#!/usr/bin/env bash\necho Darwin\n")
+        # Vision bakes DS4_CLAUDE_BIN (command -v claude) into the agent. A stub
+        # on PATH makes that deterministic in CI, which has no real claude.
+        _write_stub(self.bindir, "claude",
+                    "#!/usr/bin/env bash\nexit 0\n")
 
     def run_install(self, profile, *extra, env=None):
         profile_dir = os.path.join(self.home, PROFILE_DIRS[profile])
@@ -140,6 +144,23 @@ class InstallTest(unittest.TestCase):
         env = self.read_plist()["EnvironmentVariables"]
         self.assertEqual(env["DS4_IDLE_EXIT"], "0")
         self.assertEqual(env["DS4_DEBUG"], "1")
+        # Vision spawns claude directly; install.sh bakes the absolute binary so
+        # the launchd agent can find it despite a minimal PATH.
+        self.assertIn("DS4_CLAUDE_BIN", env)
+        self.assertTrue(os.path.isabs(env["DS4_CLAUDE_BIN"]))
+        # The vision child needs HOME to find ~/.claude + the keychain, and the
+        # real claude bin dir on PATH (the agent's default PATH is minimal).
+        # install.sh must bake these or every image placeholders under launchd.
+        self.assertEqual(env["HOME"], self.home)
+        # USER/LOGNAME are the install-time user (whatever it is — CI runs as
+        # "runner"); the point is they're baked, not that they're a fixed value.
+        # install.sh falls back to `id -un` when USER/LOGNAME are unset.
+        import subprocess as _sp
+        expect_user = os.environ.get("USER") or _sp.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+        expect_logname = os.environ.get("LOGNAME") or expect_user
+        self.assertEqual(env["USER"], expect_user)
+        self.assertEqual(env["LOGNAME"], expect_logname)
+        self.assertTrue(env["PATH"].startswith("/usr/bin:/bin:/usr/sbin:/sbin:"))
         # A non-DS4 variable must not be swept into the agent.
         self.assertNotIn("FAKE_LAUNCHD_RUNNING", env)
 

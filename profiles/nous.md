@@ -51,8 +51,10 @@ this repo's other two DeepSeek profiles. Two things are worth knowing before set
 - **Cloudflare.** Nous sits behind Cloudflare, which 403s the Python stdlib's
   default `urllib` User-Agent (`error code: 1010`). The proxy in this repo sends a
   `curl`-style UA (`DS4_UA`), which is what makes this work at all.
-- **Text-only model.** DeepSeek V4 has no vision; screenshots and diagrams will not
-  work.
+- **Text-only model.** DeepSeek V4 has no vision. Images are transcribed to text
+  by the proxy (a local `claude -p --model haiku` on the Anthropic profile,
+  cached by content hash) before DeepSeek sees them; the description is a lossy
+  proxy, not the pixels. `DS4_VISION=0` restores the old pass-through.
 
 ## Step 0 — Preflight
 
@@ -499,7 +501,8 @@ Tell them, concretely:
   control** — Nous rejects the `provider` block, so requests are governed by Nous's
   own (undisclosed) retention policy. Treat it like the direct profile, not the
   OpenRouter one.
-- The model is text-only — screenshots and diagrams will not work.
+- The model is text-only — images are transcribed to text by the proxy (see
+  "Text-only model" above); `DS4_VISION=0` restores the old pass-through.
 - Where the key lives (`~/.claude-nous/settings.json`, `env.ANTHROPIC_AUTH_TOKEN`,
   chmod 600), and that nothing works until the placeholder is replaced if it is
   still there. The credits balance shows only in the portal dashboard — there is no

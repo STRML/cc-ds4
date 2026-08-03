@@ -169,6 +169,37 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   # exported when install.sh runs is baked in. Sweep the whole DS4_* namespace so
   # a knob proxy.py adds later works without a second edit here. Values are XML
   # entities only; the rest of the heredoc body is not re-expanded.
+  #
+  # Vision spawns `claude` directly. Under launchd the bare name is not on PATH,
+  # so bake the absolute binary into the agent. `|| true` keeps the
+  # `set -euo pipefail` install alive on a machine with no claude on PATH —
+  # vision simply fails open there. Validate it is a real executable (a cmux
+  # shim is a temp file that vanishes after reboot); an invalid path is left
+  # empty so the proxy falls back to shutil.which at startup.
+  _ds4_claude="$(command -v claude || true)"
+  if [ -n "$_ds4_claude" ] && [ ! -x "$_ds4_claude" ]; then
+    _ds4_claude=""
+  fi
+  DS4_CLAUDE_BIN="$_ds4_claude"
+  export DS4_CLAUDE_BIN
+
+  # The launchd agent env is sparse by default: no HOME, and a PATH of
+  # /usr/bin:/bin:/usr/sbin:/sbin. The vision child needs HOME to find
+  # ~/.claude (the Anthropic profile) + the login keychain, and needs the real
+  # claude bin dir on PATH or it exits 127 "claude not found in PATH" and every
+  # image placeholders. Bake the install-time values in so the agent matches the
+  # user's session. The claude dir is derived from the resolved binary's dir.
+  _ds4_claude_dir="$(dirname "$_ds4_claude" 2>/dev/null || true)"
+  DS4_AGENT_HOME="${HOME:-$HOME}"
+  DS4_AGENT_USER="${USER:-$(id -un)}"
+  DS4_AGENT_LOGNAME="${LOGNAME:-$(id -un)}"
+  if [ -n "$_ds4_claude_dir" ]; then
+    DS4_AGENT_PATH="/usr/bin:/bin:/usr/sbin:/sbin:$_ds4_claude_dir"
+  else
+    DS4_AGENT_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+  fi
+  export DS4_AGENT_HOME DS4_AGENT_USER DS4_AGENT_LOGNAME DS4_AGENT_PATH
+
   PLIST_ENV=""
   while IFS= read -r kv; do
     case "$kv" in
@@ -205,6 +236,17 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
        install.sh, which rewrites the plist and reloads the agent. -->
   <key>EnvironmentVariables</key>
   <dict>
+    <!-- The agent env is sparse by default (no HOME, minimal PATH). The vision
+         child needs HOME to find ~/.claude + the login keychain, and the real
+         claude bin dir on PATH (else exit 127, every image placeholders). -->
+    <key>HOME</key>
+    <string>$DS4_AGENT_HOME</string>
+    <key>USER</key>
+    <string>$DS4_AGENT_USER</string>
+    <key>LOGNAME</key>
+    <string>$DS4_AGENT_LOGNAME</string>
+    <key>PATH</key>
+    <string>$DS4_AGENT_PATH</string>
 $PLIST_ENV  </dict>
 
   <!-- KeepAlive must be this dict, not <false/>. With RunAtLoad and KeepAlive
