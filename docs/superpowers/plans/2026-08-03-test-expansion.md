@@ -1222,13 +1222,14 @@ Nothing to commit unless a probe exposed a genuine gap — if so, file a follow-
 
 ---
 
-## §Known Gaps (documented, not fixed — no production changes allowed)
+## §Known Gaps (documented, not fixed — the one approved production change aside)
 
 1. **`run()` previously raised `TypeError` when `render()` returned `None`** — at `common.py:274` (`sys.stdout.write(out + "\n")`; the `try` ends at 273, so `out + "\n"` on `None` escapes). **Fixed in production** (architect-approved): `run()` now prints a blank line and returns when `render()` returns nothing, honoring the fail-open contract in `install.sh:178`. Task 4's `FailOpen.test_render_crash_still_prints_something` asserts the blank line as a regression guard.
-2. **`proxy.pricing()` calls `get_json` with the model's base URL but the OpenRouter statusline reads the same endpoint without auth.** Not a test concern; the proxy is the server-side key holder.
-3. **The `install.sh` launch-agent block (`launchctl`/plist) is untested and must not be triggered by the tests** — it is macOS-only, mutates the user's launchd, and CI runs Linux. Task 5 skips the `WANT_PROXY=1` install on Darwin for this reason; the arg/JSON/symlink/cleanup logic is covered, the agent block is manually verified.
-4. **`statusline.run()` and `render()` are thin subprocess wrappers** — covered by stubbing `render`, not by invoking real `cship`.
-5. **The `tools/render_svg.py` `capture()` path requires a live proxy / `cship`** — only the pure functions and payload shape are pinned (Task 6).
+2. **`proxy.inject_missing_thinking` crashes on a non-list `messages` value** — `src/proxy.py:117` does `m.get("role")` where `m` is a member of `messages`; if `messages` is a string (or contains non-dict entries), `'str' object has no attribute 'get'` → `AttributeError` inside `rewrite()`. Pre-existing since the `3396866` refactor; surfaced by `test_proxy_edge.Malformed.test_messages_not_a_list`. A malformed client payload would crash the request handler. Not fixed here (outside the one approved prod change); fix is `if not isinstance(m, dict): continue`.
+3. **`proxy.pricing()` calls `get_json` with the model's base URL but the OpenRouter statusline reads the same endpoint without auth.** Not a test concern; the proxy is the server-side key holder.
+4. **The `install.sh` launch-agent block (`launchctl`/plist) is untested and must not be triggered by the tests** — it is macOS-only, mutates the user's launchd, and CI runs Linux. Task 5 skips the `WANT_PROXY=1` install on Darwin for this reason; the arg/JSON/symlink/cleanup logic is covered, the agent block is manually verified.
+5. **`statusline.run()` and `render()` are thin subprocess wrappers** — covered by stubbing `render`, not by invoking real `cship`.
+6. **The `tools/render_svg.py` `capture()` path requires a live proxy / `cship`** — only the pure functions and payload shape are pinned (Task 6).
 
 ## Self-Review
 
