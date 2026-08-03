@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
@@ -128,6 +129,87 @@ class EffortProxyParity(unittest.TestCase):
 SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 
 
+class SessionTokens(unittest.TestCase):
+    """Liveness gate for the on-demand idle exit.
+
+    Too eager and a live session loses its proxy mid-turn, which is exactly the
+    connection-refused failure the launch agent exists to prevent. Too lax and the
+    proxy never exits, which defeats running on demand at all.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self._saved = thinking_proxy.SESSIONS
+        thinking_proxy.SESSIONS = self.dir
+
+    def tearDown(self):
+        thinking_proxy.SESSIONS = self._saved
+
+    def token(self, name):
+        open(os.path.join(self.dir, str(name)), "w").close()
+
+    def test_no_directory_means_no_sessions(self):
+        thinking_proxy.SESSIONS = os.path.join(self.dir, "missing")
+        self.assertFalse(thinking_proxy.sessions_live())
+
+    def test_empty_directory_means_no_sessions(self):
+        self.assertFalse(thinking_proxy.sessions_live())
+
+    def test_our_own_pid_counts_as_live(self):
+        self.token(os.getpid())
+        self.assertTrue(thinking_proxy.sessions_live())
+
+    def test_dead_pid_is_not_live_and_gets_cleared(self):
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        self.token(dead.pid)
+        self.assertFalse(thinking_proxy.sessions_live())
+        self.assertEqual(os.listdir(self.dir), [], "stale token should be removed")
+
+    def test_one_live_token_outvotes_dead_ones(self):
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        self.token(dead.pid)
+        self.token(os.getpid())
+        self.assertTrue(thinking_proxy.sessions_live())
+
+    def test_non_numeric_names_are_left_alone(self):
+        """<profile>/sessions is Claude Code's own directory, full of <pid>.json.
+        Nothing here may delete a file it did not create."""
+        open(os.path.join(self.dir, "44242.json"), "w").close()
+        open(os.path.join(self.dir, "notes.txt"), "w").close()
+        self.assertFalse(thinking_proxy.sessions_live())
+        self.assertEqual(sorted(os.listdir(self.dir)), ["44242.json", "notes.txt"])
+
+    def test_effort_proxy_has_the_same_gate(self):
+        import effort_proxy
+        self.assertEqual(effort_proxy.IDLE_EXIT, thinking_proxy.IDLE_EXIT)
+        saved = effort_proxy.SESSIONS
+        try:
+            effort_proxy.SESSIONS = self.dir
+            self.token(os.getpid())
+            self.assertTrue(effort_proxy.sessions_live())
+        finally:
+            effort_proxy.SESSIONS = saved
+
+
+class ProfileIsolation(unittest.TestCase):
+    """claude-nous runs effort_proxy.py against its own profile directory."""
+
+    def test_profile_is_env_overridable(self):
+        import effort_proxy
+        self.assertTrue(effort_proxy.PROFILE.endswith(".claude-or-ds4"))
+        self.assertTrue(effort_proxy.LEDGER.startswith(effort_proxy.PROFILE))
+        self.assertTrue(effort_proxy.SESSIONS.startswith(effort_proxy.PROFILE))
+
+    def test_ledger_follows_the_profile(self):
+        """A hardcoded profile bills nous usage against the OpenRouter ledger."""
+        with open(os.path.join(SRC, "effort_proxy.py")) as fh:
+            src = fh.read()
+        self.assertIn('os.environ.get("DS4_PROFILE"', src)
+        self.assertNotIn('PROFILE = os.path.expanduser("~/.claude-or-ds4")', src)
+
+
 class SymlinkedInvocation(unittest.TestCase):
     """install.sh symlinks these into the profile directory.
 
@@ -165,3 +247,53 @@ class SymlinkedInvocation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LauncherIndependentLiveness(unittest.TestCase):
+    """The proxy must notice a session started without the launcher.
+
+    This is the failure that kept biting in practice: a shell holding an old
+    launcher runs claude without writing a token, the idle timer is never held
+    off, and the proxy exits under a session that is still open.
+    """
+
+    MARKER = "/tmp/ds4-liveness-probe"
+
+    @staticmethod
+    def ps_exposes_env():
+        """`ps -E` is a capability, not a given: it is macOS spelling, and a
+        restricted sandbox can deny exec of ps outright. Skip rather than fail,
+        since the proxy already degrades to session tokens when it is missing."""
+        env = dict(os.environ, DS4_PS_PROBE="1")
+        try:
+            out = subprocess.run(["ps", "-E", "-ax", "-o", "command="],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 env=env, timeout=10).stdout
+        except Exception:
+            return False
+        return b"DS4_PS_PROBE=1" in out
+
+    def setUp(self):
+        if not self.ps_exposes_env():
+            self.skipTest("ps -E does not expose process environments here")
+        # A real process carrying the marker in its environment, so the check is
+        # exercised against ps output rather than against the runner's own env.
+        env = dict(os.environ, CLAUDE_CONFIG_DIR=self.MARKER)
+        self.proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"], env=env)
+        self.addCleanup(self.proc.wait)
+        self.addCleanup(self.proc.kill)
+        self._saved = thinking_proxy.PROFILE
+        self.addCleanup(setattr, thinking_proxy, "PROFILE", self._saved)
+
+    def test_matches_a_process_using_this_profile(self):
+        thinking_proxy.PROFILE = self.MARKER
+        deadline = time.time() + 10
+        while time.time() < deadline and not thinking_proxy.claude_running():
+            time.sleep(0.2)
+        self.assertTrue(thinking_proxy.claude_running(),
+                        "a live process with CLAUDE_CONFIG_DIR set must register")
+
+    def test_does_not_match_an_unrelated_profile(self):
+        thinking_proxy.PROFILE = "/tmp/ds4-no-such-profile-anywhere"
+        self.assertFalse(thinking_proxy.claude_running())

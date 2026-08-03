@@ -5,7 +5,7 @@ Also serves GET /__spend, which the statusline uses to price a session correctly
 Claude Code prices the ds4-* sentinels against Anthropic's table and overstates
 DeepSeek cost by orders of magnitude.
 """
-import http.server, json, os, threading, time, urllib.request, urllib.error
+import http.server, json, os, subprocess, threading, time, urllib.request, urllib.error
 
 UPSTREAM = os.environ.get("DS4_UPSTREAM", "https://openrouter.ai/api")
 REAL_MODEL = os.environ.get("DS4_MODEL", "deepseek/deepseek-v4-flash-0731")
@@ -46,11 +46,92 @@ EFFORT = {
     "ds4-low": "low",
 }
 
-PROFILE = os.path.expanduser("~/.claude-or-ds4")
+# claude-nous runs this same script against a different profile, so this cannot be
+# hardcoded: it decides which settings.json the key comes from and which ledger the
+# spend lands in. Getting it wrong bills one profile's usage against the other's
+# 7-day figure and sends the wrong key upstream.
+PROFILE = os.path.expanduser(os.environ.get("DS4_PROFILE", "~/.claude-or-ds4"))
 LEDGER = os.path.join(PROFILE, "spend-ledger.jsonl")
 LEDGER_MIN_INTERVAL = 300      # don't append more than once every 5 minutes
 CREDITS_TTL = 60               # /api/v1/credits is polled on every statusline render
 WEEK = 7 * 86400
+
+# On-demand lifecycle. The launch agent has RunAtLoad and KeepAlive off: the
+# launcher kickstarts this when a session begins, and nothing restarts it, so it
+# has to decide when to stop. It exits once no session is registered AND nothing
+# has come through for DS4_IDLE_EXIT seconds. Set 0 to disable and run forever.
+#
+# A session is a file named after the launcher's shell PID under
+# <profile>/.ds4-sessions, created before `claude` starts and removed after it
+# exits. The name matters: <profile>/sessions is Claude Code's own state
+# directory and must not be written into or reaped. Liveness is rechecked
+# rather than trusted, so a hard-killed shell cannot pin the proxy open. Both
+# conditions matter: the token covers a session sitting open with no traffic, and
+# the timer covers a `claude` started without going through the launcher.
+SESSIONS = os.path.join(PROFILE, ".ds4-sessions")
+IDLE_EXIT = int(os.environ.get("DS4_IDLE_EXIT", "900"))
+
+_last_seen = time.time()
+
+
+def sessions_live():
+    """True if any registered session PID is alive. Clears tokens that are not."""
+    try:
+        names = os.listdir(SESSIONS)
+    except OSError:
+        return False
+    live = False
+    for n in names:
+        try:
+            pid = int(n)
+        except ValueError:
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            try:
+                os.unlink(os.path.join(SESSIONS, n))
+            except OSError:
+                pass
+            continue
+        except OSError:
+            pass          # PermissionError and friends still mean it exists
+        live = True
+    return live
+
+
+def claude_running():
+    """True if a live claude process is using this profile.
+
+    This is the check that does not depend on the launcher. `ps -E` prints each
+    process's environment, and Claude Code is started with CLAUDE_CONFIG_DIR set,
+    so an active session is visible however it was launched -- a stale shell
+    function, a bare `env CLAUDE_CONFIG_DIR=... claude`, an IDE. Session tokens
+    stay as a second signal because `ps -E` is macOS spelling and prints nothing
+    useful everywhere else.
+
+    A substring match can only ever be over-eager, and over-eager here just means
+    the proxy stays up a little longer than it had to.
+    """
+    try:
+        out = subprocess.run(["ps", "-E", "-ax", "-o", "command="],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             timeout=10).stdout.decode("utf8", "replace")
+    except Exception:
+        return False
+    return f"CLAUDE_CONFIG_DIR={PROFILE}" in out
+
+
+def idle_watch():
+    # Poll no slower than half the timeout, so a short DS4_IDLE_EXIT is honoured
+    # promptly instead of being rounded up to the poll interval.
+    every = max(1, min(30, IDLE_EXIT // 2))
+    while IDLE_EXIT > 0:
+        time.sleep(every)
+        if sessions_live() or claude_running() or time.time() - _last_seen < IDLE_EXIT:
+            continue
+        print(f"no live sessions and idle for {IDLE_EXIT}s, exiting", flush=True)
+        os._exit(0)
 
 
 def _api_key():
@@ -186,6 +267,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(msg)
 
     def do_GET(self):
+        global _last_seen
+        _last_seen = time.time()
         if self.path != "/__spend":
             self._json(404, {"error": {"message": "not found"}})
             return
@@ -207,6 +290,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._json(200, out)
 
     def do_POST(self):
+        global _last_seen
+        _last_seen = time.time()
         body = self.rfile.read(int(self.headers.get("content-length", 0)))
         try:
             payload = json.loads(body)
@@ -293,5 +378,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"ds4 effort proxy on 127.0.0.1:{PORT} -> {UPSTREAM} ({REAL_MODEL}) zdr={ZDR}", flush=True)
+    print(f"ds4 effort proxy on 127.0.0.1:{PORT} -> {UPSTREAM} ({REAL_MODEL}) "
+          f"zdr={ZDR} profile={PROFILE} idle exit {IDLE_EXIT}s", flush=True)
+    threading.Thread(target=idle_watch, daemon=True).start()
     http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

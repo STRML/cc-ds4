@@ -1,13 +1,63 @@
 name: tests
 on: [push, pull_request]
+
 jobs:
   test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is not decoration: the launch agents run /usr/bin/python3, which is
+        # 3.9 on macOS, so the proxies have to import and run there. 3.12 is what
+        # a brew or pyenv user gets. The README claims 3.9+, so prove it.
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python3 -m unittest discover -s tests -v
+      - run: python3 -m compileall -q src tools
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n install.sh
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --severity=warning install.sh
+
+  proxies-start:
+    # The unit tests import the proxies but never bind a socket. A proxy that is
+    # syntax-clean and still dies on startup breaks every profile, and that
+    # failure stays invisible until someone launches a session.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - run: python3 -m unittest discover -s tests -v
-      - run: python3 -m compileall -q src
-      - run: bash -n install.sh
+          python-version: "3.9"
+      - name: each proxy binds its port and forwards
+        run: |
+          set -euo pipefail
+          for spec in "src/thinking_proxy.py 31500" "src/effort_proxy.py 31501"; do
+            set -- $spec
+            script=$1; port=$2
+            DS4_IDLE_EXIT=0 DS4_PROFILE=/tmp/no-such-profile python3 "$script" &
+            pid=$!
+            for _ in $(seq 40); do
+              python3 -c "import socket,sys; sys.exit(socket.socket().connect_ex(('127.0.0.1',$port)))" && break
+              sleep 0.25
+            done
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+              -X POST "http://127.0.0.1:$port/v1/messages" \
+              -H 'content-type: application/json' \
+              -d '{"model":"ds4-low","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}' || true)
+            echo "$script -> HTTP $code"
+            # Any status proves it bound, parsed the body, and reached upstream.
+            # 000 means curl got no response at all, which is the real failure.
+            test "$code" != "000"
+            kill $pid
+          done
