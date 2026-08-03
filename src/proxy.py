@@ -630,7 +630,9 @@ def main():
     # Emitting them from here keeps PROFILES the only place ports are declared.
     if "--ports" in sys.argv:
         for name, cfg in served.items():
-            print(f"{name} {os.environ.get(f'DS4_PORT_{name.upper()}', cfg['port'])}")
+            # int() so a junk DS4_PORT_* override fails here rather than being
+            # interpolated into the plist install.sh builds from this output.
+            print(f"{name} {int(os.environ.get(f'DS4_PORT_{name.upper()}', cfg['port']))}")
         return
 
     print(f"ds4 proxy: no thinking at or below max_tokens={NOTHINK_BELOW}, "

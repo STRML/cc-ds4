@@ -64,6 +64,31 @@ esac
 
 [ -d "$DIR" ] || { echo "no profile at $DIR — create it first with profiles/*.md" >&2; exit 1; }
 SETTINGS="$DIR/settings.json"
+
+# A port reaches the plist and the base URL, and both end up in XML or JSON, so
+# anything not a plain decimal is rejected rather than escaped. The range starts
+# at 1024 because the agent runs unprivileged and cannot bind below it.
+valid_port() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
+}
+
+# DS4_PORT_<PROFILE> overrides the port and proxy.py is what honours it, so the
+# effective value comes from there instead of a second copy of the mapping. The
+# hardcoded PORT above is the fallback for a --dir that proxy.py cannot see.
+# Without this the plist binds the override while settings.json still points at
+# the default, which leaves Claude talking to a port nothing listens on.
+if [ "$WANT_PROXY" = 1 ]; then
+  eff="$(/usr/bin/python3 "$REPO/src/proxy.py" --ports 2>/dev/null \
+         | awk -v p="$PROFILE" '$1 == p {print $2}')"
+  [ -n "$eff" ] && PORT="$eff"
+fi
+valid_port "$PORT" || {
+  echo "port '$PORT' is not a decimal 1024-65535 (check DS4_PORT_$(echo "$PROFILE" | tr '[:lower:]' '[:upper:]'))" >&2
+  exit 1
+}
 [ -f "$SETTINGS" ] || { echo "no settings.json in $DIR" >&2; exit 1; }
 
 command -v cship >/dev/null 2>&1 || echo "warning: cship not on PATH; edit CSHIP in $SCRIPT" >&2
@@ -181,6 +206,10 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   PLIST_SOCKETS=""
   while read -r sock_name sock_port; do
     [ -n "$sock_name" ] || continue
+    valid_port "$sock_port" || {
+      echo "agent:    $sock_name port '$sock_port' is not a decimal 1024-65535; not writing plist" >&2
+      exit 1
+    }
     PLIST_SOCKETS+="    <key>${sock_name}</key>
     <dict>
       <key>SockNodeName</key>
