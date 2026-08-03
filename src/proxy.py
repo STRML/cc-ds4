@@ -71,6 +71,11 @@ def should_retry(payload):
     tier = payload.get("model") if isinstance(payload, dict) else None
     return isinstance(tier, str) and tier != "ds4-xhigh"
 
+
+# The full set /ds4-effort accepts. The tier map above only names the four
+# Claude Code tiers; the override file may name any of these.
+EFFORT_LEVELS = ("max", "xhigh", "high", "medium", "low", "minimal", "none")
+
 # ZDR endpoints whose context is smaller than the 1M the profile advertises. A
 # long session that routes here overflows the endpoint rather than the declared
 # window. Recheck /api/v1/models/{id}/endpoints -> context_length when the
@@ -127,10 +132,46 @@ PLACEHOLDER = {"type": "thinking", "thinking": "(elided)", "signature": "ds4-pro
 _last_seen = time.time()
 _lock = threading.Lock()
 _cache = {}                    # (name, kind) -> cached value
+_effort_cache = {}             # path -> (mtime_ns, ctime_ns, size, ino, level|None)
 _inflight = 0                  # relayed requests open; idle_watch must not exit while nonzero
 
 
 # ── request rewriting ────────────────────────────────────────────────────────
+
+def effort_override(cfg):
+    """Per-profile effort pin from <profile>/effort-override, or None.
+
+    One line, one of EFFORT_LEVELS; /ds4-effort is the writer. A file survives
+    a proxy restart, and the stat-keyed cache keeps the read off the
+    per-request path: a request is one stat plus a dict lookup unless the file
+    changed. The key also carries the inode: the command writes via an atomic
+    replace, which allocates a fresh inode even on filesystems whose clock
+    tick is coarser than the gap between writes (ext2/ext3, FAT), where
+    mtime/ctime alone would go stale. An absent file, or one holding anything
+    outside EFFORT_LEVELS, reads as None (tier default) — OpenRouter accepts
+    the parameter and DeepSeek drops unknown values without error, so an
+    invalid level must fail here rather than vanish upstream.
+    """
+    path = os.path.join(cfg["dir"], "effort-override")
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    with _lock:
+        hit = _effort_cache.get(path)
+        if hit and hit[:4] == (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino):
+            return hit[4]
+    level = None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = fh.read().strip()
+        if raw in EFFORT_LEVELS:
+            level = raw
+    except OSError:
+        pass
+    with _lock:
+        _effort_cache[path] = (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino, level)
+    return level
 
 def inject_missing_thinking(payload):
     """Count of assistant tool_use messages given a placeholder thinking block.
@@ -161,8 +202,8 @@ def rewrite(payload, cfg):
         effort = EFFORT.get(tier)
         if effort:
             payload["model"] = cfg["model"]
-            payload["reasoning_effort"] = effort
-            notes.append(f"{tier} -> {cfg['model']} effort={effort}")
+            payload["reasoning_effort"] = effort_override(cfg) or effort
+            notes.append(f"{tier} -> {cfg['model']} effort={payload['reasoning_effort']}")
         elif isinstance(tier, str) and _is_anthropic_model(tier):
             # A literal Anthropic model (sonnet, claude-sonnet-4-5, opus, ...)
             # bypassed the sentinel system and would bill real Anthropic rates on

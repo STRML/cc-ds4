@@ -179,6 +179,31 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertIn("--dir is not supported", proc.stderr)
 
+    def test_effort_command_is_linked_into_the_profile(self):
+        # No shared ~/.claude/commands exists, so install.sh makes a real
+        # commands dir in the profile and links the command into it.
+        proc = self.run_install("openrouter")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        cmd = os.path.join(self.home, ".claude-or-ds4", "commands", "ds4-effort.md")
+        self.assertTrue(os.path.islink(cmd))
+        self.assertEqual(os.readlink(cmd),
+                         os.path.join(REPO, "src", "commands", "ds4-effort.md"))
+
+    def test_effort_command_lands_in_the_shared_commands_dir(self):
+        # The profile prompt symlinks commands -> ~/.claude/commands when it
+        # exists; install.sh must write through that link, not replace it.
+        shared = os.path.join(self.home, ".claude", "commands")
+        os.makedirs(shared)
+        profile_dir = os.path.join(self.home, PROFILE_DIRS["nous"])
+        os.makedirs(profile_dir, exist_ok=True)
+        os.symlink(shared, os.path.join(profile_dir, "commands"))
+        proc = self.run_install("nous")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(os.path.isdir(shared))
+        self.assertTrue(os.path.islink(os.path.join(shared, "ds4-effort.md")))
+        self.assertTrue(os.path.islink(os.path.join(profile_dir, "commands")),
+                        "commands symlink must not be replaced by a real dir")
+
 
 class MemoryLinkTest(unittest.TestCase):
     """ds4-link-memory.sh shares project memory with the canonical ~/.claude copy.

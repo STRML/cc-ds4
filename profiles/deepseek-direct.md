@@ -77,6 +77,9 @@ because several of these facts contradict what you would reasonably assume.
   `high`, and `max`, median output tokens came out 225 / 191 / 272, which is not
   monotonic and is swamped by run-to-run variance. Treat effort as unproven here and
   use the global `CLAUDE_CODE_EFFORT_LEVEL` instead.
+- The shared `/ds4-effort` command is installed on this profile too, but refuses
+  to write: with effort unproven here there is nothing to override, and the
+  command says so rather than pretend.
 - `reasoning_effort` (the OpenRouter spelling) is **silently ignored**. So are
   unknown parameter names generally. Do not rely on an absent error meaning success.
 - Also ignored: `anthropic-beta`, `anthropic-version`, `container`, `mcp_servers`,

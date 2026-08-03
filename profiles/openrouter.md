@@ -311,6 +311,7 @@ What it does for this profile:
 | Concern | Behaviour |
 |---|---|
 | tier → effort | rewrites the `ds4-*` sentinel to the real slug and injects `reasoning_effort` |
+| mid-session effort | `/ds4-effort <level>` writes `<profile>/effort-override`; the proxy applies it to the next request, overriding the tier map |
 | small calls | `max_tokens` at or below 8192 gets `thinking: {"type":"disabled"}`; `DS4_NOTHINK_BELOW` moves the line |
 | zero data retention | injects `provider: {"zdr": true, "data_collection": "deny"}` |
 | context floor | `ignore: ["Io Net"]` — ZDR-eligible but only 262,100 context vs 1,048,576 elsewhere |
@@ -318,6 +319,28 @@ What it does for this profile:
 | cost reporting | serves `GET /__spend` with live rates, 7-day spend, and credits remaining |
 | Cloudflare | sends a `curl`-style `User-Agent` (`DS4_UA`) |
 | debugging | `DS4_DEBUG=1` logs each rewrite and any non-200 status |
+
+### Changing effort mid-session: `/ds4-effort`
+
+`CLAUDE_CODE_EFFORT_LEVEL` is read once at startup, and `/effort` changes an
+internal value that never reaches the request body — on this profile it changes
+nothing. The proxy is the only thing that can move the level live, and
+`install.sh` installs the write side as a `/ds4-effort` slash command. It writes
+`<profile>/effort-override`, one line, one of `max` / `xhigh` / `high` /
+`medium` / `low` / `minimal` / `none`:
+
+- `/ds4-effort high` sets the level for this profile; the proxy applies it to
+  the next request, no restart.
+- `/ds4-effort` with no argument reports the current override, or says there is
+  none (meaning the tier defaults from step 2 apply).
+- Anything else is rejected against the valid set — OpenRouter accepts the
+  parameter and DeepSeek drops unknown values without error, so an invalid
+  level must fail here, not vanish upstream.
+
+The override survives a proxy restart (it is a file, not process state) and is
+per profile: one proxy process serves all three, so a global would leak across
+them the same way a shared key would. The direct profile maps no effort at all,
+so the command refuses there.
 
 `./install.sh --profile openrouter` is what installs it: it points `settings.json` at
 `http://127.0.0.1:31501`, and on macOS writes and loads a single launch agent,
