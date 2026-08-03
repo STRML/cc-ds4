@@ -579,6 +579,9 @@ def server_on_fd(fd, handler):
     bind_and_activate=False keeps TCPServer from binding a port of its own, but
     it still constructs a throwaway socket in __init__, so that one is closed
     before the inherited fd takes its place.
+
+    AF_INET is hardcoded because install.sh only ever writes SockNodeName
+    127.0.0.1. macOS has no SO_DOMAIN, so there is nothing to detect it from.
     """
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler,
                                           bind_and_activate=False)
@@ -595,19 +598,23 @@ def serve(name, cfg):
     inherited = launchd_sockets(name)
     try:
         if inherited:
-            srv = server_on_fd(inherited[0], handler)
+            # One key can yield several fds. All of them are already listening,
+            # so an fd nobody accepts on is a port that hangs instead of
+            # refusing - serve every one rather than picking the first.
+            srvs = [server_on_fd(fd, handler) for fd in inherited]
             # launchd's plist is authoritative once it owns the socket, so
             # report where we actually are rather than where we meant to be.
-            port = srv.server_address[1]
+            port = srvs[0].server_address[1]
             origin = "launchd"
         else:
-            srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+            srvs = [http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)]
             origin = "self-bound"
     except OSError as e:
         print(f"  {name:<11} :{port} FAILED to bind: {e}", file=sys.stderr, flush=True)
         return False
     print(f"  {name:<11} :{port} -> {cfg['upstream']} ({origin})", flush=True)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    for srv in srvs:
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
     return True
 
 
