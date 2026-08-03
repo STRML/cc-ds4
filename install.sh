@@ -71,10 +71,13 @@ command -v cship >/dev/null 2>&1 || echo "warning: cship not on PATH; edit CSHIP
 BAR_DST="$DIR/ds4-statusline.py"
 HOOK_SRC="$REPO/src/ds4-proxy-kickstart.sh"
 HOOK_DST="$DIR/ds4-proxy-kickstart.sh"
+MEMLINK_SRC="$REPO/src/ds4-link-memory.sh"
+MEMLINK_DST="$DIR/ds4-link-memory.sh"
 
 echo "profile:  $DIR"
 echo "bar:      $BAR_DST -> $SCRIPT"
 echo "config:   $DIR/cship.toml  (from $(basename "$CONFIG"))"
+echo "memory:   $MEMLINK_DST -> $MEMLINK_SRC  (shares memory with ~/.claude)"
 if [ "$WANT_PROXY" = 1 ]; then
   echo "proxy:    $REPO/src/proxy.py  (this profile on :$PORT)"
   echo "hook:     $HOOK_DST -> $HOOK_SRC  (SessionStart kickstart)"
@@ -96,7 +99,13 @@ link() {
 
 cp "$CONFIG" "$DIR/cship.toml"
 link "$SCRIPT" "$BAR_DST"
+link "$MEMLINK_SRC" "$MEMLINK_DST"
 [ "$WANT_PROXY" = 1 ] && link "$HOOK_SRC" "$HOOK_DST"
+
+# Memory is shared with the real ~/.claude: project memory under this profile dir
+# is symlinked to the canonical copy so notes are visible on every profile. Run
+# it now for existing projects; the SessionStart hook runs it again for new ones.
+"$MEMLINK_DST" "$DIR" 2>/dev/null || true
 
 # A previous release gave each profile its own proxy copy. One process serves them
 # all now, so leaving those behind means a stale second binder fighting for the port.

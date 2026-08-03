@@ -358,6 +358,11 @@ touching the launcher. `install.sh` registers a `SessionStart` hook
 (`ds4-proxy-kickstart.sh`) that fires on resume too and starts the proxy, so a
 restored session works on a cold boot.
 
+Memory is shared across profiles: `install.sh` symlinks this profile's
+`projects/*/memory` to the real `~/.claude/projects/*/memory` (see
+`ds4-link-memory.sh`), so notes written on any profile are visible on all of
+them.
+
 Fish — write `~/.config/fish/conf.d/zz-ds4-proxy.fish`. **The filename must sort
 after `ccam.fish`**, because ccam defines these as plain aliases in a loop and the
 last definition wins. A file in `fish/functions/` will not work: fish skips

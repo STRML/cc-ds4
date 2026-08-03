@@ -180,5 +180,81 @@ class InstallTest(unittest.TestCase):
         self.assertIn("--dir is not supported", proc.stderr)
 
 
+class MemoryLinkTest(unittest.TestCase):
+    """ds4-link-memory.sh shares project memory with the canonical ~/.claude copy.
+
+    A profile is a separate config dir, so without this its projects/*/memory is
+    per-profile state: notes written on one profile are invisible on the others.
+    """
+
+    LINK = os.path.join(REPO, "src", "ds4-link-memory.sh")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = os.path.join(self.tmp.name, "home")
+        self.canon = os.path.join(self.home, ".claude", "projects")
+        self.profile = os.path.join(self.home, ".claude-ds4")
+
+    def run_link(self, profile_dir):
+        return subprocess.run(
+            ["bash", self.LINK, profile_dir],
+            capture_output=True, text=True,
+            env=dict(os.environ, HOME=self.home),
+        )
+
+    def test_links_real_memory_dirs_and_merges_notes(self):
+        # canonical project has a note; the profile dir has a different one plus a
+        # collision. The helper must move the profile-only note into canonical,
+        # keep canonical's version of the collision, and symlink the dir.
+        canon1 = os.path.join(self.canon, "-proj1", "memory")
+        os.makedirs(canon1)
+        with open(os.path.join(canon1, "both.md"), "w") as fh:
+            fh.write("canon\n")
+        prof1 = os.path.join(self.profile, "projects", "-proj1", "memory")
+        os.makedirs(prof1)
+        with open(os.path.join(prof1, "both.md"), "w") as fh:
+            fh.write("profile\n")
+        with open(os.path.join(prof1, "prof-only.md"), "w") as fh:
+            fh.write("x\n")
+
+        proc = self.run_link(self.profile)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # dir became a symlink to canonical
+        self.assertTrue(os.path.islink(prof1))
+        self.assertEqual(os.readlink(prof1), canon1)
+        # profile-only note moved in, collision kept canonical's content
+        self.assertTrue(os.path.exists(os.path.join(canon1, "prof-only.md")))
+        with open(os.path.join(canon1, "both.md")) as fh:
+            self.assertEqual(fh.read(), "canon\n")
+
+    def test_no_memory_dir_is_left_alone(self):
+        # a project dir with no memory subdir must not be touched
+        proj3 = os.path.join(self.profile, "projects", "-proj3")
+        os.makedirs(proj3)
+        self.run_link(self.profile)
+        self.assertFalse(os.path.exists(os.path.join(proj3, "memory")))
+
+    def test_already_linked_is_a_noop(self):
+        canon1 = os.path.join(self.canon, "-proj1", "memory")
+        os.makedirs(canon1)
+        prof1 = os.path.join(self.profile, "projects", "-proj1", "memory")
+        os.makedirs(prof1)
+        self.run_link(self.profile)
+        self.assertTrue(os.path.islink(prof1))
+        # second run must not error or re-create a real dir
+        proc = self.run_link(self.profile)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(os.path.islink(prof1))
+
+    def test_no_canonical_means_nothing_happens(self):
+        # no ~/.claude/projects at all -> helper exits 0 and links nothing
+        prof1 = os.path.join(self.profile, "projects", "-proj1", "memory")
+        os.makedirs(prof1)
+        proc = self.run_link(self.profile)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(os.path.islink(prof1))
+
+
 if __name__ == "__main__":
     unittest.main()

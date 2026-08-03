@@ -14,7 +14,16 @@
 # Fails open: if launchctl is missing (Linux) or the agent is unknown, it just
 # exits 0. The launcher's longer, port-waiting kickstart still covers the
 # interactive path.
+#
+# It also keeps memory shared: the profile's per-project memory dirs are symlinked
+# to the canonical ~/.claude copy (see ds4-link-memory.sh), and a new project dir
+# created since the last run needs linking before this session writes to it.
 set -euo pipefail
+
+# Link any new project memory dirs to canonical before anything else.
+if [ -x "$(dirname "$0")/ds4-link-memory.sh" ]; then
+  "$(dirname "$0")/ds4-link-memory.sh" "${CLAUDE_CONFIG_DIR:-$HOME}" 2>/dev/null || true
+fi
 
 # Fast path: the port already answers, so the proxy is up and nothing to do.
 port() {

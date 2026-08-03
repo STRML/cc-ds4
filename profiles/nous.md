@@ -303,6 +303,13 @@ touching the launcher. `install.sh` registers a `SessionStart` hook
 (`ds4-proxy-kickstart.sh`) that fires on resume too and starts the proxy, so a
 restored session works on a cold boot.
 
+Memory is shared across profiles. Claude Code keeps project memory under the
+config dir, so a per-profile dir would isolate it. `install.sh` installs
+`ds4-link-memory.sh` and symlinks this profile's `projects/*/memory` to the real
+`~/.claude/projects/*/memory`, and the `SessionStart` hook re-links any new
+project on every session. A note written on any profile is visible on all of
+them.
+
 Fish — write `~/.config/fish/conf.d/zz-ds4-proxy.fish`. **The filename must sort
 after `ccam.fish`**, because ccam defines these as plain aliases in a loop and the
 last definition wins. A file in `fish/functions/` will not work: fish skips
