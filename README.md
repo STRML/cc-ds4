@@ -1,4 +1,22 @@
-# Running non-Anthropic models in Claude Code, safely
+<h1 align="center">cc-ds4</h1>
+
+<p align="center">
+  <strong>Run DeepSeek V4 in Claude Code without breaking your Anthropic setup.</strong><br>
+  Isolated profiles, zero-data-retention routing, and a status line that reports what you actually spent.
+</p>
+
+<p align="center">
+  <a href="https://github.com/STRML/cc-ds4/actions/workflows/tests.yml"><img alt="tests" src="https://github.com/STRML/cc-ds4/actions/workflows/tests.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <img alt="python" src="https://img.shields.io/badge/python-3.9%2B-blue.svg">
+  <img alt="dependencies" src="https://img.shields.io/badge/dependencies-none-brightgreen.svg">
+</p>
+
+<p align="center">
+  <img src="assets/statusline.svg" alt="Two status lines: ds-deepseek-v4-flash and or-deepseek-v4-flash-0731, each showing context usage, session cost, 7-day spend, and credit remaining." width="100%">
+</p>
+
+---
 
 Claude Code talks to Anthropic over a documented HTTP API, and it will talk to
 anything that speaks the same shape. Several providers now serve an
@@ -15,14 +33,30 @@ The fix is per-profile config directories. Each profile is its own
 key, and model names. `CLAUDE_CONFIG_DIR` selects one at launch. Your normal `claude`
 keeps hitting Anthropic. Nothing global is touched.
 
-Three setup prompts live in `profiles/`, one per profile. Paste one into a Claude
-Code session and it will do the setup, asking before anything irreversible.
+## Quick start
 
-| Profile | Provider | Model | Pin a dated build? | Extra process |
-|---|---|---|---|---|
-| `claude-ds4` | DeepSeek direct | `deepseek-v4-flash` / `-pro` | no | none |
-| `claude-or-ds4` | OpenRouter | `deepseek-v4-flash-0731` | **yes** | proxy on :8799 |
-| `claude-kimi` | Moonshot | `kimi-k3` / `k3` | n/a | none |
+Paste a setup prompt into a Claude Code session and it does the work, asking before
+anything irreversible:
+
+| Profile | Provider | Model | Pins a dated build? | Extra process | Setup |
+|---|---|---|---|---|---|
+| `claude-ds4` | DeepSeek direct | `deepseek-v4-flash` / `-pro` | no | none | [prompt](profiles/deepseek-direct.md) |
+| `claude-or-ds4` | OpenRouter | `deepseek-v4-flash-0731` | **yes** | proxy on :8799 | [prompt](profiles/openrouter.md) |
+| `claude-kimi` | Moonshot | `kimi-k3` / `k3` | n/a | none | [prompt](profiles/kimi.md) |
+
+Already have a profile and just want the corrected status line:
+
+```sh
+git clone https://github.com/STRML/cc-ds4 && cd cc-ds4
+./install.sh --profile openrouter        # or --profile direct
+```
+
+> [!WARNING]
+> **Claude Code's cost figure is wrong on these profiles, and plausibly wrong.**
+> It prices whatever model name you give it against Anthropic's table. One measured
+> session reported **$0.152731** against **$0.002637** actual. The multiplier scales
+> with the output-token share, so you cannot divide it out. That is what the status
+> line in this repo exists to fix.
 
 ## Which one: this is a privacy decision, not a performance one
 
@@ -77,9 +111,13 @@ Facts worth knowing before you rely on it:
   price, quantization, throughput, latency, and uptime per endpoint, but nothing about
   retention. The only way to learn the ZDR pool is to send `zdr: true` and read back
   which provider answered.
-- **ZDR is not as restrictive as it sounds.** For `deepseek-v4-flash-0731`, 7 of 11
-  endpoints survive the filter (DeepInfra, Fireworks, Novita, Parasail, SiliconFlow,
-  Io Net, Mancer 2). Excluded: GMICloud, Cloudflare, AtlasCloud.
+- **ZDR is not as restrictive as it sounds.** 7 of 11 endpoints survive the filter
+  for `deepseek-v4-flash-0731`:
+
+  | | endpoints |
+  |---|---|
+  | ✅ ZDR-eligible | DeepInfra, Fireworks, Novita, Parasail, SiliconFlow, Io Net, Mancer 2 |
+  | ❌ filtered out | GMICloud, Cloudflare, AtlasCloud |
 - **It does not cost you quantization quality.** DeepInfra answers most requests
   because it is cheapest, and it is the one fp4 endpoint in the pool, but the other six
   ZDR providers are fp8 and routing reaches them regularly.
@@ -107,15 +145,18 @@ words "PURPLE 7391 / ZEBRA MARMALADE" plus a prompt asking for a transcription:
 
 DeepSeek V4 is text-only, and no `deepseek*` model on OpenRouter accepts image input.
 
-The direct endpoint's behaviour is the dangerous one: it drops image blocks with no
-error at all. The model then answers from your surrounding text as though the image
-were absent, so you get a confident wrong answer about a screenshot it never received.
-That is much harder to catch than a refusal. Keep a vision-capable profile for those
-turns.
+> [!CAUTION]
+> The direct endpoint drops image blocks **without any error**. The model then answers
+> from your surrounding text as though the image were absent, so a screenshot it never
+> received produces a confident wrong answer rather than a refusal.
+
+Keep a vision-capable profile for those turns. On OpenRouter this at least fails
+loudly with a 404; on the direct endpoint it does not fail at all.
 
 ## Things that cost real time to discover
 
-Collected here because each one wasted an hour somewhere.
+<details>
+<summary>Nine findings, each of which wasted an hour somewhere. Worth reading before you debug anything.</summary>
 
 - **Base URL trailing path differs by provider.** Claude Code appends `/v1/messages`
   itself. OpenRouter wants `https://openrouter.ai/api` with no `/v1`; adding it
@@ -162,6 +203,8 @@ Collected here because each one wasted an hour somewhere.
   drifts enough between requests that consecutive batches will show you a pattern that
   is not there. Interleave your comparisons, or pin with `provider.only` and read the
   error.
+
+</details>
 
 ## Layout
 
