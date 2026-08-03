@@ -579,5 +579,29 @@ class RetryGuard(unittest.TestCase):
         self.assertFalse(proxy.should_retry({}))
 
 
+class AnthropicModelGuard(unittest.TestCase):
+    """Literal Anthropic models (sonnet/opus/haiku) must not bill on the profile.
+
+    The /model picker can expose real upstream models via gateway discovery,
+    which bypass the ds4-* sentinel system. The proxy rewrites them to the
+    profile's deepseek model defensively.
+    """
+
+    def test_literal_sonnet_is_rewritten(self):
+        p = call(model="sonnet")
+        proxy.rewrite(p, NOUS)
+        self.assertEqual(p["model"], NOUS["model"])
+
+    def test_claude_sonnet_id_is_rewritten(self):
+        p = call(model="claude-sonnet-4-5")
+        proxy.rewrite(p, OPENROUTER)
+        self.assertEqual(p["model"], OPENROUTER["model"])
+
+    def test_unknown_sentinel_passes_through(self):
+        p = call(model="ds4-something")
+        proxy.rewrite(p, NOUS)
+        self.assertEqual(p["model"], "ds4-something")
+
+
 if __name__ == "__main__":
     unittest.main()

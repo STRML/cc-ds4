@@ -55,6 +55,12 @@ RETRY_ATTEMPTS = 3
 RETRY_BACKOFF = 1.5          # seconds, scaled by attempt number
 
 
+def _is_anthropic_model(name):
+    """True for a literal Anthropic model id that the sentinel system missed."""
+    n = name.lower()
+    return any(k in n for k in ("sonnet", "opus", "haiku", "claude-"))
+
+
 def should_retry(payload):
     """True when a transient error on this request should be retried in-proxy.
 
@@ -157,6 +163,13 @@ def rewrite(payload, cfg):
             payload["model"] = cfg["model"]
             payload["reasoning_effort"] = effort
             notes.append(f"{tier} -> {cfg['model']} effort={effort}")
+        elif isinstance(tier, str) and _is_anthropic_model(tier):
+            # A literal Anthropic model (sonnet, claude-sonnet-4-5, opus, ...)
+            # bypassed the sentinel system and would bill real Anthropic rates on
+            # this profile's upstream. The /model picker can expose these via
+            # gateway discovery; rewrite defensively so nothing leaks.
+            payload["model"] = cfg["model"]
+            notes.append(f"{tier} -> {cfg['model']} (literal Anthropic model)")
 
     # DS4_ZDR only ever disables ZDR, never enables it on a profile whose table
     # row does not support it (Nous 403s any provider block at all).
