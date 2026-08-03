@@ -79,6 +79,10 @@ class InstallTest(unittest.TestCase):
         # branch is taken on Linux CI too; the rest of the script does not care
         # about the real kernel.
         _write_stub(self.bindir, "uname", "#!/usr/bin/env bash\necho Darwin\n")
+        # Vision bakes DS4_CLAUDE_BIN (command -v claude) into the agent. A stub
+        # on PATH makes that deterministic in CI, which has no real claude.
+        _write_stub(self.bindir, "claude",
+                    "#!/usr/bin/env bash\nexit 0\n")
 
     def run_install(self, profile, *extra, env=None):
         profile_dir = os.path.join(self.home, PROFILE_DIRS[profile])
