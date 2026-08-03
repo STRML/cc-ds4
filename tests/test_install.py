@@ -148,6 +148,13 @@ class InstallTest(unittest.TestCase):
         # the launchd agent can find it despite a minimal PATH.
         self.assertIn("DS4_CLAUDE_BIN", env)
         self.assertTrue(os.path.isabs(env["DS4_CLAUDE_BIN"]))
+        # The vision child needs HOME to find ~/.claude + the keychain, and the
+        # real claude bin dir on PATH (the agent's default PATH is minimal).
+        # install.sh must bake these or every image placeholders under launchd.
+        self.assertEqual(env["HOME"], self.home)
+        self.assertEqual(env["USER"], "samuelreed")
+        self.assertEqual(env["LOGNAME"], "samuelreed")
+        self.assertTrue(env["PATH"].startswith("/usr/bin:/bin:/usr/sbin:/sbin:"))
         # A non-DS4 variable must not be swept into the agent.
         self.assertNotIn("FAKE_LAUNCHD_RUNNING", env)
 
