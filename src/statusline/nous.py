@@ -30,7 +30,10 @@ FALLBACK_RATES = {
 
 
 class NousStatusline(Statusline):
-    prefix = ""
+    # Names the backend, matching "ds-" on the direct profile and "or-" on
+    # OpenRouter. All three reach the same model family, so the bar has to say
+    # which one you are actually spending against.
+    prefix = "nous-"
     default_model = "deepseek/deepseek-v4-flash-0731"
 
     def __init__(self, profile_dir="~/.claude-nous", port=None, **kw):
@@ -64,10 +67,10 @@ class NousStatusline(Statusline):
         tier = sentinel[4:] if sentinel.startswith("ds4-") else ""
         real = self.info().get("model")
         if real:
-            m["display_name"] = f"{real.split('/')[-1]} {tier}".strip()
+            m["display_name"] = f"{self.prefix}{real.split('/')[-1]} {tier}".strip()
         else:
             # Proxy unreachable — keep the sentinel visible so the fault shows.
-            m["display_name"] = f"{sentinel} (proxy?)"
+            m["display_name"] = f"{self.prefix}{sentinel} (proxy?)"
 
 
 def main():

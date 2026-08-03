@@ -288,6 +288,12 @@ The ccam alias is not enough: this profile is dead without the proxy, and the
 proxy has to be told a session started or it will time out under one. Override
 the alias with a launcher that does both.
 
+The launcher only covers the interactive path. When cmux restores this profile
+after a relaunch it replays `claude --resume <id>` through its own wrapper, never
+touching the launcher. `install.sh` registers a `SessionStart` hook
+(`ds4-proxy-kickstart.sh`) that fires on resume too and starts the proxy, so a
+restored session works on a cold boot.
+
 Fish — write `~/.config/fish/conf.d/zz-ds4-proxy.fish`. **The filename must sort
 after `ccam.fish`**, because ccam defines these as plain aliases in a loop and the
 last definition wins. A file in `fish/functions/` will not work: fish skips

@@ -9,3 +9,8 @@ spend-ledger.jsonl
 balance-cache.json
 last-statusline-input.json
 *.bak-*
+
+# Agent tool state, not project source. .claude/ holds git worktrees, so
+# committing it would nest a second checkout of this repo inside itself.
+.claude/
+.serena/

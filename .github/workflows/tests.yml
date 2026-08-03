@@ -23,11 +23,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: bash -n install.sh
+      - run: bash -n install.sh src/ds4-proxy-kickstart.sh
       - name: shellcheck
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
-          shellcheck --severity=warning install.sh
+          shellcheck --severity=warning install.sh src/ds4-proxy-kickstart.sh
 
   proxies-start:
     # The unit tests import the proxies but never bind a socket. A proxy that is

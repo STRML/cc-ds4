@@ -281,14 +281,22 @@ class TestLabels(unittest.TestCase):
 
 
 class TestNousStatusline(unittest.TestCase):
-    def test_label_has_no_backend_prefix(self):
-        # Nous Portal is the only router on this profile, so the model name alone
-        # identifies it (OpenRouter tags "or-", direct tags "ds-").
+    def test_label_carries_the_backend_prefix(self):
+        # All three profiles reach the same model family, so the bar has to name
+        # which backend is being spent against: "ds-", "or-", "nous-".
         sl = NousStatusline("/nonexistent")
         sl._info = {"model": "deepseek/deepseek-v4-flash-0731"}
         p = {"model": {"id": "ds4-xhigh"}}
         sl.label(p, {})
-        self.assertEqual(p["model"]["display_name"], "deepseek-v4-flash-0731 xhigh")
+        self.assertEqual(p["model"]["display_name"], "nous-deepseek-v4-flash-0731 xhigh")
+
+    def test_every_profile_tags_its_backend(self):
+        """A missing prefix on one bar makes two profiles indistinguishable."""
+        from statusline.direct import DirectStatusline
+        from statusline.openrouter import OpenRouterStatusline
+        self.assertEqual(DirectStatusline.prefix, "ds-")
+        self.assertEqual(OpenRouterStatusline.prefix, "or-")
+        self.assertEqual(NousStatusline.prefix, "nous-")
 
     def test_label_marks_dead_proxy(self):
         sl = NousStatusline("/nonexistent")

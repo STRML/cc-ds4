@@ -66,12 +66,15 @@ SETTINGS="$DIR/settings.json"
 command -v cship >/dev/null 2>&1 || echo "warning: cship not on PATH; edit CSHIP in $SCRIPT" >&2
 
 BAR_DST="$DIR/ds4-statusline.py"
+HOOK_SRC="$REPO/src/ds4-proxy-kickstart.sh"
+HOOK_DST="$DIR/ds4-proxy-kickstart.sh"
 
 echo "profile:  $DIR"
 echo "bar:      $BAR_DST -> $SCRIPT"
 echo "config:   $DIR/cship.toml  (from $(basename "$CONFIG"))"
 if [ "$WANT_PROXY" = 1 ]; then
   echo "proxy:    $REPO/src/proxy.py  (this profile on :$PORT)"
+  echo "hook:     $HOOK_DST -> $HOOK_SRC  (SessionStart kickstart)"
   echo "base URL: http://127.0.0.1:$PORT"
   [ "$(uname)" = Darwin ] && echo "agent:    $PLIST"
 fi
@@ -90,6 +93,7 @@ link() {
 
 cp "$CONFIG" "$DIR/cship.toml"
 link "$SCRIPT" "$BAR_DST"
+[ "$WANT_PROXY" = 1 ] && link "$HOOK_SRC" "$HOOK_DST"
 
 # A previous release gave each profile its own proxy copy. One process serves them
 # all now, so leaving those behind means a stale second binder fighting for the port.
@@ -105,7 +109,7 @@ done
 BACKUP="$SETTINGS.bak-$(date +%Y%m%d%H%M%S)"
 cp -p "$SETTINGS" "$BACKUP"
 
-BAR_DST="$BAR_DST" WANT_PROXY="$WANT_PROXY" PORT="$PORT" python3 - "$SETTINGS" <<'PY'
+BAR_DST="$BAR_DST" WANT_PROXY="$WANT_PROXY" PORT="$PORT" DIR="$DIR" python3 - "$SETTINGS" <<'PY'
 import json, os, sys
 p = sys.argv[1]
 with open(p) as fh:
@@ -117,6 +121,13 @@ if os.environ["WANT_PROXY"] == "1":
     s["env"]["ANTHROPIC_BASE_URL"] = url
     if was != url:
         print(f"base URL: {was} -> {url}")
+    # SessionStart fires on resume too, so a restored cmux session starts the
+    # proxy before its first request. See src/ds4-proxy-kickstart.sh.
+    cmd = os.environ["DIR"] + "/ds4-proxy-kickstart.sh"
+    s.setdefault("hooks", {}).setdefault("SessionStart", [{"matcher": "*", "hooks": []}])
+    hooks = s["hooks"]["SessionStart"][0]["hooks"]
+    if not any(h.get("command") == cmd for h in hooks):
+        hooks.append({"type": "command", "command": cmd, "timeout": 15})
 with open(p, "w") as fh:
     json.dump(s, fh, indent=2)
 os.chmod(p, 0o600)
@@ -188,9 +199,10 @@ Every request gets connection-refused, which looks exactly like a bad key:
 
   nc -z 127.0.0.1 $PORT
 
-The '$LAUNCHER' function in profiles/$DOC (the Launcher step) starts it and
-registers a session so it is not reaped mid-use. A bare ccam alias is not
-enough. To start it by hand right now:
+A SessionStart hook now kickstarts the proxy, so a fresh or resumed session
+starts it without the launcher. The '$LAUNCHER' function in profiles/$DOC still
+matters: it starts the proxy and registers a session so it is not reaped
+mid-use. A bare ccam alias is not enough. To start it by hand right now:
 
   launchctl kickstart gui/$(id -u)/$LABEL     # or: python3 $REPO/src/proxy.py &
 EOF

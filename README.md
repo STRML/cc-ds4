@@ -301,13 +301,14 @@ profiles/           setup prompts — paste one into Claude Code
 src/
   proxy.py              one process, one port per profile: thinking off on small
                         calls, tier to effort, ZDR routing, guards, /__spend
+  ds4-proxy-kickstart.sh   SessionStart hook that starts the proxy (see below)
   statusline/
     common.py           transcript accounting and cost maths, shared
     direct.py           DeepSeek rates, balance-integrated spend
     openrouter.py       rates and spend from the proxy
     nous.py             rates from the proxy; no credits/balance segments
 config/             cship configs with the Anthropic-only segments removed
-tests/              41 tests over the money maths and transcript parsing
+tests/              80 tests over the money maths and transcript parsing
 install.sh          point an existing profile at the corrected status line
 ```
 
@@ -326,12 +327,13 @@ needs the proxy and status line refreshed after a `git pull`:
 ./install.sh --profile direct --no-proxy    # status line only
 ```
 
-It installs three things and backs up `settings.json` first:
+It installs four things and backs up `settings.json` first:
 
 | | where it lands | why |
 |---|---|---|
 | status line | `<profile>/ds4-statusline.py` → this checkout | `git pull` updates it |
 | proxy | one launch agent running `src/proxy.py` from this checkout | serves every profile, one port each |
+| kickstart hook | `<profile>/ds4-proxy-kickstart.sh` → this checkout, registered as `SessionStart` | starts the proxy so a cold session doesn't hit connection-refused |
 | `cship.toml` | copied into the profile directory | meant to be edited |
 
 The first two are symlinks, matching how the rest of the profile directory already
@@ -344,9 +346,16 @@ so. Move the checkout and you re-run `install.sh`.
 
 It also sets `ANTHROPIC_BASE_URL` to the proxy and prints the old value if it changed.
 It does **not** write the launcher, because that means editing your shell config.
-Take that from the Launcher step of the setup prompt. Without it nothing starts the
-proxy, and a profile whose proxy is down fails with connection-refused on every
-request, which reads exactly like a bad key.
+Take that from the Launcher step of the setup prompt. The launcher is what starts
+the proxy on the interactive path and registers a session so it is not reaped
+mid-use.
+
+The `SessionStart` hook covers the paths the launcher cannot. cmux restores a
+profile by replaying `claude --resume <id>` through its own wrapper, which never
+touches the launcher function, so on a cold start the proxy would be down and the
+resumed session would fail with connection-refused. The hook fires on resume too
+and kickstarts the launch agent before the first request. If the proxy is already
+up the hook exits in milliseconds.
 
 Verify the bar renders before walking away — a wrapper that fails open turns a syntax
 error into a blank bar and exit 0:
