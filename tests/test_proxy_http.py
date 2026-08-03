@@ -179,5 +179,50 @@ class MalformedInput(unittest.TestCase):
         self.assertEqual(fake.requests[0]["body"], b"not json")
 
 
+class VisionRoutingTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp, self.cfg = helpers.temp_profile()   # no vision key needed (global knob)
+        self.addCleanup(self.tmp.cleanup)
+        # FakeUpstream defaults to 404; give it a /v1/messages route -> 200.
+        self.fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(self.fake.close)
+
+    def _img(self):
+        return {"model": "deepseek-v4-flash", "max_tokens": 32000, "messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}}]}]}
+
+    def test_relay_calls_rewrite_and_forwards_rewritten_body(self):
+        from unittest import mock
+        # The rewrite mutates the payload in place: replace the image block with text.
+        def _mutate(payload, cache_dir):
+            payload["messages"][0]["content"] = [{"type": "text", "text": "[image transcribed]"}]
+            return 1, 1
+        self.cfg["upstream"] = self.fake.url
+        srv = make_server(self.cfg, self.fake)
+        self.addCleanup(srv.server_close)
+        with mock.patch.object(proxy, "VISION", True), \
+             mock.patch.object(proxy._vision, "rewrite_images", side_effect=_mutate):
+            status, body = post(srv, "/v1/messages", self._img())
+        self.assertEqual(status, 200)
+        sent = json.loads(self.fake.requests[0]["body"])
+        # The forwarded body has the image REPLACED by text — no image block.
+        self.assertEqual(sent["messages"][0]["content"][0]["type"], "text")
+
+    def test_vision_off_skips_rewrite(self):
+        from unittest import mock
+        self.cfg["upstream"] = self.fake.url
+        srv = make_server(self.cfg, self.fake)
+        self.addCleanup(srv.server_close)
+        with mock.patch.object(proxy, "VISION", False), \
+             mock.patch.object(proxy._vision, "rewrite_images") as mrewrite:
+            status, _ = post(srv, "/v1/messages", self._img())
+        self.assertEqual(status, 200)
+        mrewrite.assert_not_called()
+        # image block forwarded unchanged (DS4_VISION=0 restores pass-through)
+        sent = json.loads(self.fake.requests[0]["body"])
+        self.assertEqual(sent["messages"][0]["content"][0]["type"], "image")
+
+
 if __name__ == "__main__":
     unittest.main()

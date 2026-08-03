@@ -169,6 +169,20 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   # exported when install.sh runs is baked in. Sweep the whole DS4_* namespace so
   # a knob proxy.py adds later works without a second edit here. Values are XML
   # entities only; the rest of the heredoc body is not re-expanded.
+  #
+  # Vision spawns `claude` directly. Under launchd the bare name is not on PATH,
+  # so bake the absolute binary into the agent. `|| true` keeps the
+  # `set -euo pipefail` install alive on a machine with no claude on PATH —
+  # vision simply fails open there. Validate it is a real executable (a cmux
+  # shim is a temp file that vanishes after reboot); an invalid path is left
+  # empty so the proxy falls back to shutil.which at startup.
+  _ds4_claude="$(command -v claude || true)"
+  if [ -n "$_ds4_claude" ] && [ ! -x "$_ds4_claude" ]; then
+    _ds4_claude=""
+  fi
+  DS4_CLAUDE_BIN="$_ds4_claude"
+  export DS4_CLAUDE_BIN
+
   PLIST_ENV=""
   while IFS= read -r kv; do
     case "$kv" in

@@ -140,6 +140,10 @@ class InstallTest(unittest.TestCase):
         env = self.read_plist()["EnvironmentVariables"]
         self.assertEqual(env["DS4_IDLE_EXIT"], "0")
         self.assertEqual(env["DS4_DEBUG"], "1")
+        # Vision spawns claude directly; install.sh bakes the absolute binary so
+        # the launchd agent can find it despite a minimal PATH.
+        self.assertIn("DS4_CLAUDE_BIN", env)
+        self.assertTrue(os.path.isabs(env["DS4_CLAUDE_BIN"]))
         # A non-DS4 variable must not be swept into the agent.
         self.assertNotIn("FAKE_LAUNCHD_RUNNING", env)
 
