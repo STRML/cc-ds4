@@ -152,8 +152,14 @@ class InstallTest(unittest.TestCase):
         # real claude bin dir on PATH (the agent's default PATH is minimal).
         # install.sh must bake these or every image placeholders under launchd.
         self.assertEqual(env["HOME"], self.home)
-        self.assertEqual(env["USER"], "samuelreed")
-        self.assertEqual(env["LOGNAME"], "samuelreed")
+        # USER/LOGNAME are the install-time user (whatever it is — CI runs as
+        # "runner"); the point is they're baked, not that they're a fixed value.
+        # install.sh falls back to `id -un` when USER/LOGNAME are unset.
+        import subprocess as _sp
+        expect_user = os.environ.get("USER") or _sp.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+        expect_logname = os.environ.get("LOGNAME") or expect_user
+        self.assertEqual(env["USER"], expect_user)
+        self.assertEqual(env["LOGNAME"], expect_logname)
         self.assertTrue(env["PATH"].startswith("/usr/bin:/bin:/usr/sbin:/sbin:"))
         # A non-DS4 variable must not be swept into the agent.
         self.assertNotIn("FAKE_LAUNCHD_RUNNING", env)
