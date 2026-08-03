@@ -329,14 +329,23 @@ needs the proxy and status line refreshed after a `git pull`:
 ./install.sh --profile direct --no-proxy    # status line only
 ```
 
-It installs four things and backs up `settings.json` first:
+It installs five things and backs up `settings.json` first:
 
 | | where it lands | why |
 |---|---|---|
 | status line | `<profile>/ds4-statusline.py` → this checkout | `git pull` updates it |
 | proxy | one launch agent running `src/proxy.py` from this checkout | serves every profile, one port each |
 | kickstart hook | `<profile>/ds4-proxy-kickstart.sh` → this checkout, registered as `SessionStart` | starts the proxy so a cold session doesn't hit connection-refused |
+| memory link | `<profile>/ds4-link-memory.sh` → this checkout, run at install and on every SessionStart | shares project memory with the real `~/.claude` |
 | `cship.toml` | copied into the profile directory | meant to be edited |
+
+Memory is shared across profiles. Claude Code keeps project memory under the
+config dir, so a per-profile dir would isolate it: a note written on the nous
+profile would be invisible on direct and openrouter. `ds4-link-memory.sh`
+symlinks each profile's `projects/*/memory` to `~/.claude/projects/*/memory`
+and is re-run by the `SessionStart` hook, so any new project gets linked before
+this session writes to it. A note written on any profile is visible on all of
+them.
 
 The first two are symlinks, matching how the rest of the profile directory already
 points into `~/.claude`. The profile is the interface and the checkout is the source
