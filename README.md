@@ -199,8 +199,9 @@ session. (Before this feature, an image in the transcript made every later turn
 
 Two knobs and two facts:
 
-- `DS4_VISION=0` restores the old pass-through (image blocks forwarded
-  unchanged — back to failing).
+- `DS4_VISION=0` restores the old pass-through: image blocks are forwarded
+  unchanged. On OpenRouter/Nous that fails loudly (404); on DeepSeek direct the
+  image is dropped silently and the model answers confidently from nothing.
 - The image leaves the machine: it is sent to Anthropic through your `~/.claude`
   profile for transcription. `vision-cache/` under the profile dir holds the
   descriptions, keyed by content hash.

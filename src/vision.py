@@ -27,7 +27,19 @@ def _resolve_claude():
     return shutil.which("claude")
 
 
-CLAUDE_BIN = os.environ.get("DS4_CLAUDE_BIN") or _resolve_claude()
+# DS4_CLAUDE_BIN is baked by install.sh, but on a cmux machine it can resolve
+# to a temp-dir shim that passes `-x` at install time and vanishes after
+# reboot. Verify the baked path is actually executable; if not, fall back to
+# shutil.which. A truthy-but-gone path would otherwise block the fallback and
+# silently placeholder every image.
+def _resolve_bin():
+    baked = os.environ.get("DS4_CLAUDE_BIN")
+    if baked and os.path.isfile(baked) and os.access(baked, os.X_OK):
+        return baked
+    return _resolve_claude()
+
+
+CLAUDE_BIN = _resolve_bin()
 
 PROMPT = ("Describe the image for a text-only model. "
           "Return only the description.")
@@ -80,7 +92,8 @@ def _env():
             if not (any(k.startswith(p) for p in _SCRUB_PREFIXES)
                     or k in _SCRUB_EXACT
                     or k.startswith("CMUX")
-                    or k in ("NODE_OPTIONS", "AI_AGENT"))}
+                    or k in ("NODE_OPTIONS", "AI_AGENT")
+                    or k.lower() in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"))}
 
 
 
