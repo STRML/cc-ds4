@@ -254,7 +254,10 @@ lands between the two.
   instead. Neither accepts effort inside a model ID for these models. Tiers are the
   only per-request knob Claude Code exposes, so the `claude-or-ds4` proxy reads a
   sentinel model name and rewrites it. That, plus the thinking-mode problem above, is
-  what the proxies are for.
+  what the proxies are for. Since `/effort` never reaches the request body, a
+  `/ds4-effort` slash command (installed by `install.sh`) writes a per-profile
+  override file that the proxy applies to the next request — the level can change
+  mid-session without a restart.
 - **Silence is not success.** DeepSeek drops unknown parameters without error, so a
   200 response proves nothing about whether your parameter did anything. Probe with a
   deliberately invalid value: if it errors, the field is real. OpenRouter's
@@ -303,6 +306,9 @@ profiles/           setup prompts — paste one into Claude Code
 src/
   proxy.py              one process, one port per profile: thinking off on small
                         calls, tier to effort, ZDR routing, guards, /__spend
+  commands/
+    ds4-effort.md       /ds4-effort slash command; the write side of the
+                        per-profile effort override
   ds4-proxy-kickstart.sh   SessionStart hook that starts the proxy (see below)
   statusline/
     common.py           transcript accounting and cost maths, shared

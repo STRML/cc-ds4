@@ -249,12 +249,26 @@ What it does for this profile:
 | Concern | Behaviour |
 |---|---|
 | tier → effort | rewrites the `ds4-*` sentinel to the real slug and injects `reasoning_effort` (Nous accepts it) |
+| mid-session effort | `/ds4-effort <level>` writes `<profile>/effort-override`; the proxy applies it to the next request, overriding the tier map |
 | small calls | `max_tokens` at or below 8192 gets `thinking: {"type":"disabled"}`; `DS4_NOTHINK_BELOW` moves the line |
 | provider routing | **off** — Nous 403s any `provider` block (`zdr`, `data_collection`, …) |
 | output ceiling | clamps `max_tokens` to 65536 |
 | Cloudflare | sends a `curl`-style `User-Agent` (`DS4_UA`, default `curl/8.4.0`); without it every call 403s `error code: 1010` |
 | cost reporting | serves `GET /__spend` with live discounted rates; **no** credits/7-day fields (no public endpoint) |
 | debugging | `DS4_DEBUG=1` logs each rewrite and any non-200 status |
+
+### Changing effort mid-session: `/ds4-effort`
+
+`CLAUDE_CODE_EFFORT_LEVEL` is read once at startup and `/effort` never reaches
+the request body, so the proxy is the only thing that can move the level live.
+`install.sh` installs the write side as a `/ds4-effort` slash command: it writes
+`<profile>/effort-override` (one of `max` / `xhigh` / `high` / `medium` / `low` /
+`minimal` / `none`), which the proxy applies to the next request. With no
+argument it reports the current override; an invalid level is rejected against
+that set rather than sent upstream, where it would be dropped without error.
+The override is per profile and survives a proxy restart. The OpenRouter
+prompt (step 6 there) has the full writeup, and the direct profile maps no
+effort at all, so the command refuses there.
 
 `./install.sh --profile nous` is what installs it: it points `settings.json` at
 `http://127.0.0.1:31502`, and on macOS writes and loads a single launch agent,

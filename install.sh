@@ -73,11 +73,14 @@ HOOK_SRC="$REPO/src/ds4-proxy-kickstart.sh"
 HOOK_DST="$DIR/ds4-proxy-kickstart.sh"
 MEMLINK_SRC="$REPO/src/ds4-link-memory.sh"
 MEMLINK_DST="$DIR/ds4-link-memory.sh"
+CMD_SRC="$REPO/src/commands/ds4-effort.md"
+CMD_DST="$DIR/commands/ds4-effort.md"
 
 echo "profile:  $DIR"
 echo "bar:      $BAR_DST -> $SCRIPT"
 echo "config:   $DIR/cship.toml  (from $(basename "$CONFIG"))"
 echo "memory:   $MEMLINK_DST -> $MEMLINK_SRC  (shares memory with ~/.claude)"
+echo "command:  $CMD_DST -> $CMD_SRC  (/ds4-effort sets effort mid-session)"
 if [ "$WANT_PROXY" = 1 ]; then
   echo "proxy:    $REPO/src/proxy.py  (this profile on :$PORT)"
   echo "hook:     $HOOK_DST -> $HOOK_SRC  (SessionStart kickstart)"
@@ -101,6 +104,13 @@ cp "$CONFIG" "$DIR/cship.toml"
 link "$SCRIPT" "$BAR_DST"
 link "$MEMLINK_SRC" "$MEMLINK_DST"
 [ "$WANT_PROXY" = 1 ] && link "$HOOK_SRC" "$HOOK_DST"
+
+# /ds4-effort needs a commands dir. The profile prompt symlinks one to
+# ~/.claude/commands when that exists; otherwise a real dir here is fine —
+# Claude Code reads $CLAUDE_CONFIG_DIR/commands either way. The command itself
+# refuses on the direct profile, so installing it everywhere is safe.
+mkdir -p "$DIR/commands"
+link "$CMD_SRC" "$CMD_DST"
 
 # Memory is shared with the real ~/.claude: project memory under this profile dir
 # is symlinked to the canonical copy so notes are visible on every profile. Run

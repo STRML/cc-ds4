@@ -161,6 +161,88 @@ class EffortMapping(unittest.TestCase):
         self.assertNotIn("reasoning_effort", p)
 
 
+class EffortOverride(unittest.TestCase):
+    """<profile>/effort-override pins the effort level per profile, mid-session.
+
+    The file is the only state that survives a proxy restart, and it must stay
+    off the per-request path: the mtime cache means a request is one stat plus
+    a dict lookup unless the file changed. Invalid content must read as the
+    tier default rather than go upstream, because OpenRouter accepts the
+    parameter and DeepSeek drops unknown values without error.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cfg = dict(OPENROUTER, dir=self.tmp.name)
+
+    def write(self, text):
+        # Match the slash command's atomic same-directory replacement; this
+        # also avoids a reader observing a partially written override.
+        path = os.path.join(self.tmp.name, "effort-override")
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+
+    def rewrite(self, model="ds4-xhigh"):
+        p = call(model=model, max_tokens=32000)
+        proxy.rewrite(p, self.cfg)
+        return p
+
+    def test_absent_file_uses_the_tier_default(self):
+        self.assertEqual(self.rewrite()["reasoning_effort"], "xhigh")
+
+    def test_override_wins_over_the_tier_default(self):
+        self.write("high\n")
+        self.assertEqual(self.rewrite()["reasoning_effort"], "high")
+
+    def test_every_valid_level_is_accepted(self):
+        for level in proxy.EFFORT_LEVELS:
+            self.write(level + "\n")
+            self.assertEqual(self.rewrite()["reasoning_effort"], level, level)
+
+    def test_invalid_level_is_never_sent_upstream(self):
+        self.write("banana\n")
+        self.assertEqual(self.rewrite()["reasoning_effort"], "xhigh")
+
+    def test_empty_file_uses_the_tier_default(self):
+        self.write("")
+        self.assertEqual(self.rewrite()["reasoning_effort"], "xhigh")
+
+    def test_whitespace_around_the_level_is_trimmed(self):
+        self.write("  high  \n")
+        self.assertEqual(self.rewrite()["reasoning_effort"], "high")
+
+    def test_change_is_picked_up_without_a_restart(self):
+        self.write("low\n")
+        self.assertEqual(self.rewrite()["reasoning_effort"], "low")
+        self.write("max\n")
+        self.assertEqual(self.rewrite()["reasoning_effort"], "max")
+
+    def test_override_is_per_profile_not_global(self):
+        """One process serves every profile, so the cache key is the file path."""
+        self.write("low\n")
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        p = call(model="ds4-xhigh", max_tokens=32000)
+        proxy.rewrite(p, dict(NOUS, dir=other.name))
+        self.assertEqual(p["reasoning_effort"], "xhigh")
+        self.assertEqual(self.rewrite()["reasoning_effort"], "low")
+
+    def test_direct_profile_ignores_the_override(self):
+        self.write("max\n")
+        p = call(model="ds4-xhigh", max_tokens=32000)
+        proxy.rewrite(p, dict(DIRECT, dir=self.tmp.name))
+        self.assertEqual(p["model"], "ds4-xhigh")
+        self.assertNotIn("reasoning_effort", p)
+
+    def test_valid_set_is_the_seven_openrouter_levels(self):
+        self.assertEqual(
+            proxy.EFFORT_LEVELS,
+            ("max", "xhigh", "high", "medium", "low", "minimal", "none"))
+
+
 class ProviderRouting(unittest.TestCase):
     def test_zdr_block_is_injected_where_supported(self):
         p = call(max_tokens=32000)
