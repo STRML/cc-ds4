@@ -175,6 +175,27 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
     esac
   done < <(env)
 
+  # One Sockets entry per served profile, keyed by profile name because that is
+  # what proxy.py passes to launch_activate_socket. Ports come from proxy.py so
+  # PROFILES stays the only declaration of them.
+  PLIST_SOCKETS=""
+  while read -r sock_name sock_port; do
+    [ -n "$sock_name" ] || continue
+    PLIST_SOCKETS+="    <key>${sock_name}</key>
+    <dict>
+      <key>SockNodeName</key>
+      <string>127.0.0.1</string>
+      <key>SockServiceName</key>
+      <string>${sock_port}</string>
+    </dict>
+"
+  done < <(/usr/bin/python3 "$REPO/src/proxy.py" --ports)
+
+  if [ -z "$PLIST_SOCKETS" ]; then
+    echo "agent:    proxy.py --ports listed no profiles; not writing plist" >&2
+    exit 1
+  fi
+
   PLIST_TMP="$(mktemp "${TMPDIR:-/tmp}/$LABEL.plist.XXXXXX")"
   cat > "$PLIST_TMP" <<PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -197,18 +218,24 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   <dict>
 $PLIST_ENV  </dict>
 
-  <!-- KeepAlive must be this dict, not <false/>. With RunAtLoad and KeepAlive
-       both off, launchd sees a job with no demand criteria and SIGTERMs it a
-       couple of minutes after kickstart. SuccessfulExit=false gives it a reason
-       to leave a running job alone, while still not restarting the clean exit(0)
-       the idle timer performs. A crash exits nonzero and does get restarted. -->
+  <!-- launchd binds these itself and hands the listening fds to the process it
+       starts on the first connection; proxy.py collects them via
+       launch_activate_socket. Owning a socket is what makes the job on-demand,
+       which is the point: a job with no demand criteria is reaped a couple of
+       minutes after kickstart ("service inactive" then "removing service" in
+       the launchd log), and an earlier KeepAlive/SuccessfulExit=false here did
+       not prevent that, because refusing to restart is not a demand criterion.
+       It also means the ports answer while the proxy is stopped, so the idle
+       exit costs a cold start rather than a connection refused. -->
+  <key>Sockets</key>
+  <dict>
+$PLIST_SOCKETS  </dict>
+
+  <!-- No KeepAlive: it would fight the Sockets contract by restarting a process
+       launchd is meant to start on demand. RunAtLoad stays off for the same
+       reason - the first request starts it. -->
   <key>RunAtLoad</key>
   <false/>
-  <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
 
   <key>StandardOutPath</key>
   <string>$HOME/.claude-ds4-proxy.log</string>
@@ -227,6 +254,8 @@ PLISTEOF
     # actually changed. Record whether it was running first, so a reload can
     # bring it back and not drop live sessions; RunAtLoad=false means a freshly
     # bootstrapped job is parked, so "running" has to be captured pre-bootout.
+    # The ports answer either way once bootstrap returns, because launchd holds
+    # the sockets. The kickstart below only saves a live session the cold start.
     was_running=0
     if launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -q 'state = running'; then
       was_running=1

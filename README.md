@@ -334,7 +334,7 @@ It installs five things and backs up `settings.json` first:
 | | where it lands | why |
 |---|---|---|
 | status line | `<profile>/ds4-statusline.py` → this checkout | `git pull` updates it |
-| proxy | one launch agent running `src/proxy.py` from this checkout | serves every profile, one port each |
+| proxy | one launch agent running `src/proxy.py` from this checkout, socket-activated | serves every profile, one port each |
 | kickstart hook | `<profile>/ds4-proxy-kickstart.sh` → this checkout, registered as `SessionStart` | starts the proxy so a cold session doesn't hit connection-refused |
 | memory link | `<profile>/ds4-link-memory.sh` → this checkout, run at install and on every SessionStart | shares project memory with the real `~/.claude` |
 | `cship.toml` | copied into the profile directory | meant to be edited |
@@ -367,6 +367,19 @@ touches the launcher function, so on a cold start the proxy would be down and th
 resumed session would fail with connection-refused. The hook fires on resume too
 and kickstarts the launch agent before the first request. If the proxy is already
 up the hook exits in milliseconds.
+
+Socket activation is the structural version of that guarantee. The plist declares
+each profile's port under `Sockets`, so launchd binds and listens at load time and
+hands the listening fd to `src/proxy.py` on the first connection
+(`launch_activate_socket`, reached through ctypes because CPython has no binding
+for it). Three things follow. The port answers even when the proxy is stopped, so
+connection-refused stops being reachable and the hook is now a warm-up rather than
+a correctness fix. The idle exit costs a cold start (~90ms) instead of an outage.
+And launchd stops reaping the job: a launch agent with no demand criteria gets
+`service inactive` then `removing service` a couple of minutes in, which is what
+used to take the proxy down mid-session, and owning a socket is the demand
+criterion that ends it. Run `src/proxy.py` by hand and none of this applies — it
+binds the ports itself, exactly as before.
 
 Verify the bar renders before walking away — a wrapper that fails open turns a syntax
 error into a blank bar and exit 0:
