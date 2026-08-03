@@ -65,13 +65,19 @@ class TranscribeTest(unittest.TestCase):
 
     def test_parse_result_skips_warning_prefix(self):
         # A Node deprecation warning before the JSON must not lose the parse.
-        self.assertEqual(v._parse_result('npm warn\n{"result":"a house","is_error":false}'),
+        self.assertEqual(v._parse_result('npm warn\n{"type":"result","subtype":"success","result":"a house","is_error":false}'),
                          "a house")
         # A same-line warning containing '{' must not skip the result.
-        self.assertEqual(v._parse_result('warn {"code":"W"}\n{"result":"a house","is_error":false}'),
+        self.assertEqual(v._parse_result('warn {"code":"W"}\n{"type":"result","result":"a house","is_error":false}'),
                          "a house")
-        self.assertIsNone(v._parse_result('{"result":"","is_error":false}'))
-        self.assertIsNone(v._parse_result('{"result":"x","is_error":true}'))
+        # A warning JSON with a fabricated "result" field (no type=="result")
+        # must be skipped; the real result object after it is what wins.
+        self.assertEqual(v._parse_result('{"code":"W","result":"placeholder","is_error":false}\n{"type":"result","result":"THE REAL DESCRIPTION","is_error":false}'),
+                         "THE REAL DESCRIPTION")
+        self.assertIsNone(v._parse_result('{"type":"result","result":"","is_error":false}'))
+        self.assertIsNone(v._parse_result('{"type":"result","result":"x","is_error":true}'))
+        # A fabricated-result warning alone (no real result after) is rejected.
+        self.assertIsNone(v._parse_result('{"code":"W","result":"placeholder","is_error":false}'))
 
     def test_child_gets_no_session_persistence_and_devnull_stdin(self):
         with tempfile.TemporaryDirectory() as cd, self._mock_bin(), \
@@ -212,7 +218,9 @@ class RewriteImagesTest(unittest.TestCase):
 
 
 def json_result(text):
-    return json.dumps({"result": text, "session_id": "s1", "is_error": False})
+    # A real claude -p --output-format json result carries type=="result".
+    return json.dumps({"type": "result", "subtype": "success",
+                       "result": text, "session_id": "s1", "is_error": False})
 
 
 if __name__ == "__main__":

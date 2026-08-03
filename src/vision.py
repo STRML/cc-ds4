@@ -166,7 +166,10 @@ def _parse_result(stdout):
         except json.JSONDecodeError:
             start = i + 1
             continue
-        if isinstance(obj, dict) and not obj.get("is_error"):
+        # A real result object carries type=="result" (subtype=="success").
+        # A warning JSON with a fabricated "result" field must not be accepted.
+        if (isinstance(obj, dict) and obj.get("type") == "result"
+                and not obj.get("is_error")):
             text = obj.get("result")
             if isinstance(text, str) and text.strip():
                 return text
@@ -266,12 +269,14 @@ def _rewrite_blocks(content, cache_dir, budget=None):
         kind = block.get("type")
         if kind == "image":
             total += 1
-            if budget[0] <= 0:
-                content[i] = {"type": "text", "text": PLACEHOLDER}
-                continue
-            budget[0] -= 1
+            # Only an actual child spawn counts against the budget. A cache hit
+            # does zero describe work, so it must not consume budget — otherwise
+            # images beyond position N in a transcript get placeholdered forever
+            # once the cached prefix fills the budget every turn.
             content[i], got = _swap_image(block, cache_dir)
             fresh += got
+            if got and budget[0] > 0:
+                budget[0] -= 1
         elif kind == "tool_result":
             st, sf = _rewrite_blocks(block.get("content"), cache_dir, budget)
             total += st
@@ -282,11 +287,17 @@ def _rewrite_blocks(content, cache_dir, budget=None):
 def _swap_image(block, cache_dir):
     """Return (replacement_block, fresh). Never throws; fail-open. Every image
     — including a malformed one — becomes a text block (description or
-    placeholder), so nothing image-shaped reaches the text-only upstream."""
+    placeholder), so nothing image-shaped reaches the text-only upstream.
+
+    Only inline base64 sources are transcribed. A `source.type == "file"`
+    reference is NOT followed: the proxy must never open a path from the
+    request body (that is a local arbitrary-file-read primitive on an
+    unauthenticated loopback listener). Such blocks become the placeholder.
+    """
     try:
         src = block.get("source")
         if not isinstance(src, dict) or src.get("type") != "base64":
-            return {"type": "text", "text": PLACEHOLDER}, 0   # URL sources unsupported
+            return {"type": "text", "text": PLACEHOLDER}, 0   # file/URL sources unsupported
         data = src.get("data")
         media_type = src.get("media_type")
         if not isinstance(data, str) or not data or not isinstance(media_type, str) or not media_type:
@@ -298,13 +309,20 @@ def _swap_image(block, cache_dir):
             return {"type": "text", "text": PLACEHOLDER}, 0
         if not image_bytes:               # strict decode yielded nothing
             return {"type": "text", "text": PLACEHOLDER}, 0
-        text, fresh = transcribe(image_bytes, media_type, cache_dir)
-        if text is None:
-            text = PLACEHOLDER
-            fresh = 0
-        return {"type": "text", "text": f"[image transcribed by {VISION_MODEL}]\n{text}"}, fresh
+        return _transcribe_bytes(image_bytes, media_type, cache_dir)
     except Exception:
         return {"type": "text", "text": PLACEHOLDER}, 0
+
+
+def _transcribe_bytes(image_bytes, media_type, cache_dir):
+    """Describe raw image bytes. Returns (replacement_block, fresh). The
+    "[image transcribed by ...]" prefix appears ONLY on a real description;
+    a failed describe yields the bare placeholder so nothing claims a
+    transcription that never happened."""
+    text, fresh = transcribe(image_bytes, media_type, cache_dir)
+    if text is None:
+        return {"type": "text", "text": PLACEHOLDER}, 0
+    return {"type": "text", "text": f"[image transcribed by {VISION_MODEL}]\n{text}"}, fresh
 
 
 def placeholder_remaining(payload):
