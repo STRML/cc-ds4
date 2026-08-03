@@ -220,6 +220,21 @@ class EffortOverride(unittest.TestCase):
         self.write("max\n")
         self.assertEqual(self.rewrite()["reasoning_effort"], "max")
 
+    def test_coarse_timestamp_filesystem_never_serves_stale(self):
+        """A cache entry whose (mtime, ctime, size) matches the current file
+        must not shadow it. /ds4-effort writes via atomic replace, which
+        changes the inode even when the clock tick is coarser than the gap
+        between writes (ext2/ext3, FAT). Forge the exact stale tuple the real
+        cache would hold there and prove the inode in the key wins."""
+        self.write("low\n")
+        self.assertEqual(self.rewrite()["reasoning_effort"], "low")
+        path = os.path.join(self.tmp.name, "effort-override")
+        self.write("max\n")
+        st = os.stat(path)
+        proxy._effort_cache[path] = (
+            st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino - 1, "low")
+        self.assertEqual(self.rewrite()["reasoning_effort"], "max")
+
     def test_override_is_per_profile_not_global(self):
         """One process serves every profile, so the cache key is the file path."""
         self.write("low\n")
