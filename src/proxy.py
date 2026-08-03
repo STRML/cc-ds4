@@ -26,7 +26,7 @@ Why any proxy exists at all:
 Run it with no arguments. It serves every profile in PROFILES whose directory
 exists, and exits once none of them is in use.
 """
-import http.server, json, os, re, subprocess, sys, threading, time, urllib.request, urllib.error
+import ctypes, ctypes.util, http.server, json, os, re, socket, subprocess, sys, threading, time, urllib.request, urllib.error
 
 # Vision: translate image blocks into text descriptions before forwarding. The
 # sibling module sits next to proxy.py (both in src/), so it imports without a
@@ -608,16 +608,84 @@ def make_handler(name, cfg):
     return Handler
 
 
+def launchd_sockets(name):
+    """The fds launchd bound for this Sockets key, or [] if there are none.
+
+    Under socket activation launchd owns the listener: it binds the port at load
+    and hands the already-listening fd to whichever process it starts on the
+    first connection. That is what lets this process idle-exit without the port
+    going away, and what stops launchd reaping the job as demandless.
+
+    launch_activate_socket is the only supported way to collect those fds and
+    CPython has no binding for it, hence ctypes. A nonzero return is the normal
+    path when nothing launched us: ESRCH means "not a launchd job", ENOENT means
+    the plist has no socket by this name. Both mean "bind it yourself".
+    """
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        activate = libc.launch_activate_socket
+    except (OSError, AttributeError):
+        return []
+    activate.restype = ctypes.c_int
+    activate.argtypes = [ctypes.c_char_p,
+                         ctypes.POINTER(ctypes.POINTER(ctypes.c_int)),
+                         ctypes.POINTER(ctypes.c_size_t)]
+    libc.free.argtypes = [ctypes.c_void_p]
+    libc.free.restype = None
+
+    fds = ctypes.POINTER(ctypes.c_int)()
+    count = ctypes.c_size_t(0)
+    if activate(name.encode(), ctypes.byref(fds), ctypes.byref(count)) != 0:
+        return []
+    try:
+        return [fds[i] for i in range(count.value)]
+    finally:
+        # The array is malloc'd for us and documented as the caller's to free.
+        libc.free(ctypes.cast(fds, ctypes.c_void_p))
+
+
+def server_on_fd(fd, handler):
+    """An HTTP server on an fd launchd already bound and listened on.
+
+    bind_and_activate=False keeps TCPServer from binding a port of its own, but
+    it still constructs a throwaway socket in __init__, so that one is closed
+    before the inherited fd takes its place.
+
+    AF_INET is hardcoded because install.sh only ever writes SockNodeName
+    127.0.0.1. macOS has no SO_DOMAIN, so there is nothing to detect it from.
+    """
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler,
+                                          bind_and_activate=False)
+    srv.socket.close()
+    srv.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM, fileno=fd)
+    srv.server_address = srv.socket.getsockname()
+    return srv
+
+
 def serve(name, cfg):
     """Bind one listener. False on bind failure so the rest still get served."""
     port = int(os.environ.get(f"DS4_PORT_{name.upper()}", cfg["port"]))
+    handler = make_handler(name, cfg)
+    inherited = launchd_sockets(name)
     try:
-        srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), make_handler(name, cfg))
+        if inherited:
+            # One key can yield several fds. All of them are already listening,
+            # so an fd nobody accepts on is a port that hangs instead of
+            # refusing - serve every one rather than picking the first.
+            srvs = [server_on_fd(fd, handler) for fd in inherited]
+            # launchd's plist is authoritative once it owns the socket, so
+            # report where we actually are rather than where we meant to be.
+            port = srvs[0].server_address[1]
+            origin = "launchd"
+        else:
+            srvs = [http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)]
+            origin = "self-bound"
     except OSError as e:
         print(f"  {name:<11} :{port} FAILED to bind: {e}", file=sys.stderr, flush=True)
         return False
-    print(f"  {name:<11} :{port} -> {cfg['upstream']}", flush=True)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    print(f"  {name:<11} :{port} -> {cfg['upstream']} ({origin})", flush=True)
+    for srv in srvs:
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
     return True
 
 
@@ -627,6 +695,16 @@ def main():
     served = {n: c for n, c in PROFILES.items() if os.path.isdir(c["dir"])}
     if not served:
         raise SystemExit("no profile directories found; nothing to serve")
+
+    # install.sh needs the same name/port pairs to write the plist's Sockets
+    # block, and the socket keys have to match what serve() asks launchd for.
+    # Emitting them from here keeps PROFILES the only place ports are declared.
+    if "--ports" in sys.argv:
+        for name, cfg in served.items():
+            # int() so a junk DS4_PORT_* override fails here rather than being
+            # interpolated into the plist install.sh builds from this output.
+            print(f"{name} {int(os.environ.get(f'DS4_PORT_{name.upper()}', cfg['port']))}")
+        return
 
     print(f"ds4 proxy: no thinking at or below max_tokens={NOTHINK_BELOW}, "
           f"idle exit {IDLE_EXIT}s", flush=True)

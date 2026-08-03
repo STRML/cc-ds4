@@ -64,6 +64,31 @@ esac
 
 [ -d "$DIR" ] || { echo "no profile at $DIR — create it first with profiles/*.md" >&2; exit 1; }
 SETTINGS="$DIR/settings.json"
+
+# A port reaches the plist and the base URL, and both end up in XML or JSON, so
+# anything not a plain decimal is rejected rather than escaped. The range starts
+# at 1024 because the agent runs unprivileged and cannot bind below it.
+valid_port() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
+}
+
+# DS4_PORT_<PROFILE> overrides the port and proxy.py is what honours it, so the
+# effective value comes from there instead of a second copy of the mapping. The
+# hardcoded PORT above is the fallback for a --dir that proxy.py cannot see.
+# Without this the plist binds the override while settings.json still points at
+# the default, which leaves Claude talking to a port nothing listens on.
+if [ "$WANT_PROXY" = 1 ]; then
+  eff="$(/usr/bin/python3 "$REPO/src/proxy.py" --ports 2>/dev/null \
+         | awk -v p="$PROFILE" '$1 == p {print $2}')"
+  [ -n "$eff" ] && PORT="$eff"
+fi
+valid_port "$PORT" || {
+  echo "port '$PORT' is not a decimal 1024-65535 (check DS4_PORT_$(echo "$PROFILE" | tr '[:lower:]' '[:upper:]'))" >&2
+  exit 1
+}
 [ -f "$SETTINGS" ] || { echo "no settings.json in $DIR" >&2; exit 1; }
 
 command -v cship >/dev/null 2>&1 || echo "warning: cship not on PATH; edit CSHIP in $SCRIPT" >&2
@@ -216,6 +241,31 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
     esac
   done < <(env)
 
+  # One Sockets entry per served profile, keyed by profile name because that is
+  # what proxy.py passes to launch_activate_socket. Ports come from proxy.py so
+  # PROFILES stays the only declaration of them.
+  PLIST_SOCKETS=""
+  while read -r sock_name sock_port; do
+    [ -n "$sock_name" ] || continue
+    valid_port "$sock_port" || {
+      echo "agent:    $sock_name port '$sock_port' is not a decimal 1024-65535; not writing plist" >&2
+      exit 1
+    }
+    PLIST_SOCKETS+="    <key>${sock_name}</key>
+    <dict>
+      <key>SockNodeName</key>
+      <string>127.0.0.1</string>
+      <key>SockServiceName</key>
+      <string>${sock_port}</string>
+    </dict>
+"
+  done < <(/usr/bin/python3 "$REPO/src/proxy.py" --ports)
+
+  if [ -z "$PLIST_SOCKETS" ]; then
+    echo "agent:    proxy.py --ports listed no profiles; not writing plist" >&2
+    exit 1
+  fi
+
   PLIST_TMP="$(mktemp "${TMPDIR:-/tmp}/$LABEL.plist.XXXXXX")"
   cat > "$PLIST_TMP" <<PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -249,18 +299,24 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
     <string>$DS4_AGENT_PATH</string>
 $PLIST_ENV  </dict>
 
-  <!-- KeepAlive must be this dict, not <false/>. With RunAtLoad and KeepAlive
-       both off, launchd sees a job with no demand criteria and SIGTERMs it a
-       couple of minutes after kickstart. SuccessfulExit=false gives it a reason
-       to leave a running job alone, while still not restarting the clean exit(0)
-       the idle timer performs. A crash exits nonzero and does get restarted. -->
+  <!-- launchd binds these itself and hands the listening fds to the process it
+       starts on the first connection; proxy.py collects them via
+       launch_activate_socket. Owning a socket is what makes the job on-demand,
+       which is the point: a job with no demand criteria is reaped a couple of
+       minutes after kickstart ("service inactive" then "removing service" in
+       the launchd log), and an earlier KeepAlive/SuccessfulExit=false here did
+       not prevent that, because refusing to restart is not a demand criterion.
+       It also means the ports answer while the proxy is stopped, so the idle
+       exit costs a cold start rather than a connection refused. -->
+  <key>Sockets</key>
+  <dict>
+$PLIST_SOCKETS  </dict>
+
+  <!-- No KeepAlive: it would fight the Sockets contract by restarting a process
+       launchd is meant to start on demand. RunAtLoad stays off for the same
+       reason - the first request starts it. -->
   <key>RunAtLoad</key>
   <false/>
-  <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
 
   <key>StandardOutPath</key>
   <string>$HOME/.claude-ds4-proxy.log</string>
@@ -279,6 +335,8 @@ PLISTEOF
     # actually changed. Record whether it was running first, so a reload can
     # bring it back and not drop live sessions; RunAtLoad=false means a freshly
     # bootstrapped job is parked, so "running" has to be captured pre-bootout.
+    # The ports answer either way once bootstrap returns, because launchd holds
+    # the sockets. The kickstart below only saves a live session the cold start.
     was_running=0
     if launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -q 'state = running'; then
       was_running=1
