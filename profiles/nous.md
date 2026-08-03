@@ -177,7 +177,7 @@ ls -la ~/.claude-nous
 ## Step 5 — Copy and modify settings.json
 
 For Option B, run this with the placeholders replaced. Confirm the base URL points
-at the proxy (port 8800), every model variable is set, and `fallbackModel` is
+at the proxy (port 31502), every model variable is set, and `fallbackModel` is
 removed:
 
 ```bash
@@ -188,7 +188,7 @@ dst = os.path.expanduser("~/.claude-nous/settings.json")
 s = json.load(open(src)) if os.path.exists(src) else {}
 KEY = "REPLACE_WITH_NOUS_API_KEY"   # from step 1
 overrides = {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8800",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:31502",
     "ANTHROPIC_AUTH_TOKEN": KEY,
     "ANTHROPIC_MODEL": "ds4-xhigh",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "ds4-xhigh",
@@ -237,13 +237,13 @@ cp /path/to/cc-ds4/src/effort_proxy.py ~/.claude-nous/nous-effort-proxy.py
 chmod +x ~/.claude-nous/nous-effort-proxy.py
 ```
 
-Start it pointed at Nous, on port 8800, with ZDR off (Nous rejects the `provider`
+Start it pointed at Nous, on port 31502, with ZDR off (Nous rejects the `provider`
 block):
 
 ```bash
 DS4_UPSTREAM=https://inference-api.nousresearch.com \
 DS4_MODEL=deepseek/deepseek-v4-flash-0731 \
-DS4_PROXY_PORT=8800 \
+DS4_PROXY_PORT=31502 \
 DS4_ZDR=0 \
 python3 ~/.claude-nous/nous-effort-proxy.py
 ```
@@ -270,7 +270,7 @@ Point a request at it — a 401 is expected if the auth header is missing; with 
 key it answers:
 
 ```bash
-curl -s http://127.0.0.1:8800/__spend
+curl -s http://127.0.0.1:31502/__spend
 # e.g. {"model":"deepseek/deepseek-v4-flash-0731","zdr":false,
 #       "pricing":{"prompt":1e-08,"completion":2e-08,"input_cache_read":0.0}}
 ```
@@ -299,23 +299,23 @@ not work: fish skips autoload entirely when a function is already defined.
 
 ```fish
 function __nous_proxy_up --description 'Start the nous effort proxy unless it is already listening'
-    if nc -z 127.0.0.1 8800 2>/dev/null
+    if nc -z 127.0.0.1 31502 2>/dev/null
         return 0
     end
     fish -c 'while true
                  set -x DS4_UPSTREAM https://inference-api.nousresearch.com
                  set -x DS4_MODEL deepseek/deepseek-v4-flash-0731
-                 set -x DS4_PROXY_PORT 8800
+                 set -x DS4_PROXY_PORT 31502
                  set -x DS4_ZDR 0
                  /usr/bin/python3 $HOME/.claude-nous/nous-effort-proxy.py
                  sleep 1
              end' >>$HOME/.claude-nous/proxy.log 2>&1 &
     disown
     for i in (seq 40)
-        nc -z 127.0.0.1 8800 2>/dev/null; and return 0
+        nc -z 127.0.0.1 31502 2>/dev/null; and return 0
         sleep 0.25
     end
-    echo "claude-nous: proxy never came up on :8800 — see ~/.claude-nous/proxy.log" >&2
+    echo "claude-nous: proxy never came up on :31502 — see ~/.claude-nous/proxy.log" >&2
     return 1
 end
 
@@ -333,16 +333,16 @@ zsh/bash — same idea in `~/.zshrc` or `~/.bashrc`:
 
 ```bash
 claude-nous() {
-  if ! nc -z 127.0.0.1 8800 2>/dev/null; then
+  if ! nc -z 127.0.0.1 31502 2>/dev/null; then
     ( export DS4_UPSTREAM=https://inference-api.nousresearch.com \
              DS4_MODEL=deepseek/deepseek-v4-flash-0731 \
-             DS4_PROXY_PORT=8800 DS4_ZDR=0
+             DS4_PROXY_PORT=31502 DS4_ZDR=0
       while true; do python3 "$HOME/.claude-nous/nous-effort-proxy.py"; sleep 1; done ) \
       >>"$HOME/.claude-nous/proxy.log" 2>&1 &
     disown
-    for _ in $(seq 40); do nc -z 127.0.0.1 8800 2>/dev/null && break; sleep 0.25; done
+    for _ in $(seq 40); do nc -z 127.0.0.1 31502 2>/dev/null && break; sleep 0.25; done
   fi
-  nc -z 127.0.0.1 8800 2>/dev/null || { echo "proxy never came up on :8800" >&2; return 1; }
+  nc -z 127.0.0.1 31502 2>/dev/null || { echo "proxy never came up on :31502" >&2; return 1; }
   CLAUDE_CONFIG_DIR="$HOME/.claude-nous" command claude "$@"
 }
 ```
@@ -380,9 +380,9 @@ end
 
 1. Open a NEW terminal (so aliases/functions load).
 2. `claude-switch` → must print the disabled message and change nothing.
-3. Confirm the proxy is listening: `nc -z 127.0.0.1 8800 && echo up`.
+3. Confirm the proxy is listening: `nc -z 127.0.0.1 31502 && echo up`.
 4. `claude-nous` in any project directory.
-5. Inside the session run `/status`. Success = Base URL shows `http://127.0.0.1:8800`
+5. Inside the session run `/status`. Success = Base URL shows `http://127.0.0.1:31502`
    (Option A: the Nous base URL).
 6. Ask it something trivial to confirm a live response.
 7. Switch tiers with `/model` and confirm each still answers. (To prove effort is
@@ -436,7 +436,7 @@ Tell them, concretely:
 
 - `claude-nous` = DeepSeek V4 Flash 0731 billed via Nous Portal; `claude` = normal
   Anthropic. Nothing global changed.
-- What has to be running for it to work: the effort proxy on `:8800`, which the
+- What has to be running for it to work: the effort proxy on `:31502`, which the
   launcher starts for you. An already-open terminal will not have picked it up yet.
 - **Privacy:** unlike the OpenRouter profile, there is **no zero-data-retention
   control** — Nous rejects the `provider` block, so requests are governed by Nous's

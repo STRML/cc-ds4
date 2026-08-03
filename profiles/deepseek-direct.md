@@ -10,9 +10,10 @@ agent with shell access) on the machine you want set up. It requires macOS or Li
 
 You are setting up an isolated Claude Code profile that runs **DeepSeek V4** against
 DeepSeek's own Anthropic-compatible endpoint, launched with a dedicated `claude-ds4`
-command. No proxy, no gateway, no translation layer. The user's normal `claude`
-command must keep working against Anthropic, completely untouched. Follow these
-instructions exactly. Where a step says ASK, stop and ask the user.
+command. One small local proxy sits in the path, for one reason given in step 5; there
+is no gateway and no format translation. The user's normal `claude` command must keep
+working against Anthropic, completely untouched. Follow these instructions exactly.
+Where a step says ASK, stop and ask the user.
 
 ## Non-negotiable safety rules
 
@@ -23,7 +24,7 @@ instructions exactly. Where a step says ASK, stop and ask the user.
    ones currently running. All overrides go only into the copied
    `~/.claude-ds4/settings.json` created below.
 2. **Never** run `claude-switch` (a ccam command) and disable it as described in
-   step 8. It replaces `~/.claude` with a symlink; if `~/.claude` is a real directory
+   step 9. It replaces `~/.claude` with a symlink; if `~/.claude` is a real directory
    (the normal case), switching would displace the user's primary installation.
 3. Do not modify, move, or delete anything already inside `~/.claude/`. You will only
    read from it and symlink to it.
@@ -82,6 +83,27 @@ because several of these facts contradict what you would reasonably assume.
   `cache_control`, `top_k`, `disable_parallel_tool_use`, and image, document, and
   redacted-thinking content blocks. `thinking` is supported but `budget_tokens` is
   ignored.
+- **Thinking mode is on by default and it breaks Claude Code's small calls.** This is
+  why this profile needs a proxy. Claude Code sends
+  `thinking: {"type":"adaptive","display":"omitted"}`; DeepSeek does not implement
+  `adaptive`, so V4 keeps thinking. The main loop at `max_tokens=32000` is fine. A
+  utility call is not: at `max_tokens=512` with a forced tool decision, 3 of 5 runs
+  returned `stop_reason=max_tokens`, two of them with no `tool_use` block at all. The
+  permission classifier behind `defaultMode: auto` is one of these calls, so the
+  symptom is intermittent classifier errors.
+- **`thinking: {"type":"disabled"}` is honoured, and turns all of it off.** Output on
+  that same call drops to 141-175 tokens from 386-512, and latency to 2.0s from 5.2s.
+  Note the contrast with the bullet above: the Anthropic spelling works where
+  `reasoning_effort` does nothing. Published reports that V4 has no reachable
+  non-thinking mode are describing the OpenAI-compatible endpoint.
+- **While thinking is on, `tool_choice` naming a specific tool is rejected**:
+  `400 Thinking mode does not support this tool_choice`, every time, in 0.4s. `auto`,
+  `none`, and omitting it are accepted. Disabling thinking makes the named form work.
+- **An assistant message carrying a `tool_use` must carry its `thinking` block back**,
+  or the request 400s with "The `content[].thinking` in the thinking mode must be
+  passed back to the API". Claude Code 2.x does replay it, verified on the wire, so
+  this is a latent trap rather than a live failure. It is what breaks the
+  OpenAI-format routers, which drop the block in translation.
 - Measured performance at a 33k-token prompt: 1.32s median time to first token, ~50
   tok/s end to end, 10.1% coefficient of variation over 8 runs.
 
@@ -101,7 +123,7 @@ ls ~/.claude-ds4 2>/dev/null && echo "PROFILE ALREADY EXISTS — ask before over
   is also missing).
 - If `~/.claude` doesn't exist, have the user run `claude` once and exit.
 - If `~/.claude` is already a symlink, the user actively uses ccam's switch mechanism.
-  ASK before applying step 8, and point step 4's symlinks at the resolved directory.
+  ASK before applying step 9, and point step 3's symlinks at the resolved directory.
 
 ## Step 1 — Get the API key
 
@@ -172,7 +194,9 @@ capability from the profile.
 ## Step 4 — Write settings.json
 
 Replace `DEEPSEEK_KEY_HERE`, then run. Note `ANTHROPIC_API_KEY` is set to an empty
-string rather than removed.
+string rather than removed, and that the base URL points at the local proxy from step
+5 rather than at DeepSeek. Everything else about the profile is unchanged by that:
+the proxy forwards to `https://api.deepseek.com/anthropic`.
 
 ```bash
 python3 - <<'EOF'
@@ -182,7 +206,7 @@ dst = os.path.expanduser("~/.claude-ds4/settings.json")
 s = json.load(open(src)) if os.path.exists(src) else {}
 OPUS, FLASH = "deepseek-v4-pro[1m]", "deepseek-v4-flash[1m]"  # [1m] declares the context window
 s.setdefault("env", {}).update({
-    "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:31500",   # the step 5 proxy, not DeepSeek
     "ANTHROPIC_AUTH_TOKEN": "DEEPSEEK_KEY_HERE",
     "ANTHROPIC_API_KEY": "",
     "ANTHROPIC_MODEL": FLASH,
@@ -210,7 +234,60 @@ errors. `CLAUDE_CODE_EFFORT_LEVEL` accepts `low`, `medium`, `high`, `xhigh`; `ma
 normally session-only but persists when set through this variable, and it overrides
 the in-session `/effort` command.
 
-## Step 5 — SessionStart notice
+## Step 5 — The thinking proxy
+
+V4 keeps thinking whatever Claude Code asks for, and that breaks every small call it
+makes. The endpoint-facts section above has the measurements. The short version: at
+`max_tokens=512`, 3 of 5 forced tool decisions came back truncated, and the permission
+classifier behind `defaultMode: auto` is exactly that shape. Sending
+`thinking: {"type":"disabled"}` on those calls fixes it. Nothing else needs to change,
+so the proxy is a pass-through that rewrites one field.
+
+The proxy is `src/thinking_proxy.py` in this repo. Copy it verbatim to
+`~/.claude-ds4/ds4-thinking-proxy.py` rather than retyping it. If this machine has a
+checkout, `./install.sh --profile direct` puts it there as a symlink instead, so
+`git pull` updates it.
+
+| Concern | Behaviour |
+|---|---|
+| small calls | `max_tokens` at or below 8192 gets `thinking: {"type":"disabled"}`; `DS4_NOTHINK_BELOW` moves the line |
+| main loop | arrives at 32000, passed through untouched, thinking intact |
+| history repair | gives any assistant `tool_use` message a placeholder `thinking` block if it has none; `DS4_INJECT_THINKING=0` disables |
+| debugging | `DS4_DEBUG=1` logs each rewrite and any non-200 status |
+
+The history repair is a guard, not a fix for an observed failure. Claude Code 2.x does
+replay thinking blocks, verified on the wire. It is there because a path that ever
+drops one 400s the session outright, and the repair costs nothing: DeepSeek does not
+validate the signature.
+
+Make it executable and confirm it starts:
+
+```bash
+chmod +x ~/.claude-ds4/ds4-thinking-proxy.py
+python3 ~/.claude-ds4/ds4-thinking-proxy.py &
+sleep 1
+curl -s -o /dev/null -w "proxy responded: %{http_code}\n" -X POST \
+  http://127.0.0.1:31500/v1/messages -H 'content-type: application/json' \
+  -d '{"model":"deepseek-v4-flash","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+A 401 here is expected and correct without a key in the header — it proves the proxy
+forwarded upstream.
+
+**Nothing works when the proxy is down.** Every request gets connection-refused, which
+looks exactly like a broken endpoint or a bad key. Check `nc -z 127.0.0.1 31500` before
+investigating anything else. Step 8 wires the launcher to start it automatically.
+
+To confirm the rewrite reaches the wire rather than trusting the banner, send a small
+request with `DS4_DEBUG=1` set and read the log line:
+
+```bash
+DS4_DEBUG=1 python3 ~/.claude-ds4/ds4-thinking-proxy.py
+# ...
+#   max_tokens=512 -> thinking disabled
+```
+
+## Step 6 — SessionStart notice
 
 Model tiers resolving to different models is genuinely surprising six months later.
 Write `~/.claude-ds4/session-start-info.sh`:
@@ -220,7 +297,7 @@ Write `~/.claude-ds4/session-start-info.sh`:
 cat <<'EOF'
 === claude-ds4 profile: DeepSeek direct ===
 
-Endpoint: https://api.deepseek.com/anthropic
+Endpoint: https://api.deepseek.com/anthropic via the local proxy on :31500
 Usage and spend: https://platform.deepseek.com/usage
 
   opus, fable        -> deepseek-v4-pro     (larger, slower, costs more)
@@ -235,6 +312,9 @@ Only two model names exist here; there is no dated build and 0731 cannot be
 pinned. Effort is uniform via CLAUDE_CODE_EFFORT_LEVEL. Prompt caching is
 implicit and automatic; cache_control is ignored. Context ceiling verified
 above 1,030,000 tokens.
+
+Nothing works if the proxy on :31500 is down — every request gets
+connection-refused. Check it first: nc -z 127.0.0.1 31500
 EOF
 ```
 
@@ -262,23 +342,81 @@ EOF
 
 Filtering before appending keeps this idempotent across re-runs.
 
-## Step 6 — Skip onboarding
+## Step 7 — Skip onboarding
 
 ```bash
 echo '{"hasCompletedOnboarding": true}' > ~/.claude-ds4/.claude.json
 chmod 600 ~/.claude-ds4/.claude.json
 ```
 
-## Step 7 — Launcher
+## Step 8 — Launcher
 
-Fish users already have it from step 2. zsh/bash, if ccam's installer didn't generate
-one:
+The ccam alias from step 2 is not enough, because this profile is dead without the
+proxy. Override it with a launcher that starts the proxy first and refuses to run if
+it never comes up.
 
-```bash
-alias claude-ds4='CLAUDE_CONFIG_DIR="$HOME/.claude-ds4" claude'
+Fish — write `~/.config/fish/conf.d/zz-ds4-proxy.fish`. **The filename must sort after
+`ccam.fish`**, because ccam defines `claude-ds4` as a plain alias in a loop over the
+accounts registry and the last definition wins. A file in `fish/functions/` will not
+work: fish skips autoload entirely when a function is already defined.
+
+If the OpenRouter profile is also installed, both launchers live in this one file.
+
+```fish
+function __ds4_direct_proxy_up --description 'Start the ds4 thinking proxy unless it is already listening'
+    if nc -z 127.0.0.1 31500 2>/dev/null
+        return 0
+    end
+
+    # Supervisor loop, not a bare nohup, so a mid-session exit restarts in place.
+    fish -c 'while true
+                 /usr/bin/python3 $HOME/.claude-ds4/ds4-thinking-proxy.py
+                 sleep 1
+             end' >>$HOME/.claude-ds4/proxy.log 2>&1 &
+    disown
+
+    for i in (seq 40)
+        nc -z 127.0.0.1 31500 2>/dev/null; and return 0
+        sleep 0.25
+    end
+    echo "claude-ds4: proxy never came up on :31500 — see ~/.claude-ds4/proxy.log" >&2
+    return 1
+end
+
+function claude-ds4 --description 'Claude Code on the DeepSeek direct profile (auto-starts the thinking proxy)'
+    __ds4_direct_proxy_up; or return 1
+    env CLAUDE_CONFIG_DIR=$HOME/.claude-ds4 command claude $argv
+end
+
+function claude-ds4-stop --description 'Stop the ds4 thinking proxy'
+    # Matches both the supervisor loop and the python child, since the
+    # supervisor's command line contains the script path too.
+    pkill -f 'ds4-thinking-proxy.py' >/dev/null 2>&1
+    echo "ds4 thinking proxy stopped"
+end
 ```
 
-## Step 8 — Disable claude-switch
+zsh/bash equivalent:
+
+```bash
+claude-ds4() {
+  if ! nc -z 127.0.0.1 31500 2>/dev/null; then
+    ( while true; do /usr/bin/python3 "$HOME/.claude-ds4/ds4-thinking-proxy.py"; sleep 1; done ) \
+      >>"$HOME/.claude-ds4/proxy.log" 2>&1 &
+    disown
+    for _ in $(seq 40); do nc -z 127.0.0.1 31500 2>/dev/null && break; sleep 0.25; done
+  fi
+  nc -z 127.0.0.1 31500 2>/dev/null || { echo "proxy never came up on :31500" >&2; return 1; }
+  CLAUDE_CONFIG_DIR="$HOME/.claude-ds4" claude "$@"
+}
+```
+
+The port is fixed rather than dynamic because `settings.json` has to carry a literal
+base URL before Claude Code starts. 31500 and 31501 sit below the ephemeral range on
+both Linux (32768-60999) and macOS (49152-65535), so an outbound connection cannot
+take the port first.
+
+## Step 9 — Disable claude-switch
 
 Only when `~/.claude` is a real directory. Append to the same rc file (fish: the
 conf.d file from step 2):
@@ -294,7 +432,7 @@ function claude-switch
 end
 ```
 
-## Step 9 — Verify
+## Step 10 — Verify
 
 Confirm the tier mapping resolves server-side rather than trusting the config:
 
@@ -317,13 +455,20 @@ EOF
 Expect `deepseek-v4-pro[1m] -> deepseek-v4-pro` and
 `deepseek-v4-flash[1m] -> deepseek-v4-flash`. Then:
 
+This runs through the proxy, since the base URL in `settings.json` now points at it.
+A connection-refused here means the proxy is not up, not that anything is misconfigured.
+Then:
+
 1. Open a NEW terminal so aliases load.
 2. `claude-switch` prints the disabled message and changes nothing.
-3. `claude-ds4` in any project directory; the SessionStart notice should appear.
-4. `/status` shows `https://api.deepseek.com/anthropic`.
+3. `claude-ds4` in any project directory; the SessionStart notice should appear, and
+   the launcher should have started the proxy without being asked.
+4. `/status` shows `http://127.0.0.1:31500`, which is the proxy, not a misconfiguration.
 5. Ask something trivial to confirm a live response.
 6. `/model` to opus, ask again, confirm it still answers (that path hits v4-pro).
-7. Run plain `claude` and confirm `/status` still shows Anthropic's API.
+7. `claude-ds4-stop`, then `nc -z 127.0.0.1 31500` should fail and a new `claude-ds4`
+   should bring it back.
+8. Run plain `claude` and confirm `/status` still shows Anthropic's API.
 
 **Warn the user about the first entry in the `/model` picker.** It is labelled
 "Default (recommended)" and advertises Anthropic's model and pricing, something like
@@ -335,9 +480,10 @@ tier explicitly. The custom entries below it are the configured, verified paths.
 
 A 401 means the key is wrong or both auth variables are set. An error naming
 `deepseek-v4-pro or deepseek-v4-flash` means a model string reached the API that is
-neither an accepted name nor a mappable `claude-*` name.
+neither an accepted name nor a mappable `claude-*` name. Connection-refused means the
+proxy is down; check `~/.claude-ds4/proxy.log`.
 
-## Step 10 — Optional: a status line that is not lying
+## Step 11 — Optional: a status line that is not lying
 
 Skip if the user does not use a status line. If they use `cship`, offer this. It is
 the same fix as the OpenRouter profile's step 11, with different plumbing.
@@ -355,9 +501,9 @@ Run the installer from a checkout of this repo:
 src/statusline/direct.py                 # with a tty, prints a sample bar
 ```
 
-It copies `config/cship-direct.toml` into the profile, backs up `settings.json`, and
-points `statusLine` at `src/statusline/direct.py` **in the checkout**, so `git pull`
-updates the bar.
+It copies `config/cship-direct.toml` into the profile, backs up `settings.json`,
+symlinks `~/.claude-ds4/ds4-statusline.py` at `src/statusline/direct.py` in the
+checkout, and points `statusLine` at that symlink. `git pull` updates the bar.
 
 Renders as `ds-deepseek-v4-flash  ░░░░░░░░░░3%  💰 <$0.01 · 📆 7d $0.31 · 💳 $9.54 left`.
 The `ds-` prefix names the backend, matching the `or-` the OpenRouter profile uses.
@@ -394,3 +540,7 @@ Three things that differ from the OpenRouter version, and matter:
   profiles.
 - `claude-switch` is deliberately disabled and why.
 - Session history and per-project state accumulate separately in `~/.claude-ds4/`.
+- The proxy on :31500 must be running, the launcher starts it, and `claude-ds4-stop`
+  stops it. Connection-refused means it is down and not that the key or config is
+  wrong. It exists because DeepSeek V4 cannot be talked out of thinking mode any other
+  way, and thinking mode truncates Claude Code's small internal calls.

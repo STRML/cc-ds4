@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Statusline for the DeepSeek-direct profile (claude-ds4).
 
-No proxy here, so two things differ from the OpenRouter sibling:
+This profile's proxy is thinking_proxy.py, which serves no /__spend, so both
+numbers come from DeepSeek's own API rather than from the proxy. That is what
+differs from the OpenRouter sibling:
 
   * Rates are hardcoded. DeepSeek publishes no pricing endpoint — /models returns
     bare ids — so the table below is transcribed from their docs and has to be
@@ -16,7 +18,9 @@ import sys
 import time
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# realpath, not abspath: install.sh symlinks this into the profile directory and
+# abspath would resolve the bootstrap against the profile instead of the checkout.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 from statusline.common import Statusline, WEEK, base_model, selftest_payload  # noqa: E402
 
 BALANCE_URL = "https://api.deepseek.com/user/balance"

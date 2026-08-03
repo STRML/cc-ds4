@@ -9,7 +9,7 @@ import http.server, json, os, threading, time, urllib.request, urllib.error
 
 UPSTREAM = os.environ.get("DS4_UPSTREAM", "https://openrouter.ai/api")
 REAL_MODEL = os.environ.get("DS4_MODEL", "deepseek/deepseek-v4-flash-0731")
-PORT = int(os.environ.get("DS4_PROXY_PORT", "8799"))
+PORT = int(os.environ.get("DS4_PROXY_PORT", "31501"))
 VERBOSE = os.environ.get("DS4_VERBOSE") == "1" or os.environ.get("DS4_DEBUG") == "1"
 # Route only to zero-data-retention endpoints. Set DS4_ZDR=0 to turn it off.
 ZDR = os.environ.get("DS4_ZDR", "1") == "1"
@@ -27,6 +27,17 @@ LOW_CONTEXT = ["Io Net"]
 # Smallest max_completion_tokens in the ZDR pool (DeepInfra and Io Net both 65536).
 # Clamp so a larger inherited CLAUDE_CODE_MAX_OUTPUT_TOKENS cannot exceed it.
 MAX_OUT = int(os.environ.get("DS4_MAX_OUT", "65536"))
+
+# Below this, turn thinking off. Claude Code's small utility calls — the
+# permission classifier behind `defaultMode: auto` above all — arrive with a few
+# hundred tokens of budget, and V4 spends all of it on a thinking block before
+# the tool call comes out. Measured on -0731 at max_tokens=512 with a forced
+# decision: 301-412 output tokens with thinking on, 101-163 with it off.
+#
+# Use the Anthropic spelling. `reasoning: {"enabled": false}`, OpenRouter's own,
+# is dropped without error here — see the README note on silence not being
+# success. Main-loop requests arrive at 65536 and are untouched.
+NOTHINK_BELOW = int(os.environ.get("DS4_NOTHINK_BELOW", "8192"))
 
 EFFORT = {
     "ds4-max": "max",
@@ -48,7 +59,8 @@ def _api_key():
     if k:
         return k
     try:
-        env = json.load(open(os.path.join(PROFILE, "settings.json")))["env"]
+        with open(os.path.join(PROFILE, "settings.json")) as fh:
+            env = json.load(fh)["env"]
         return env.get("ANTHROPIC_AUTH_TOKEN") or ""
     except Exception:
         return ""
@@ -226,10 +238,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 payload["max_tokens"] = MAX_OUT
                 if VERBOSE:
                     print(f"  clamped max_tokens {want} -> {MAX_OUT}", flush=True)
+            elif isinstance(want, int) and want <= NOTHINK_BELOW:
+                payload["thinking"] = {"type": "disabled"}
+                if VERBOSE:
+                    print(f"  max_tokens={want} -> thinking disabled", flush=True)
 
             if VERBOSE:
                 print(f"  -> model={payload.get('model')} effort={payload.get('reasoning_effort')} "
-                      f"max_tokens={payload.get('max_tokens')}", flush=True)
+                      f"max_tokens={payload.get('max_tokens')} thinking={payload.get('thinking')}",
+                      flush=True)
             body = json.dumps(payload).encode()
 
         req = urllib.request.Request(

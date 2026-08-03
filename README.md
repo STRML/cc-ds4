@@ -40,12 +40,13 @@ anything irreversible:
 
 | Profile | Provider | Model | Pins a dated build? | Extra process | Setup |
 |---|---|---|---|---|---|
-| `claude-ds4` | DeepSeek direct | `deepseek-v4-flash` / `-pro` | no | none | [prompt](profiles/deepseek-direct.md) |
-| `claude-or-ds4` | OpenRouter | `deepseek-v4-flash-0731` | **yes** | proxy on :8799 | [prompt](profiles/openrouter.md) |
-| `claude-nous` | Nous Portal | `deepseek-v4-flash-0731` | **yes** | proxy on :8800 | [prompt](profiles/nous.md) |
+| `claude-ds4` | DeepSeek direct | `deepseek-v4-flash` / `-pro` | no | proxy on :31500 | [prompt](profiles/deepseek-direct.md) |
+| `claude-or-ds4` | OpenRouter | `deepseek-v4-flash-0731` | **yes** | proxy on :31501 | [prompt](profiles/openrouter.md) |
+| `claude-nous` | Nous Portal | `deepseek-v4-flash-0731` | **yes** | proxy on :31502 | [prompt](profiles/nous.md) |
 | `claude-kimi` | Moonshot | `kimi-k3` / `k3` | n/a | none | [prompt](profiles/kimi.md) |
 
-Already have a profile and just want the corrected status line:
+Already have a profile and want the proxy and the corrected status line brought up
+to date:
 
 ```sh
 git clone https://github.com/STRML/cc-ds4 && cd cc-ds4
@@ -68,7 +69,7 @@ that should drive the choice.
 to first token on a 33k prompt at roughly 50 tok/s, beating every OpenRouter provider
 tested. Its prompt caching is implicit and automatic, which matters more than raw
 speed for agent work: an identical 32,653-token prompt billed 32,653 tokens on the
-first call and **13** on every call after. It needs no helper process.
+first call and **13** on every call after.
 
 You pay for that by sending your prompts to DeepSeek, under terms that permit
 retention and training, on infrastructure in the PRC. For a scratch repo that may be
@@ -82,8 +83,12 @@ default.
 
 The cost is real and worth stating plainly. You lose implicit caching, which is the
 larger expense for agent workloads, because the only endpoint for this model that
-supports it is DeepSeek's own and ZDR excludes it. You add a local proxy that has to
-be running. Provider routing varies in speed and price from request to request.
+supports it is DeepSeek's own and ZDR excludes it. Provider routing varies in speed
+and price from request to request.
+
+Both profiles run a local proxy that has to be up, so that is no longer a reason to
+prefer one. See [thinking mode](#thinking-mode-is-on-by-default-and-it-eats-the-small-calls)
+for why the direct profile grew one.
 
 **Use `claude-or-ds4` when a pinned build matters,** too. DeepSeek's own API accepts
 exactly two model names and has no dated variants, so `deepseek-v4-flash` floats to
@@ -161,7 +166,7 @@ per-tier effort proxy — the differences are the point:
   at 1,048,576 context, so the build does not float. It also lists a
   `~deepseek/...-latest` alias, which the setup deliberately avoids.
 
-Like the OpenRouter profile it needs the effort proxy running (on `:8800`); the
+Like the OpenRouter profile it needs the effort proxy running (on `:31502`); the
 launcher starts it on demand.
 
 ## Neither DeepSeek profile can see images
@@ -185,10 +190,56 @@ DeepSeek V4 is text-only, and no `deepseek*` model on OpenRouter accepts image i
 Keep a vision-capable profile for those turns. On OpenRouter this at least fails
 loudly with a 404; on the direct endpoint it does not fail at all.
 
+## Thinking mode is on by default, and it eats the small calls
+
+This is why both profiles run a proxy.
+
+Claude Code sends `thinking: {"type":"adaptive","display":"omitted"}` on every request,
+captured on the wire. DeepSeek does not implement `adaptive`, so V4 stays in its
+default thinking mode. The main loop is fine at `max_tokens=32000`. The small utility
+calls are not, and the permission classifier behind `defaultMode: auto` is one of them:
+the thinking block consumes the whole budget and the request is cut off before the tool
+call comes out.
+
+Measured on the direct endpoint with a classifier-shaped forced decision, five runs per
+row:
+
+| `max_tokens` | thinking | result |
+|---|---|---|
+| 512 | adaptive | **3 of 5 truncated**, two of those with no `tool_use` block at all |
+| 1024 | adaptive | 0 of 5, output 432-665 |
+| 2048 | adaptive | 0 of 5, output 441-689 |
+| 512 | disabled | 0 of 5, output 141-175, 2.0s instead of 5.2s |
+
+Output ran 210 to 805 tokens across identical prompts, so it fails on some runs and not
+others. That variance is the whole reason this reads as flaky rather than broken.
+
+Two other rules of thinking mode bite the same calls:
+
+- **`tool_choice` naming a specific tool is rejected outright**: `400 Thinking mode
+  does not support this tool_choice`. `auto`, `none`, and omitted are accepted. This
+  one is not intermittent, it fails every time in 0.4s.
+- **On the direct endpoint only**, an assistant message carrying a `tool_use` must
+  carry its `thinking` block too, or you get a 400 reading "The `content[].thinking`
+  in the thinking mode must be passed back to the API". Claude Code 2.x replays it, so
+  this is not a live failure, but a path that ever drops the block kills the session.
+  OpenRouter does not enforce this rule.
+
+**All three go away with `thinking: {"type":"disabled"}`.** Both endpoints honour the
+Anthropic spelling. Neither honours its own native one: `reasoning_effort` on the
+DeepSeek OpenAI-compatible endpoint and `reasoning: {"enabled": false}` on OpenRouter
+are both dropped without error. Public reports conclude that no non-thinking mode is
+reachable, which is true of the OpenAI-compatible endpoint and wrong of
+`/v1/messages`.
+
+The proxies apply this at or below `max_tokens=8192` (`DS4_NOTHINK_BELOW`), which
+separates the utility calls from the main loop with a wide margin. Nothing observed
+lands between the two.
+
 ## Things that cost real time to discover
 
 <details>
-<summary>Nine findings, each of which wasted an hour somewhere. Worth reading before you debug anything.</summary>
+<summary>Findings that each wasted an hour somewhere. Worth reading before you debug anything.</summary>
 
 - **Base URL trailing path differs by provider.** Claude Code appends `/v1/messages`
   itself. OpenRouter wants `https://openrouter.ai/api` with no `/v1`; adding it
@@ -198,9 +249,10 @@ loudly with a 404; on the direct endpoint it does not fail at all.
 - **Effort control is not portable.** `CLAUDE_CODE_EFFORT_LEVEL` is a single global
   with no per-tier variant. OpenRouter takes `reasoning_effort` as a request
   parameter; DeepSeek ignores that spelling entirely and takes `output_config.effort`
-  instead. Neither accepts effort inside a model ID for these models. This is the
-  entire reason `claude-or-ds4` needs a proxy: tiers are the only per-request knob
-  Claude Code exposes, so the proxy reads a sentinel model name and rewrites it.
+  instead. Neither accepts effort inside a model ID for these models. Tiers are the
+  only per-request knob Claude Code exposes, so the `claude-or-ds4` proxy reads a
+  sentinel model name and rewrites it. That, plus the thinking-mode problem above, is
+  what the proxies are for.
 - **Silence is not success.** DeepSeek drops unknown parameters without error, so a
   200 response proves nothing about whether your parameter did anything. Probe with a
   deliberately invalid value: if it errors, the field is real. OpenRouter's
@@ -242,12 +294,13 @@ loudly with a 404; on the direct endpoint it does not fail at all.
 
 ```
 profiles/           setup prompts — paste one into Claude Code
-  deepseek-direct.md    DeepSeek direct, no proxy. Fastest, least private.
+  deepseek-direct.md    DeepSeek direct. Fastest, least private.
   openrouter.md         OpenRouter, pinned -0731, ZDR, needs the proxy.
   nous.md               Nous Portal, pinned -0731, no ZDR, needs the proxy.
   kimi.md               Moonshot's Kimi K3.
 src/
-  effort_proxy.py       tier to effort, optional ZDR routing, context and output guards, /__spend
+  effort_proxy.py       tier to effort, optional ZDR routing, guards, thinking off, /__spend
+  thinking_proxy.py     direct profile: thinking off on small calls, history repair
   statusline/
     common.py           transcript accounting and cost maths, shared
     direct.py           DeepSeek rates, balance-integrated spend
@@ -262,18 +315,41 @@ All three profiles share a layout: a directory under `~/.claude-<label>`, everyt
 symlinked to `~/.claude` except `settings.json`, which is a real copy so the overrides
 cannot leak back into your primary install.
 
-## Installing the status line
+## Installing into an existing profile
 
-The setup prompts handle this, but if the profile already exists:
+The setup prompts handle this. `install.sh` is for a profile that already exists and
+needs the proxy and status line refreshed after a `git pull`:
 
 ```sh
 ./install.sh --profile openrouter     # or: --profile direct / --profile nous
 ./install.sh --profile direct --dry-run
+./install.sh --profile direct --no-proxy    # status line only
 ```
 
-`settings.json` is pointed at this checkout rather than a copy, so `git pull` updates
-the bar. Verify it renders before walking away — a wrapper that fails open turns a
-syntax error into a blank bar and exit 0:
+It installs three things and backs up `settings.json` first:
+
+| | where it lands | why |
+|---|---|---|
+| status line | `<profile>/ds4-statusline.py` → this checkout | `git pull` updates it |
+| proxy | `<profile>/ds4-thinking-proxy.py` or `ds4-effort-proxy.py` → this checkout | same |
+| `cship.toml` | copied into the profile directory | meant to be edited |
+
+The first two are symlinks, matching how the rest of the profile directory already
+points into `~/.claude`. The profile is the interface and the checkout is the source
+of truth, which is what lets `settings.json` and the launcher both reference a
+`$HOME/.claude-*/...` path that is identical on every machine. A setup done straight
+from `profiles/*.md` copies the proxy in instead, since that machine may have no
+checkout; running `install.sh` afterwards replaces the copy with a symlink and says
+so. Move the checkout and you re-run `install.sh`.
+
+It also sets `ANTHROPIC_BASE_URL` to the proxy and prints the old value if it changed.
+It does **not** write the launcher, because that means editing your shell config.
+Take that from the Launcher step of the setup prompt. Without it nothing starts the
+proxy, and a profile whose proxy is down fails with connection-refused on every
+request, which reads exactly like a bad key.
+
+Verify the bar renders before walking away — a wrapper that fails open turns a syntax
+error into a blank bar and exit 0:
 
 ```sh
 src/statusline/direct.py

@@ -99,12 +99,18 @@ and floats to whatever build is current, which is why this setup pins `-0731`.
 Claude Code exposes four model tiers (fable, opus, sonnet, haiku). This setup points
 all of them at one model and varies **reasoning effort** instead. ASK which approach:
 
-**Option A — uniform effort (simpler, no extra process).**
+Both options run the proxy. It is not optional any more: V4 keeps thinking whatever
+Claude Code asks for, and that truncates every small internal call it makes, so the
+proxy has to turn thinking off on those regardless of how effort is configured. Step 6
+has the measurements. What the two options change is only whether the proxy also
+rewrites effort per tier.
+
+**Option A — uniform effort (simpler).**
 All tiers use the same model and one global effort level. Set
 `CLAUDE_CODE_EFFORT_LEVEL` once. Picking a tier in `/model` changes nothing about how
 hard the model thinks.
 
-**Option B — per-tier effort (what you probably want, needs a tiny local proxy).**
+**Option B — per-tier effort (what you probably want).**
 Each tier maps to a different effort:
 
 | Tier | Effort |
@@ -225,7 +231,7 @@ src = os.path.expanduser("~/.claude/settings.json")
 dst = os.path.expanduser("~/.claude-or-ds4/settings.json")
 s = json.load(open(src)) if os.path.exists(src) else {}
 overrides = {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8799",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:31501",
     "ANTHROPIC_AUTH_TOKEN": "KEY_OR_PLACEHOLDER",
     "ANTHROPIC_MODEL": "ds4-xhigh",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "ds4-xhigh",
@@ -293,7 +299,7 @@ cost, and model name as machine-readable JSON.
   misbehave on others. Expect rough edges in tool-use-heavy flows regardless of how
   clean this config is.
 
-## Step 6 — The effort proxy (Option B only)
+## Step 6 — The proxy
 
 Skip this entirely if the user chose Option A.
 
@@ -301,7 +307,9 @@ The proxy is mostly a pass-through: OpenRouter already speaks the Anthropic
 `/v1/messages` shape, so it rewrites one field and adds routing preferences.
 
 The proxy is `src/effort_proxy.py` in this repo. Copy it verbatim to
-`~/.claude-or-ds4/ds4-effort-proxy.py` rather than retyping it. It is ~260 lines and
+`~/.claude-or-ds4/ds4-effort-proxy.py` rather than retyping it. If this machine has a
+checkout, `./install.sh --profile openrouter` puts it there as a symlink instead, so
+`git pull` updates it. It is ~260 lines and
 has grown past the point where inlining it here helps. What it does:
 
 | Concern | Behaviour |
@@ -310,12 +318,28 @@ has grown past the point where inlining it here helps. What it does:
 | zero data retention | injects `provider: {"zdr": true, "data_collection": "deny"}`; `DS4_ZDR=0` disables |
 | context floor | `ignore: ["Io Net"]` — ZDR-eligible but only 262,100 context vs 1,048,576 elsewhere |
 | output ceiling | clamps `max_tokens` to 65536, the floor of the ZDR pool |
+| thinking | `max_tokens` at or below 8192 gets `thinking: {"type":"disabled"}`; `DS4_NOTHINK_BELOW` moves the line |
 | cost reporting | serves `GET /__spend` with live rates, 7-day spend, and credits remaining |
 | debugging | `DS4_DEBUG=1` logs `-> model=… effort=… max_tokens=…` and `<- status` per request |
 
 The `/__spend` endpoint needs a key of its own, since a statusline render carries no
 client credentials. It reads `OPENROUTER_API_KEY` from the environment, falling back
 to `ANTHROPIC_AUTH_TOKEN` in the profile settings.
+
+The thinking row deserves a note, because the mechanism is not obvious. V4 thinks by
+default and Claude Code cannot turn it off: it sends
+`thinking: {"type":"adaptive","display":"omitted"}`, and no provider serving this model
+implements `adaptive`. On a small call that is fatal, because the thinking block
+consumes the whole budget before the tool call is emitted. Measured on `-0731` at
+`max_tokens=512` with a forced tool decision: 301-412 output tokens with thinking on,
+101-163 with it off. The permission classifier behind `defaultMode: auto` is one of
+these calls, which is why the symptom is intermittent classifier failures rather than
+anything that looks like a routing problem.
+
+Use the Anthropic spelling. `reasoning: {"enabled": false}`, OpenRouter's own, is
+dropped without error — one more instance of silence not being success. The direct
+profile carries the same rule for the same reason; see
+[its step 5](deepseek-direct.md#step-5--the-thinking-proxy).
 
 Make it executable and confirm it starts:
 
@@ -324,7 +348,7 @@ chmod +x ~/.claude-or-ds4/ds4-effort-proxy.py
 python3 ~/.claude-or-ds4/ds4-effort-proxy.py &
 sleep 1
 curl -s -o /dev/null -w "proxy responded: %{http_code}\n" -X POST \
-  http://127.0.0.1:8799/v1/messages -H 'content-type: application/json' \
+  http://127.0.0.1:31501/v1/messages -H 'content-type: application/json' \
   -d '{"model":"ds4-low","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
@@ -332,7 +356,7 @@ A 401 here is expected and correct without a key in the header — it proves the
 forwarded upstream.
 
 **Nothing works when the proxy is down.** Every request gets connection-refused, which
-looks exactly like a broken provider or a bad key. Check `nc -z 127.0.0.1 8799` before
+looks exactly like a broken provider or a bad key. Check `nc -z 127.0.0.1 31501` before
 investigating anything else. Step 8 wires the launcher to start it automatically, so
 you should not have to think about this after setup.
 
@@ -341,7 +365,7 @@ banner, point the proxy at a local echo server and read the body it emits. `prov
 should be present alongside `reasoning_effort`:
 
 ```bash
-DS4_UPSTREAM=http://127.0.0.1:8798 DS4_PROXY_PORT=8801 python3 ~/.claude-or-ds4/ds4-effort-proxy.py &
+DS4_UPSTREAM=http://127.0.0.1:31598 DS4_PROXY_PORT=31502 python3 ~/.claude-or-ds4/ds4-effort-proxy.py &
 ```
 
 To point the proxy at a local inference server instead of OpenRouter:
@@ -367,7 +391,7 @@ work: fish skips autoload entirely when a function is already defined.
 
 ```fish
 function __ds4_proxy_up --description 'Start the ds4 effort proxy unless it is already listening'
-    if nc -z 127.0.0.1 8799 2>/dev/null
+    if nc -z 127.0.0.1 31501 2>/dev/null
         return 0
     end
 
@@ -380,10 +404,10 @@ function __ds4_proxy_up --description 'Start the ds4 effort proxy unless it is a
     disown
 
     for i in (seq 40)
-        nc -z 127.0.0.1 8799 2>/dev/null; and return 0
+        nc -z 127.0.0.1 31501 2>/dev/null; and return 0
         sleep 0.25
     end
-    echo "claude-or-ds4: proxy never came up on :8799 — see ~/.claude-or-ds4/proxy.log" >&2
+    echo "claude-or-ds4: proxy never came up on :31501 — see ~/.claude-or-ds4/proxy.log" >&2
     return 1
 end
 
@@ -403,13 +427,13 @@ zsh/bash — same idea in `~/.zshrc` or `~/.bashrc`:
 
 ```bash
 claude-or-ds4() {
-  if ! nc -z 127.0.0.1 8799 2>/dev/null; then
+  if ! nc -z 127.0.0.1 31501 2>/dev/null; then
     ( while true; do python3 "$HOME/.claude-or-ds4/ds4-effort-proxy.py"; sleep 1; done ) \
       >>"$HOME/.claude-or-ds4/proxy.log" 2>&1 &
     disown
-    for _ in $(seq 40); do nc -z 127.0.0.1 8799 2>/dev/null && break; sleep 0.25; done
+    for _ in $(seq 40); do nc -z 127.0.0.1 31501 2>/dev/null && break; sleep 0.25; done
   fi
-  nc -z 127.0.0.1 8799 2>/dev/null || { echo "proxy never came up on :8799" >&2; return 1; }
+  nc -z 127.0.0.1 31501 2>/dev/null || { echo "proxy never came up on :31501" >&2; return 1; }
   CLAUDE_CONFIG_DIR="$HOME/.claude-or-ds4" command claude "$@"
 }
 ```
@@ -448,16 +472,17 @@ end
 
 1. Open a NEW terminal (so aliases/functions load).
 2. `claude-switch` → must print the disabled message and change nothing.
-3. If Option B, confirm the proxy is running. If local backend, confirm `ds4-server`
-   is up: `curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8765/v1/models`
+3. Confirm the proxy is running: `nc -z 127.0.0.1 31501`. Both options need it. If
+   local backend, confirm `ds4-server` is up too:
+   `curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8765/v1/models`
 4. `claude-or-ds4` in any project directory.
-5. Inside the session run `/status`. Success = Base URL shows what step 5 set (the
-   proxy address for Option B, OpenRouter or localhost for Option A).
+5. Inside the session run `/status`. Success = Base URL shows the proxy at
+   `http://127.0.0.1:31501`, which is expected and not a misconfiguration.
 6. Ask it something trivial to confirm a live response.
 7. Option B only: switch tiers with `/model` and confirm each still answers. To prove
    effort is actually varying, run the proxy in the foreground and add a
    `print(payload["model"], effort)` line temporarily.
-8. Option B only: confirm ZDR is on the wire. The startup banner saying `zdr=True`
+8. Confirm ZDR is on the wire. The startup banner saying `zdr=True`
    proves only that the flag parsed, so check the body the proxy actually emits by
    pointing a second instance at a local echo server (see step 6). `provider` must be
    present next to `reasoning_effort`.
@@ -504,9 +529,9 @@ Run the installer from a checkout of this repo:
 ```
 
 It copies `config/cship-openrouter.toml` into the profile, backs up `settings.json`,
-and points `statusLine` at `src/statusline/openrouter.py` **in the checkout** rather
-than at a copy, so `git pull` updates the bar. Adjust `CSHIP` in
-`src/statusline/common.py` if `cship` is not at `~/.cargo/bin/cship`.
+symlinks `~/.claude-or-ds4/ds4-statusline.py` at `src/statusline/openrouter.py` in the
+checkout, and points `statusLine` at that symlink. `git pull` updates the bar. Adjust
+`CSHIP` in `src/statusline/common.py` if `cship` is not at `~/.cargo/bin/cship`.
 
 The wrapper rewrites the JSON payload and lets `cship` render it, rather than
 regexing the coloured output afterwards. `cost.total_cost_usd` and
