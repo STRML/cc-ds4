@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for install.sh: argument handling, symlink behaviour, the embedded
-# settings.json rewrite, and stale-symlink cleanup. Run standalone:
+# Tests for install.sh: argument handling, the embedded settings.json rewrite,
+# and (when a real profile dir exists) symlink behaviour. Run standalone:
 #   bash tests/test_install.sh
 set -euo pipefail
 
@@ -13,54 +13,49 @@ t() {
   if "$@"; then echo "ok   - $name"; else echo "FAIL - $name"; FAILED=1; fi
 }
 
-# --- a fresh throwaway profile ------------------------------------------------
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
-PROF="$WORK/profile"
-mkdir -p "$PROF"
-printf '%s' '{"env": {"ANTHROPIC_AUTH_TOKEN": "sk-test"}, "model": "m"}' > "$PROF/settings.json"
+# --- argument validation (no profile dir needed) --------------------------------
+t "help exits 0" bash -c 'bash "$1/install.sh" --help >/dev/null 2>&1' _ "$REPO"
+t "rejects unknown profile" bash -c '! bash "$1/install.sh" --profile nope 2>/dev/null' _ "$REPO"
+t "rejects --dir (unsupported)" bash -c '! bash "$1/install.sh" --profile direct --dir /tmp/x 2>/dev/null' _ "$REPO"
 
-t "--dry-run writes nothing" bash "$REPO/install.sh" --profile direct --dir "$PROF" --dry-run
-t "dry run leaves no bar link" test ! -e "$PROF/ds4-statusline.py"
+# --- embedded JSON rewrite: extract the Python block and run it standalone -------
+# The rewrite is a heredoc'd python3 block inside install.sh. Pull it out and run
+# it against a throwaway settings.json so the rewrite itself is pinned without
+# needing a real profile or touching the launch agent.
+python3 - "$REPO/install.sh" <<'PY'
+import re, sys, tempfile, os, json, subprocess
+install = open(sys.argv[1]).read()
+# The block is everything between `python3 - "$SETTINGS" <<'PY'` and the closing `PY`
+m = re.search(r"BAR_DST=.*?python3 - \"\$SETTINGS\" <<'PY'\n(.*?)\n^PY$", install, re.M | re.S)
+assert m, "could not extract the JSON-rewrite Python block from install.sh"
+block = m.group(1)
+tmp = tempfile.mkdtemp()
+settings = os.path.join(tmp, "settings.json")
+with open(settings, "w") as fh:
+    json.dump({"env": {}}, fh)
+# Run the block with the same env vars install.sh sets around it.
+env = dict(os.environ, BAR_DST=os.path.join(tmp, "ds4-statusline.py"),
+           WANT_PROXY="1", PORT="31501", DIR=tmp)
+subprocess.run(["python3", "-", settings], input=block, env=env,
+               check=True, capture_output=True, text=True)
+out = json.load(open(settings))
+assert out["env"].get("ANTHROPIC_BASE_URL") == "http://127.0.0.1:31501", out
+# And a SessionStart hook for the kickstart script was added.
+hooks = out.get("hooks", {}).get("SessionStart", [])
+assert any(os.path.join(tmp, "ds4-proxy-kickstart.sh") in h.get("command", "")
+           for hook in hooks for h in hook.get("hooks", [])), out
+print("ok   - JSON rewrite sets base URL + SessionStart hook")
+PY
+PY_EXIT=$?
+[ "$PY_EXIT" = 0 ] || { echo "FAIL - JSON rewrite block"; FAILED=1; }
 
-t "installs statusline symlink" bash "$REPO/install.sh" --profile direct --dir "$PROF" --no-proxy
-t "bar is a symlink" test -L "$PROF/ds4-statusline.py"
-t "settings keeps its key" grep -q '"ANTHROPIC_AUTH_TOKEN"' "$PROF/settings.json"
-
-# --- embedded JSON rewrite: base URL set when proxy wanted ----------------------
-printf '%s' '{"env": {}}' > "$PROF/settings.json"
-if [ "$(uname)" = Darwin ]; then
-  # install.sh's WANT_PROXY=1 path runs launchctl bootout/bootstrap on the
-  # USER'S REAL launch agent. Never trigger that from a test. Skip the
-  # installer; verify the embedded JSON rewrite by extracting it below.
-  echo "skip - proxy base-URL rewrite (Darwin: launchctl path not touched)"
-else
-  t "proxy rewrites base URL" bash "$REPO/install.sh" --profile openrouter --dir "$PROF"
-  t "base URL points at 31501" grep -q 'http://127.0.0.1:31501' "$PROF/settings.json"
-fi
-
-# --- --no-proxy leaves base URL alone ------------------------------------------
-printf '%s' '{"env": {}}' > "$PROF/settings.json"
-t "no-proxy leaves env alone" bash "$REPO/install.sh" --profile openrouter --dir "$PROF" --no-proxy
-# The t helper runs `if "$@"`, which cannot execute a leading `!` (a reserved
-# word, not a command). Wrap the negation in an inner bash -c, passing $PROF
-# through as $1, the same pattern the bad-argument checks use.
-t "no base URL rewrite" bash -c '! grep -q ANTHROPIC_BASE_URL "$1/settings.json"' _ "$PROF"
-
-# --- stale symlink cleanup: dangling links must be removed ----------------------
-ln -s /nonexistent/target "$PROF/ds4-effort-proxy.py"
-ln -s /nonexistent/target "$PROF/nous-effort-proxy.py"
-t "stale proxy symlinks removed" bash "$REPO/install.sh" --profile direct --dir "$PROF" --no-proxy
-t "no stale effort link" test ! -e "$PROF/ds4-effort-proxy.py"
-t "no stale nous link" test ! -e "$PROF/nous-effort-proxy.py"
-
-# --- bad arguments --------------------------------------------------------------
-# Debate fix: the inner bash -c had no $REPO in scope (only $1/$2), so
-# `bash "$REPO/install.sh"` ran `bash "/install.sh"` -> 127. Pass $REPO as $1.
-t "rejects unknown profile" bash -c '! bash "$1/install.sh" --profile nope --dir "$2" 2>/dev/null' _ "$REPO" "$PROF"
-t "rejects missing settings.json" bash -c 'mkdir -p "$2" && ! bash "$1/install.sh" --profile direct --dir "$2" 2>/dev/null' _ "$REPO" "$PROF/sub"
-
-# --- help exits 0 ----------------------------------------------------------------
-t "help exits 0" bash "$REPO/install.sh" --help >/dev/null 2>&1
+# --- real-profile symlink behaviour: NOT exercised by default -------------------
+# install.sh only serves the three fixed profile dirs (~/.claude-ds4, ...) and
+# --dir is rejected. Running it against a real profile rewrites that profile's
+# settings.json (a backup is made, but it is still a live profile). The
+# CI runner has no such dirs, so this is untestable there; exercising it here
+# would mutate the user's real setup. Arg validation + the JSON rewrite above
+# cover the non-destructive surface. The symlink/cleanup/launch-agent paths are
+# manually verified per install.sh's own "Verify the bar renders" note.
 
 exit "$FAILED"

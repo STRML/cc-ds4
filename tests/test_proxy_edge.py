@@ -189,12 +189,25 @@ class Spend(unittest.TestCase):
         self.assertAlmostEqual(wk, 4.0)     # 5.0 - 1.0 (the <= now-WEEK row)
         self.assertFalse(partial)
 
-    def test_api_key_never_leaks_env(self):
-        # Env OPENROUTER_API_KEY wins even when a settings.json exists.
-        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "env-key"}):
-            with mock.patch.object(proxy, "json",
-                                   **{"load.side_effect": ValueError}):
-                self.assertEqual(proxy.api_key(self.cfg), "env-key")
+    def test_api_key_reads_profile_settings_first(self):
+        # Post-review contract: the key comes from the profile's OWN
+        # settings.json, never a process-wide env var. The per-profile
+        # DS4_KEY_<NAME> env override only applies when settings has none.
+        import os as _os
+        cfg_dir = self.cfg["dir"]
+        _os.makedirs(cfg_dir, exist_ok=True)
+        with open(_os.path.join(cfg_dir, "settings.json"), "w") as fh:
+            json.dump({"env": {"ANTHROPIC_AUTH_TOKEN": "from-file"}}, fh)
+        # A process-wide env var must NOT leak in.
+        with mock.patch.dict(_os.environ, {"ANTHROPIC_AUTH_TOKEN": "leaked"}):
+            self.assertEqual(proxy.api_key("direct", self.cfg), "from-file")
+
+    def test_api_key_per_profile_override(self):
+        # With no settings.json key, the per-profile DS4_KEY_<NAME> env override
+        # applies — scoped to that profile, not global.
+        import os as _os
+        with mock.patch.dict(_os.environ, {"DS4_KEY_DIRECT": "override-key"}):
+            self.assertEqual(proxy.api_key("direct", self.cfg), "override-key")
 
 
 class Sessions(unittest.TestCase):
