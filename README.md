@@ -377,6 +377,10 @@ src/
     nous.py             rates from the proxy; no credits/balance segments
 skills/
     ds4-skill-family/   headless ds4 subagents for plan/verify/review/implement
+    ds4-plan/           discrete /ds4-plan wrapper (read-only, xhigh/max)
+    ds4-review/         discrete /ds4-review wrapper (read-only, xhigh/max)
+    ds4-verify/         discrete /ds4-verify wrapper (read-only, verify floor)
+    ds4-implement/      discrete /ds4-implement wrapper (write-capable, sandbox-off)
 config/             cship configs with the Anthropic-only segments removed
 tests/              tests over the money maths and transcript parsing
 install.sh          point an existing profile at the corrected status line
