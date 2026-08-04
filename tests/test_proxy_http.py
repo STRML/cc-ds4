@@ -448,14 +448,17 @@ class FailoverStallRelayTest(unittest.TestCase):
         self.addCleanup(self._profiles.stop)
         self._w, self._r = proxy.FAILOVER_WINDOW, proxy.FAILOVER_RATE
         self._rc, self._rt = proxy.FAILOVER_RECHECK, proxy.RELAY_TIMEOUT
+        self._ps = proxy.FAILOVER_PROBE_SUCCESSES
         # window=4, rate=0.5 -> two strikes trip; a 1s relay timeout resolves
         # each hang fast instead of blocking the test for minutes.
         proxy.FAILOVER_WINDOW, proxy.FAILOVER_RATE = 4, 0.5
         proxy.FAILOVER_RECHECK, proxy.RELAY_TIMEOUT = 60, 1
+        proxy.FAILOVER_PROBE_SUCCESSES = 3
         self.addCleanup(setattr, proxy, "FAILOVER_WINDOW", self._w)
         self.addCleanup(setattr, proxy, "FAILOVER_RATE", self._r)
         self.addCleanup(setattr, proxy, "FAILOVER_RECHECK", self._rc)
         self.addCleanup(setattr, proxy, "RELAY_TIMEOUT", self._rt)
+        self.addCleanup(setattr, proxy, "FAILOVER_PROBE_SUCCESSES", self._ps)
         proxy._failover.clear()
         self.addCleanup(proxy._failover.clear)
 
@@ -507,9 +510,19 @@ class FailoverStallRelayTest(unittest.TestCase):
                           lambda b: (200, {}, b'{"ok":"nous"}'))
         with proxy._lock:
             proxy._failover_state("test")["probed_at"] = 0.0   # recheck due now
-        # the next request probes nous, the probe succeeds, the circuit closes
+        # A single successful probe is not enough: remain on direct while the
+        # configured consecutive probe count is reached.
+        for _ in range(2):
+            with proxy._lock:
+                proxy._failover_state("test")["probed_at"] = 0.0
+            status, body = post(srv, "/v1/messages", SENTINEL)
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body), {"ok": True})
+            self.assertTrue(proxy._failover["test"]["open"])
+        # The third clean probe closes the circuit and this request serves nous.
+        with proxy._lock:
+            proxy._failover_state("test")["probed_at"] = 0.0
         status, body = post(srv, "/v1/messages", SENTINEL)
-        self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"ok": "nous"})
         self.assertFalse(proxy._failover["test"]["open"])
         # and nous keeps serving
@@ -566,6 +579,22 @@ class FailoverRelayTest(unittest.TestCase):
         self.assertNotIn("reasoning_effort", sent)
         self.assertEqual(good.requests[-1]["headers"].get("Authorization"),
                          "Bearer ds4-direct-key")
+
+    def test_500s_are_transient_and_trip_the_breaker(self):
+        failing = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (500, {}, b'{"error":"internal"}'))})
+        good = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(failing.close)
+        self.addCleanup(good.close)
+        nous = dict(proxy.PROFILES["nous"], upstream=failing.url)
+        proxy.PROFILES["direct"]["upstream"] = good.url
+        srv = make_server(nous, failing)
+        self.addCleanup(srv.server_close)
+        for _ in range(3):
+            status, _ = post(srv, "/v1/messages", SENTINEL)
+            self.assertEqual(status, 500)
+        self.assertTrue(proxy._failover["test"]["open"])
 
     def test_response_names_the_serving_upstream(self):
         """The client's base URL hides the gateway; the header reveals it."""

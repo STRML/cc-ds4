@@ -736,12 +736,15 @@ class FailoverBreaker(unittest.TestCase):
         self._profiles.start()
         self.addCleanup(self._profiles.stop)
         self.nous = dict(proxy.PROFILES["nous"])
-        self._w, self._r, self._rc = (proxy.FAILOVER_WINDOW,
-                                      proxy.FAILOVER_RATE, proxy.FAILOVER_RECHECK)
+        self._w, self._r, self._rc, self._ps = (proxy.FAILOVER_WINDOW,
+                                      proxy.FAILOVER_RATE, proxy.FAILOVER_RECHECK,
+                                      proxy.FAILOVER_PROBE_SUCCESSES)
         proxy.FAILOVER_WINDOW, proxy.FAILOVER_RATE, proxy.FAILOVER_RECHECK = 4, 0.5, 60
+        proxy.FAILOVER_PROBE_SUCCESSES = 3
         self.addCleanup(setattr, proxy, "FAILOVER_WINDOW", self._w)
         self.addCleanup(setattr, proxy, "FAILOVER_RATE", self._r)
         self.addCleanup(setattr, proxy, "FAILOVER_RECHECK", self._rc)
+        self.addCleanup(setattr, proxy, "FAILOVER_PROBE_SUCCESSES", self._ps)
         proxy._failover.clear()
         self.addCleanup(proxy._failover.clear)
 
@@ -789,6 +792,15 @@ class FailoverBreaker(unittest.TestCase):
         st["open"] = True
         st["opened_at"] = time.time() - 9999
         st["probed_at"] = 0.0
+        for _ in range(2):
+            with proxy._lock:
+                st["probed_at"] = 0.0
+            eff, name = proxy.failover_effective("nous", self.nous)
+            self.assertIs(eff, proxy.PROFILES["direct"])
+            self.assertEqual(name, "nous->direct")
+            self.assertTrue(self.state()["open"])
+        with proxy._lock:
+            st["probed_at"] = 0.0
         eff, name = proxy.failover_effective("nous", self.nous)
         self.assertIs(eff, self.nous)
         self.assertEqual(name, "nous")
