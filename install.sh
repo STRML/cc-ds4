@@ -225,6 +225,56 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   fi
   export DS4_AGENT_HOME DS4_AGENT_USER DS4_AGENT_LOGNAME DS4_AGENT_PATH
 
+  # The permission classifier gates every tool call in auto mode. By default it
+  # routes to the operator's Anthropic subscription (a trusted boundary) rather
+  # than DeepSeek — which needs a subscription token. Ask once at install time,
+  # since whoever runs install.sh is almost certainly using their own claude:
+  #   * Anthropic (default) — run `claude setup-token` and bake the token.
+  #   * DeepSeek — bake DS4_CLASSIFIER=ds4; no token, classifier stays local.
+  # A pre-set DS4_CLASSIFIER or DS4_CLASSIFIER_TOKEN skips the prompt. Only
+  # prompt on an interactive TTY (tests/CI/--dry-run are non-interactive).
+  if [ -z "${DS4_CLASSIFIER:-}" ] && [ -z "${DS4_CLASSIFIER_TOKEN:-}" ]; then
+    if [ "$DRY" = 0 ] && [ -t 0 ]; then
+      printf "  Route the permission classifier to your Anthropic subscription? [Y/n] " >&2
+      read -r _route
+      case "${_route:-y}" in
+        y|Y|"")
+          if command -v claude >/dev/null 2>&1; then
+            echo "  Running 'claude setup-token' to mint a subscription token..." >&2
+            _tok="$(claude setup-token 2>/dev/null | tail -1)"
+            if [ -n "$_tok" ]; then
+              export DS4_CLASSIFIER_TOKEN="$_tok"
+              echo "  Baked DS4_CLASSIFIER_TOKEN into the agent." >&2
+            else
+              echo "  setup-token produced no token." >&2
+              printf "  Route the classifier to DeepSeek instead? [Y/n] " >&2
+              read -r _fallback
+              case "${_fallback:-y}" in
+                y|Y|"") export DS4_CLASSIFIER=ds4; echo "  Classifier -> DeepSeek." >&2 ;;
+                *) echo "  Leaving unset; the classifier will fail open to ds4." >&2 ;;
+              esac
+            fi
+          else
+            echo "  'claude' not on PATH." >&2
+            printf "  Route the classifier to DeepSeek instead? [Y/n] " >&2
+            read -r _fallback
+            case "${_fallback:-y}" in
+              y|Y|"") export DS4_CLASSIFIER=ds4; echo "  Classifier -> DeepSeek." >&2 ;;
+              *) echo "  Leaving unset; the classifier will fail open to ds4." >&2 ;;
+            esac
+          fi
+          ;;
+        n|N)
+          export DS4_CLASSIFIER=ds4
+          echo "  Classifier -> DeepSeek." >&2
+          ;;
+      esac
+    else
+      echo "  (non-interactive: classifier defaults to Anthropic and fails open to ds4"
+      echo "   until DS4_CLASSIFIER_TOKEN is set, or set DS4_CLASSIFIER=ds4 to opt out)" >&2
+    fi
+  fi
+
   PLIST_ENV=""
   while IFS= read -r kv; do
     case "$kv" in

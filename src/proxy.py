@@ -45,12 +45,15 @@ VISION = os.environ.get("DS4_VISION", "1") == "1"
 # Classifier routing: the auto-mode permission classifier (ds4-high + small
 # max_tokens + thinking off) is forwarded to the Anthropic subscription instead
 # of DeepSeek — the security gate should live in a trusted boundary. "ds4"
-# restores the old behavior; DS4_CLASSIFIER_MODEL overrides the Anthropic model
-# (haiku is the cheap, fast classifier). DS4_CLASSIFIER_TOKEN holds the
-# subscription token (claude setup-token); without it the classifier fails open
-# to ds4.
+# restores the old behavior; DS4_CLASSIFIER_MODEL overrides the Anthropic model.
+# Default is sonnet-5, NOT haiku: the profile advertises a 1M context window
+# and Claude Code sizes the classifier transcript against it, so a 200K-window
+# model (haiku) overflows on a long auto-mode session ("classifier transcript
+# exceeded context window"). Sonnet 5 matches the 1M window the profiles claim.
+# DS4_CLASSIFIER_TOKEN holds the subscription token (claude setup-token);
+# without it the classifier fails open to ds4.
 CLASSIFIER_ROUTE = os.environ.get("DS4_CLASSIFIER", "anthropic")
-CLASSIFIER_MODEL = os.environ.get("DS4_CLASSIFIER_MODEL", "claude-haiku-4-5")
+CLASSIFIER_MODEL = os.environ.get("DS4_CLASSIFIER_MODEL", "claude-sonnet-5")
 
 # Below this many max_tokens, turn thinking off. Claude Code's utility calls
 # arrive with a few hundred tokens of budget; the main loop arrives at 32000.

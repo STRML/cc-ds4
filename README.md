@@ -267,13 +267,15 @@ the classifier to your **Anthropic subscription** — a trusted boundary — and
 reply. The classifier body is already an Anthropic-shaped request, so this is a relay
 swap, not a rewrite.
 
-- **Opt out** with `DS4_CLASSIFIER=ds4` (or a per-profile `classifier: "ds4"` row) to
-  keep the classifier on DeepSeek.
+- **Opt out** with `DS4_CLASSIFIER=ds4` (exported before `install.sh`, like the other
+  `DS4_*` knobs) to keep the classifier on DeepSeek.
 - **Auth** is `DS4_CLASSIFIER_TOKEN`, a long-lived subscription token from
   `claude setup-token`. Set it before running `install.sh` so it reaches the launchd
   agent. Without it the classifier fails open to the ds4 path.
-- **Model** defaults to `claude-haiku-4-5` (`DS4_CLASSIFIER_MODEL` overrides). Small
-  and fast — the classification task is trivial.
+- **Model** defaults to `claude-sonnet-5` (`DS4_CLASSIFIER_MODEL` overrides). Sonnet
+  matches the 1M context window the profiles advertise — the classifier transcript
+  can be large in a long auto-mode session, and a 200K-window model (haiku) overflows
+  it. Still the trusted Anthropic boundary.
 - Only the classifier moves. The main loop and subagents keep the DeepSeek routing.
 
 ## Things that cost real time to discover

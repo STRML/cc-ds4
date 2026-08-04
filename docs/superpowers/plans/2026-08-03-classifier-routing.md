@@ -241,20 +241,12 @@ def anthropic_endpoint(payload, model):
 
 Add to `proxy.py`:
 
-1. **Config**: a `classifier` row per profile in `PROFILES`:
-   ```python
-   "direct":     {..., "classifier": "anthropic"},
-   "openrouter": {..., "classifier": "anthropic"},
-   "nous":       {..., "classifier": "anthropic"},
-   ```
-   Plus a module constant `CLASSIFIER_MODEL = os.environ.get("DS4_CLASSIFIER_MODEL", "claude-haiku-4-5")` and the opt-out `DS4_CLASSIFIER=ds4`.
-   Import `classifier as _classifier`.
+1. **Config**: a module constant `CLASSIFIER_ROUTE = os.environ.get("DS4_CLASSIFIER", "anthropic")`, `CLASSIFIER_MODEL = os.environ.get("DS4_CLASSIFIER_MODEL", "claude-sonnet-5")`, and the import `classifier as _classifier`. No per-profile `classifier` row — one process serves every profile and the classifier is the same call on all of them, so a single global env switch is the opt-out (matching how `VISION` gates the vision rewrite). Sonnet 5 (not haiku) is the default because the profiles advertise a 1M context window and a 200K-window classifier overflows a long auto-mode session.
 
 2. **In `_relay`**, before the existing `rewrite(payload, cfg)`:
 
 ```python
-route = os.environ.get("DS4_CLASSIFIER", cfg.get("classifier", "anthropic"))
-if (route == "anthropic"
+if (CLASSIFIER_ROUTE == "anthropic"
         and _classifier.is_classifier(payload, NOTHINK_BELOW)):
     ep = _classifier.anthropic_endpoint(payload, CLASSIFIER_MODEL)
     if ep is not None:

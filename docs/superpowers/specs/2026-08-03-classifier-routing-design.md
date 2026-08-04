@@ -69,7 +69,7 @@ When the classifier is detected and the profile's route is `anthropic`:
 1. `payload["model"]` is set to a real Anthropic model id. The classifier is a
    small permission call; **haiku is the right model** (cheap, fast, and the
    classification task is trivial). Configurable per profile via
-   `DS4_CLASSIFIER_MODEL` with `claude-haiku-4-5` as the default.
+   `DS4_CLASSIFIER_MODEL` with `claude-sonnet-5` as the default.
 2. The `reasoning_effort` field the ds4 rewrite added is removed — Anthropic
    does not accept `reasoning_effort` at the top level on the subscription.
    (Haiku doesn't support effort; drop it entirely.)
@@ -115,19 +115,17 @@ never logged.
 > (Vision uses the keychain via its *child* process, which has a full interactive
 > session to refresh; the classifier's in-proxy relay does not.)
 
-### Per-profile config
+### Config: `DS4_CLASSIFIER` env var
 
-A new `classifier` row in `PROFILES`, defaulting to `anthropic`:
+Routing is global via the `DS4_CLASSIFIER` env var (baked into the launchd agent
+by install.sh's `DS4_*` sweep, like the other knobs). Default `anthropic`;
+`DS4_CLASSIFIER=ds4` forces the classifier onto the ds4 path everywhere — the
+escape hatch for "I don't want auto-mode tool intent going to Anthropic either".
 
-| profile | classifier route |
-|---|---|
-| `direct` | `anthropic` (default) |
-| `openrouter` | `anthropic` (default) |
-| `nous` | `anthropic` (default) |
-
-Opt-out: `"classifier": "ds4"` on any profile, or the `DS4_CLASSIFIER` env var
-(`DS4_CLASSIFIER=ds4` forces ds4 everywhere). The env var is the escape hatch
-for "I don't want auto-mode tool intent going to Anthropic either".
+A per-profile `classifier` row in `PROFILES` was considered and dropped — one
+process serves every profile and the classifier is the same call on all of them,
+so a single global switch covers the real opt-out. (This matches how `VISION`
+gates the vision rewrite: one env var, no per-profile flag.)
 
 ## Failure handling — fail open, never brick
 
@@ -187,8 +185,7 @@ not silently degrade.
   `claude-haiku-4-5`, `reasoning_effort` stripped, correct upstream URL and
   auth header.
 - **Fail-open** tests: no token → ds4 path; Anthropic network error → ds4 path.
-- **Opt-out** tests: `classifier: "ds4"` and `DS4_CLASSIFIER=ds4` leave the
-  request on the ds4 path.
+- **Opt-out** tests: `DS4_CLASSIFIER=ds4` leaves the request on the ds4 path.
 - The `urlopen` call is **mocked** in tests so the suite stays offline and
   deterministic.
 - Existing suite stays green (`python3 -m unittest discover -s tests`).
