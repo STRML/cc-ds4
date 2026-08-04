@@ -6,7 +6,7 @@ The coordinator instructs a Bash call (not a subagent). The child's
 `result` text. The transcript's `total_cost_usd` is Anthropic-table-priced
 garbage on a ds4 profile, so it is never surfaced.
 """
-import argparse, json, os, subprocess, sys
+import argparse, json, os, signal, subprocess, sys
 
 PROFILES = {
     "direct":   {"dir": "~/.claude-ds4",   "port": 31500, "sentinel": False},
@@ -24,7 +24,8 @@ SCRUB_EXACT = ("CLAUDE_CONFIG_DIR", "CLAUDECODE")
 def _env(profile_dir):
     e = {k: v for k, v in os.environ.items()
          if not (any(k.startswith(p) for p in SCRUB_PREFIXES) or k in SCRUB_EXACT
-                 or k.startswith("CMUX") or k in ("NODE_OPTIONS", "AI_AGENT"))}
+                 or k.startswith("CMUX") or k in ("NODE_OPTIONS", "AI_AGENT")
+                 or k.lower() in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"))}
     e["CLAUDE_CONFIG_DIR"] = profile_dir
     e["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
     return e
@@ -45,7 +46,7 @@ def _parse_result(stdout):
             if obj.get("is_error"):
                 return None, obj.get("result") or "subagent returned is_error"
             text = obj.get("result")
-            if isinstance(text, str) and text.strip():
+            if isinstance(text, str):
                 return text, None
         start = end
 
@@ -64,6 +65,13 @@ def main():
         model = a.model or TIERS[a.tier]
     else:
         model = a.model or "deepseek-v4-flash[1m]"
+        # Warn: the direct profile's deepseek endpoint ignores reasoning_effort.
+        # A max/xhigh tier silently collapses to deepseek-v4-pro (the only two
+        # models it exposes), with no effort control — a coordinator expecting
+        # max-level reasoning gets flash with thinking on.
+        if a.tier in ("max", "xhigh"):
+            print("note:direct profile ignores --tier; reasoning effort is unproven",
+                  "on the direct endpoint (see README)", file=sys.stderr)
     dir_path = os.path.expanduser(cfg["dir"])
     cmd = ["claude", "-p",
            "--settings", '{"disableAllHooks":true}',
@@ -72,17 +80,22 @@ def main():
            "--tools", "Read,Write,Edit,Bash",
            "--disable-slash-commands", "--strict-mcp-config",
            "--no-session-persistence", "--output-format", "json",
-           a.prompt_text]
+           "--", a.prompt_text]
     try:
         r = subprocess.run(cmd, env=_env(dir_path), capture_output=True,
                            text=True, timeout=a.timeout, cwd=os.getcwd(),
-                           stdin=subprocess.DEVNULL)
+                           stdin=subprocess.DEVNULL, start_new_session=True)
     except subprocess.TimeoutExpired:
         print("error:timed out after %ds" % a.timeout)
         sys.exit(1)
     text, err = _parse_result(r.stdout)
-    if err:
-        print("error:" + err)
+    if r.returncode != 0 or err:
+        detail = "exit=%d" % r.returncode
+        if r.stderr.strip():
+            detail += " stderr:" + r.stderr.strip()[:500]
+        if err:
+            detail = err + " (" + detail + ")"
+        print("error:" + detail)
         sys.exit(1)
     print("result:" + text)
 

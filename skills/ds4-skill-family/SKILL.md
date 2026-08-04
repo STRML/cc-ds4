@@ -17,10 +17,12 @@ permission mode per role. The child returns `result:<text>` / `error:<text>`.
 
 ## How to dispatch
 
-Run the CLI via a Bash call:
+Run the CLI via a Bash call. After `install.sh` the skill lands at
+`~/.claude/skills/ds4-skill-family`; from any cwd use that absolute path.
+If running from inside the cc-ds4 checkout the repo-relative path works:
 
 ```bash
-skills/ds4-skill-family/bin/ds4-run \
+~/.claude/skills/ds4-skill-family/bin/ds4-run \
   --profile {direct|openrouter|nous} \
   --tier {max|xhigh|high|low} \
   --role {plan|implement|verify|review} \
@@ -43,6 +45,8 @@ Choose tier/role from `references/roles.md` and profile from `references/profile
 2. **Choose tier** — `max`/`xhigh` for planning and load-bearing review; `high`
    for implementation; `low` for mechanical sweeps and quick verify. Never route
    money/security/irreversible work lower than `high` with a Fable/Opus verify.
+   On `direct` the tier is ignored (the endpoint takes no `reasoning_effort` and
+   exposes only `deepseek-v4-flash`/`-pro`) — use or-ds4/nous for effort control.
 3. **Run** via Bash. Wait for completion; the CLI blocks until the child exits.
 4. **Ground the result** — spot-check load-bearing claims against the code
    (`references/roles.md` verify floor: never verify with the same tier that

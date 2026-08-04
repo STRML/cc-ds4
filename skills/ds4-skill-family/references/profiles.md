@@ -10,6 +10,11 @@ Effort: `ds4-max`→max, `ds4-xhigh`→xhigh, `ds4-high`→high, `ds4-low`→low
 (proxy.py `EFFORT`). The proxy must be up on the profile's port. The launcher
 `bin/ds4-effort` writes the profile's `effort-override` file.
 
+The `direct` profile takes no sentinel tier and no effort override: the endpoint
+exposes only `deepseek-v4-flash[1m]`/`deepseek-v4-pro[1m]` and ignores
+`reasoning_effort`. A `--tier max` on direct silently runs flash with thinking on.
+Use or-ds4/nous when the task needs effort control or a verify floor.
+
 Latency: `openrouter` (ZDR) is markedly slower than `nous`/`direct` per request —
 a review run on or-ds4 exceeded 180s and needed a 300s timeout, while the same
 run on nous finished well under that. Budget the `--timeout` accordingly for

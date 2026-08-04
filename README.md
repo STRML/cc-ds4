@@ -349,8 +349,6 @@ src/
   commands/
     ds4-effort.md       /ds4-effort slash command; the write side of the
                         per-profile effort override
-  skills/
-    ds4-skill-family/   headless ds4 subagents for plan/verify/review/implement
   vision.py             image blocks -> text via a local `claude -p --model haiku`
                         child, content-hash cached, fail-open
   ds4-proxy-kickstart.sh   SessionStart hook that starts the proxy (see below)
@@ -359,6 +357,8 @@ src/
     direct.py           DeepSeek rates, balance-integrated spend
     openrouter.py       rates and spend from the proxy
     nous.py             rates from the proxy; no credits/balance segments
+skills/
+    ds4-skill-family/   headless ds4 subagents for plan/verify/review/implement
 config/             cship configs with the Anthropic-only segments removed
 tests/              tests over the money maths and transcript parsing
 install.sh          point an existing profile at the corrected status line

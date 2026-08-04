@@ -108,7 +108,6 @@ echo "bar:      $BAR_DST -> $SCRIPT"
 echo "config:   $DIR/cship.toml  (from $(basename "$CONFIG"))"
 echo "memory:   $MEMLINK_DST -> $MEMLINK_SRC  (shares memory with ~/.claude)"
 echo "command:  $CMD_DST -> $CMD_SRC  (/ds4-effort sets effort mid-session)"
-echo "skill:    $SKILL_DST -> $SKILL_SRC  (ds4 subagent family)"
 if [ "$WANT_PROXY" = 1 ]; then
   echo "proxy:    $REPO/src/proxy.py  (this profile on :$PORT)"
   echo "hook:     $HOOK_DST -> $HOOK_SRC  (SessionStart kickstart)"
@@ -143,11 +142,12 @@ link "$CMD_SRC" "$CMD_DST"
 # The ds4 subagent skill family. The profile's skills/ dir is usually a symlink
 # to ~/.claude/skills; install into it directly so a normal `claude` (and every
 # profile) can invoke the skill. Best-effort — a skills dir that is a real dir
-# still works.
-if [ -e "$SKILL_SRC" ] && [ ! -e "$SKILL_DST" ]; then
-  ln -s "$SKILL_SRC" "$SKILL_DST" 2>/dev/null \
-    && echo "skill:    $SKILL_DST -> $SKILL_SRC" \
-    || echo "skill:    (skills dir unavailable; symlink manually: ln -s $SKILL_SRC $(dirname "$SKILL_DST"))" >&2
+# still works. `ln -sfn` repairs a dangling symlink (left by a deleted checkout)
+# that plain `ln -s` would leave dead.
+if [ -e "$SKILL_SRC" ]; then
+  ln -sfn "$SKILL_SRC" "$SKILL_DST" 2>/dev/null \
+    && echo "skill:    $SKILL_DST -> $SKILL_SRC  (ds4 subagent family)" \
+    || echo "skill:    (skills dir unavailable; symlink manually: ln -sfn $SKILL_SRC $(dirname "$SKILL_DST"))" >&2
 fi
 
 # Memory is shared with the real ~/.claude: project memory under this profile dir

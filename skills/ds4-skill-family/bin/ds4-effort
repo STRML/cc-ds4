@@ -1,8 +1,13 @@
 #!/bin/bash
 # Read or write a profile's effort override (proxy reads it per request).
-# Usage: ds4-effort [--profile {direct|openrouter|nous}] [max|xhigh|high|medium|low|minimal|none]
+# Usage: ds4-effort [--profile {openrouter|nous}] [max|xhigh|high|medium|low|minimal|none]
+#        DS4_PROFILE=nous ds4-effort [level]
 set -euo pipefail
 PROFILE="${DS4_PROFILE:-nous}"
+if [ "${1:-}" = "--profile" ]; then
+  PROFILE="${2:-${PROFILE}}"
+  shift 2
+fi
 case "$PROFILE" in
   direct) echo "error:effort is unproven on the direct profile"; exit 1 ;;
   openrouter|nous) ;;
