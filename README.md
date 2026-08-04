@@ -33,6 +33,24 @@ The fix is per-profile config directories. Each profile is its own
 key, and model names. `CLAUDE_CONFIG_DIR` selects one at launch. Your normal `claude`
 keeps hitting Anthropic. Nothing global is touched.
 
+## Safe local proxy contract
+
+The proxy is a local security boundary, not an unauthenticated convenience port. Installed profile listeners authenticate every POST with that profile's `ANTHROPIC_AUTH_TOKEN`; comparison is constant-time and a missing or wrong credential is rejected before any upstream request. The proxy never substitutes another profile's key unless its own authenticated request has already entered the explicit failover path.
+
+For each request that must not leave a zero-data-retention route, send the proxy-local `ds4_require_zdr: true` field (or the equivalent `X-DS4-Require-ZDR: 1` header). The proxy rejects it with HTTP 409 unless the selected profile supports ZDR and `DS4_ZDR` is enabled; the marker is removed before forwarding. This is fail-closed: a direct or Nous request cannot claim ZDR merely by setting the flag.
+
+On macOS, `install.sh` enables `DS4_REQUIRE_OWNED_SOCKET=1` in the launch agent. launchd binds each loopback port and passes the already-listening descriptor to the proxy (`launch_activate_socket`); the proxy refuses to self-bind when no OS-owned descriptor is present. This closes the preflight/connect TOCTOU race. Run the proxy manually only for development, with the default compatibility mode; do not use that mode for private work. Other platforms must provide an equivalent OS-owned socket-activation mechanism before enabling the flag; with the flag enabled, no socket means no service.
+
+The supported call pattern is one isolated environment per route. Do not merely export `ANTHROPIC_BASE_URL` from a normal Anthropic shell: that can send the normal Anthropic credential to a third-party route. Instead clear inherited credentials and select the matching profile:
+
+```sh
+env -u ANTHROPIC_BASE_URL -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+    CLAUDE_CONFIG_DIR="$HOME/.claude-or-ds4" \
+    claude --print 'prompt'
+```
+
+Claude then loads the route's own `settings.json`, including its local proxy URL and client credential. Prefer the profile launcher installed by the setup prompt, which constructs this environment without inheriting any `ANTHROPIC_*` values. Repeat the pattern with `.claude-ds4`/`:31500` or `.claude-nous`/`:31502` as appropriate.
+
 ## Quick start
 
 Paste a setup prompt into a Claude Code session and it does the work, asking before

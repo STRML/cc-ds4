@@ -225,6 +225,12 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   fi
   export DS4_AGENT_HOME DS4_AGENT_USER DS4_AGENT_LOGNAME DS4_AGENT_PATH
 
+  # The launchd-owned listener is the local ownership boundary. A manual
+  # self-bound loopback listener is intentionally rejected by the proxy in the
+  # installed agent, preventing a different local account from winning a
+  # restart race and presenting a fake proxy.
+  export DS4_REQUIRE_OWNED_SOCKET=1
+
   # The permission classifier gates every tool call in auto mode. By default it
   # routes to the operator's Anthropic subscription (a trusted boundary) rather
   # than DeepSeek — which needs a subscription token. Ask once at install time,
