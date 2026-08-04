@@ -100,6 +100,8 @@ MEMLINK_SRC="$REPO/src/ds4-link-memory.sh"
 MEMLINK_DST="$DIR/ds4-link-memory.sh"
 CMD_SRC="$REPO/src/commands/ds4-effort.md"
 CMD_DST="$DIR/commands/ds4-effort.md"
+SKILL_SRC="$REPO/skills/ds4-skill-family"
+SKILL_DST="$DIR/skills/ds4-skill-family"
 
 echo "profile:  $DIR"
 echo "bar:      $BAR_DST -> $SCRIPT"
@@ -136,6 +138,17 @@ link "$MEMLINK_SRC" "$MEMLINK_DST"
 # refuses on the direct profile, so installing it everywhere is safe.
 mkdir -p "$DIR/commands"
 link "$CMD_SRC" "$CMD_DST"
+
+# The ds4 subagent skill family. The profile's skills/ dir is usually a symlink
+# to ~/.claude/skills; install into it directly so a normal `claude` (and every
+# profile) can invoke the skill. Best-effort — a skills dir that is a real dir
+# still works. `ln -sfn` repairs a dangling symlink (left by a deleted checkout)
+# that plain `ln -s` would leave dead.
+if [ -e "$SKILL_SRC" ]; then
+  ln -sfn "$SKILL_SRC" "$SKILL_DST" 2>/dev/null \
+    && echo "skill:    $SKILL_DST -> $SKILL_SRC  (ds4 subagent family)" \
+    || echo "skill:    (skills dir unavailable; symlink manually: ln -sfn $SKILL_SRC $(dirname "$SKILL_DST"))" >&2
+fi
 
 # Memory is shared with the real ~/.claude: project memory under this profile dir
 # is symlinked to the canonical copy so notes are visible on every profile. Run

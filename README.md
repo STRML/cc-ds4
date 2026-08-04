@@ -375,6 +375,8 @@ src/
     direct.py           DeepSeek rates, balance-integrated spend
     openrouter.py       rates and spend from the proxy
     nous.py             rates from the proxy; no credits/balance segments
+skills/
+    ds4-skill-family/   headless ds4 subagents for plan/verify/review/implement
 config/             cship configs with the Anthropic-only segments removed
 tests/              tests over the money maths and transcript parsing
 install.sh          point an existing profile at the corrected status line

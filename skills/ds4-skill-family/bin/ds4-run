@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Run a headless `claude -p` child on a cc-ds4 profile.
+
+The coordinator instructs a Bash call (not a subagent). The child's
+--output-format json transcript is parsed for `type=="result"` and its
+`result` text. The transcript's `total_cost_usd` is Anthropic-table-priced
+garbage on a ds4 profile, so it is never surfaced.
+"""
+import argparse, json, os, signal, subprocess, sys
+
+PROFILES = {
+    "direct":   {"dir": "~/.claude-ds4",   "port": 31500, "sentinel": False},
+    "openrouter": {"dir": "~/.claude-or-ds4", "port": 31501, "sentinel": True},
+    "nous":     {"dir": "~/.claude-nous",  "port": 31502, "sentinel": True},
+}
+# ds4-* sentinel -> reasoning_effort (proxy.py EFFORT). --tier maps to these.
+TIERS = {"max": "ds4-max", "xhigh": "ds4-xhigh", "high": "ds4-high", "low": "ds4-low"}
+ROLE_PERMISSION = {"plan": "plan", "review": "plan", "verify": "plan", "implement": "acceptEdits"}
+
+SCRUB_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "DS4_")
+SCRUB_EXACT = ("CLAUDE_CONFIG_DIR", "CLAUDECODE")
+
+
+def _env(profile_dir):
+    e = {k: v for k, v in os.environ.items()
+         if not (any(k.startswith(p) for p in SCRUB_PREFIXES) or k in SCRUB_EXACT
+                 or k.startswith("CMUX") or k in ("NODE_OPTIONS", "AI_AGENT")
+                 or k.lower() in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"))}
+    e["CLAUDE_CONFIG_DIR"] = profile_dir
+    e["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
+    return e
+
+
+def _parse_result(stdout):
+    dec = json.JSONDecoder(); start = 0
+    while True:
+        i = stdout.find("{", start)
+        if i < 0:
+            return None, "no JSON result block"
+        try:
+            obj, end = dec.raw_decode(stdout, i)
+        except json.JSONDecodeError:
+            start = i + 1
+            continue
+        if isinstance(obj, dict) and obj.get("type") == "result":
+            if obj.get("is_error"):
+                return None, obj.get("result") or "subagent returned is_error"
+            text = obj.get("result")
+            if isinstance(text, str):
+                return text, None
+        start = end
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--profile", required=True, choices=list(PROFILES))
+    ap.add_argument("--tier", required=True, choices=list(TIERS))
+    ap.add_argument("--role", default="plan", choices=list(ROLE_PERMISSION))
+    ap.add_argument("--model", default=None, help="literal model id (bypasses sentinel)")
+    ap.add_argument("--timeout", type=int, default=300)
+    ap.add_argument("--prompt-text", required=True)
+    a = ap.parse_args()
+    cfg = PROFILES[a.profile]
+    if cfg["sentinel"]:
+        model = a.model or TIERS[a.tier]
+    else:
+        model = a.model or "deepseek-v4-flash[1m]"
+        # Warn: the direct profile's deepseek endpoint ignores reasoning_effort.
+        # A max/xhigh tier silently collapses to deepseek-v4-pro (the only two
+        # models it exposes), with no effort control — a coordinator expecting
+        # max-level reasoning gets flash with thinking on.
+        if a.tier in ("max", "xhigh"):
+            print("note:direct profile ignores --tier; reasoning effort is unproven",
+                  "on the direct endpoint (see README)", file=sys.stderr)
+    dir_path = os.path.expanduser(cfg["dir"])
+    cmd = ["claude", "-p",
+           "--settings", '{"disableAllHooks":true}',
+           "--permission-mode", ROLE_PERMISSION[a.role],
+           "--model", model,
+           "--tools", "Read,Write,Edit,Bash",
+           "--disable-slash-commands", "--strict-mcp-config",
+           "--no-session-persistence", "--output-format", "json",
+           "--", a.prompt_text]
+    try:
+        r = subprocess.run(cmd, env=_env(dir_path), capture_output=True,
+                           text=True, timeout=a.timeout, cwd=os.getcwd(),
+                           stdin=subprocess.DEVNULL, start_new_session=True)
+    except subprocess.TimeoutExpired:
+        print("error:timed out after %ds" % a.timeout)
+        sys.exit(1)
+    text, err = _parse_result(r.stdout)
+    if r.returncode != 0 or err:
+        detail = "exit=%d" % r.returncode
+        if r.stderr.strip():
+            detail += " stderr:" + r.stderr.strip()[:500]
+        if err:
+            detail = err + " (" + detail + ")"
+        print("error:" + detail)
+        sys.exit(1)
+    print("result:" + text)
+
+
+if __name__ == "__main__":
+    main()
