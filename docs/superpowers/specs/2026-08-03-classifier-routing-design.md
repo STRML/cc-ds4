@@ -40,24 +40,27 @@ claude (auto mode) → proxy → sees classifier signature
 
 ### Detecting the classifier
 
-The classifier arrives with a consistent, distinct signature (measured 216× in
+The classifier arrives with a consistent, distinct signature (measured 361× in
 the live proxy log, `~/.claude-ds4-proxy.log`):
 
 | field | classifier value | main loop |
 |---|---|---|
 | `model` | `ds4-high` | `ds4-xhigh` |
 | `max_tokens` | `2112` (fixed) | `32000` |
-| `thinking` | `{"type": "disabled"}` | adaptive |
+| `thinking` | adaptive (Claude Code sends it on every request) | adaptive |
+
+The classifier is **`ds4-high` + a small `max_tokens`**. The `thinking` value is
+**not** part of the signature — the classifier arrives with adaptive thinking,
+and the proxy's own rewrite disables it at small `max_tokens` (that is what the
+log note "max_tokens=2112 -> thinking disabled" shows). The classifier relay
+runs *before* that rewrite, so requiring thinking-off would never match.
 
 The `ds4-high` tier alone is ambiguous — subagents also run at `ds4-high`
-(`CLAUDE_CODE_SUBAGENT_MODEL`). The classifier is the **combination**:
-`ds4-high` **and** `max_tokens` below `NOTHINK_BELOW` **and** thinking already
-disabled. Subagent requests at `ds4-high` carry a large `max_tokens` and
-thinking on, so they fall through to the existing ds4 path untouched.
-
-Rather than hardcode `2112`, the detector is: `ds4-high` + `max_tokens ≤
-NOTHINK_BELOW` + thinking disabled. That captures the classifier while
-remaining robust to Claude Code changing the exact budget.
+(`CLAUDE_CODE_SUBAGENT_MODEL`). The size threshold separates them: every
+`ds4-high` request in the log is `max_tokens=2112` (the classifier); subagents
+carry a much larger budget. So the detector is `ds4-high` **and** `max_tokens ≤
+NOTHINK_BELOW`. Rather than hardcode `2112`, the threshold is `NOTHINK_BELOW`,
+keeping it robust to Claude Code changing the exact budget.
 
 ### Forwarding to Anthropic
 

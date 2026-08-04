@@ -27,31 +27,39 @@ def classifier_token():
 def is_classifier(payload, nothink_below):
     """True when the request is the auto-mode permission classifier.
 
-    The classifier is ds4-high + a small max_tokens + thinking already off.
-    Subagents also run at ds4-high but carry a large max_tokens with thinking
-    on, so they fall through. The threshold is passed in (proxy's
-    NOTHINK_BELOW) so the detector stays config-independent.
+    The classifier is ds4-high + a small max_tokens. It arrives with adaptive
+    thinking (the proxy's own rewrite disables thinking at small max_tokens,
+    so requiring thinking-off here would never match — the relay runs before
+    that rewrite). Subagents also run at ds4-high but at a much larger
+    max_tokens, so the size threshold separates them. The threshold is passed
+    in (proxy's NOTHINK_BELOW) so the detector stays config-independent.
     """
     if not isinstance(payload, dict):
         return False
     mt = payload.get("max_tokens")
     return (payload.get("model") == "ds4-high"
             and isinstance(mt, int)
-            and mt <= nothink_below
-            and payload.get("thinking") == {"type": "disabled"})
+            and mt <= nothink_below)
+
+
+# The request keys that belong on an Anthropic Messages call. Everything else
+# in the ds4 payload — provider (zdr block), metadata, reasoning_effort — is
+# ds4-specific and must not leave the proxy. Whitelisting keeps a misdetected
+# request from carrying ds4 body shape to Anthropic.
+_ANTHROPIC_KEYS = ("model", "max_tokens", "thinking", "messages", "tools",
+                   "tool_choice", "system", "stream", "temperature")
 
 
 def classifier_body(payload, model):
-    """A copy of the classifier request pointed at Anthropic.
+    """The classifier request pointed at Anthropic.
 
-    The model becomes a real Anthropic id (haiku by default). The
-    reasoning_effort the ds4 rewrite added is dropped — Anthropic does not
-    accept it on the subscription. Everything else (messages, tools,
-    max_tokens, thinking) is untouched: the body is already Anthropic-shaped.
+    Builds a body from only the Anthropic-relevant keys, with model set to a
+    real Anthropic id (haiku by default). The ds4-specific fields (provider,
+    reasoning_effort, metadata) are dropped — Anthropic does not accept them on
+    the subscription, and they must not carry ds4 body shape across.
     """
-    body = dict(payload)
+    body = {k: v for k, v in payload.items() if k in _ANTHROPIC_KEYS}
     body["model"] = model
-    body.pop("reasoning_effort", None)
     return body
 
 

@@ -96,7 +96,9 @@ def classifier_token():
 - Test: `tests/test_classifier.py`
 
 **Interface:**
-- `is_classifier(payload) -> bool` — True when the request is the permission classifier: `model == "ds4-high"` **and** `max_tokens` is an int `≤ NOTHINK_BELOW` (proxy passes the threshold in) **and** `thinking == {"type": "disabled"}`.
+- `is_classifier(payload, nothink_below) -> bool` — True when the request is the permission classifier: `model == "ds4-high"` **and** `max_tokens` is an int `≤ NOTHINK_BELOW` (proxy passes the threshold in).
+
+The `thinking` value is deliberately **not** part of the signature. The classifier arrives with adaptive thinking (Claude Code sends it on every request); the proxy's rewrite disables it at small max_tokens, and the classifier relay runs *before* that rewrite. Requiring thinking-off would never match.
 
 The detector lives in `classifier.py`, taking the threshold as an argument so it stays independent of proxy config.
 
@@ -105,13 +107,17 @@ The detector lives in `classifier.py`, taking the threshold as an argument so it
 ```python
 class DetectTest(unittest.TestCase):
     def payload(self, **kw):
+        # The classifier arrives with adaptive thinking.
         p = {"model": "ds4-high", "max_tokens": 2112,
-             "thinking": {"type": "disabled"},
+             "thinking": {"type": "adaptive", "display": "omitted"},
              "messages": [{"role": "user", "content": "hi"}]}
         p.update(kw)
         return p
 
     def test_classifier_signature_is_detected(self):
+        self.assertTrue(c.is_classifier(self.payload(), 8192))
+
+    def test_classifier_with_adaptive_thinking_is_detected(self):
         self.assertTrue(c.is_classifier(self.payload(), 8192))
 
     def test_main_loop_is_not_classifier(self):
@@ -120,16 +126,12 @@ class DetectTest(unittest.TestCase):
                          thinking={"type": "adaptive", "display": "omitted"}), 8192))
 
     def test_subagent_is_not_classifier(self):
-        # ds4-high but large max_tokens and thinking on
+        # ds4-high but large max_tokens — the subagent tier
         self.assertFalse(c.is_classifier(
-            self.payload(max_tokens=32000, thinking={"type": "adaptive"}), 8192))
-
-    def test_thinking_on_is_not_classifier(self):
-        self.assertFalse(c.is_classifier(
-            self.payload(thinking={"type": "adaptive"}), 8192))
+            self.payload(max_tokens=32000), 8192))
 
     def test_max_tokens_above_threshold_is_not_classifier(self):
-        self.assertFalse(c.is_classifier(self.payload(max_tokens=8192), 8192))
+        self.assertFalse(c.is_classifier(self.payload(max_tokens=8193), 8192))
 
     def test_non_integer_max_tokens_is_not_classifier(self):
         self.assertFalse(c.is_classifier(self.payload(max_tokens="big"), 8192))
@@ -141,18 +143,19 @@ class DetectTest(unittest.TestCase):
 def is_classifier(payload, nothink_below):
     """True when the request is the auto-mode permission classifier.
 
-    The classifier is ds4-high + a small max_tokens + thinking already off.
-    Subagents also run at ds4-high but carry a large max_tokens with thinking
-    on, so they fall through. The threshold is passed in (proxy's
-    NOTHINK_BELOW) so the detector stays config-independent.
+    The classifier is ds4-high + a small max_tokens. It arrives with adaptive
+    thinking (the proxy's own rewrite disables thinking at small max_tokens,
+    so requiring thinking-off here would never match — the relay runs before
+    that rewrite). Subagents also run at ds4-high but at a much larger
+    max_tokens, so the size threshold separates them. The threshold is passed
+    in (proxy's NOTHINK_BELOW) so the detector stays config-independent.
     """
     if not isinstance(payload, dict):
         return False
     mt = payload.get("max_tokens")
     return (payload.get("model") == "ds4-high"
             and isinstance(mt, int)
-            and mt <= nothink_below
-            and payload.get("thinking") == {"type": "disabled"})
+            and mt <= nothink_below)
 ```
 
 ---

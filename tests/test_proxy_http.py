@@ -240,8 +240,10 @@ class ClassifierRelayTest(unittest.TestCase):
                     upstream=fake.url)
 
     def _classifier_payload(self, **kw):
+        # The classifier arrives with adaptive thinking (the proxy's rewrite
+        # disables it at small max_tokens, after the classifier relay runs).
         p = {"model": "ds4-high", "max_tokens": 2112,
-             "thinking": {"type": "disabled"},
+             "thinking": {"type": "adaptive", "display": "omitted"},
              "messages": [{"role": "user", "content": "hi"}]}
         p.update(kw)
         return p
@@ -311,9 +313,7 @@ class ClassifierRelayTest(unittest.TestCase):
         with mock.patch.object(proxy, "CLASSIFIER_ROUTE", "anthropic"), \
              mock.patch.object(proxy._classifier, "classifier_token",
                                return_value="tok"):
-            post(srv, "/v1/messages",
-                 self._classifier_payload(max_tokens=32000,
-                                          thinking={"type": "adaptive"}))
+            post(srv, "/v1/messages", self._classifier_payload(max_tokens=32000))
         sent = json.loads(fake.requests[0]["body"])
         # subagent stays on ds4 — never reached the anthropic upstream
         self.assertEqual(sent["model"], proxy.PROFILES["nous"]["model"])

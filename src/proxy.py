@@ -625,27 +625,22 @@ def make_handler(name, cfg):
             the classifier's shape is Anthropic's own, so a 400 means Claude
             Code sent something unexpected and failing open would mask it.
             """
+            raw = json.dumps(body).encode()
             req = urllib.request.Request(
-                _classifier.CLASSIFIER_UPSTREAM, data=json.dumps(body).encode(),
-                method="POST")
+                _classifier.CLASSIFIER_UPSTREAM, data=raw, method="POST")
             req.add_header("authorization", "Bearer " + token)
             req.add_header("anthropic-version", _classifier.ANTHROPIC_VERSION)
             req.add_header("content-type", "application/json")
-            req.add_header("content-length", str(len(json.dumps(body))))
+            req.add_header("content-length", str(len(raw)))
             req.add_header("user-agent", UA)
             try:
                 up = urllib.request.urlopen(req)
             except urllib.error.HTTPError as e:
-                # A 400 is Anthropic rejecting the request shape — stream it so
-                # Claude Code sees the real error. Anything else fails open.
+                # A 400 is Anthropic rejecting the request shape — relay it so
+                # Claude Code sees the real error (headers + body, like the
+                # ds4 error-relay). Anything else fails open to ds4.
                 if e.code == 400:
-                    self.send_response(e.code)
-                    self.send_header("connection", "close")
-                    self.end_headers()
-                    try:
-                        self.wfile.write(e.read())
-                    finally:
-                        e.close()
+                    self._stream(e)
                     return True
                 if VERBOSE:
                     print(f"  [{name}] classifier <- {e.code}, failing open to ds4", flush=True)
@@ -781,6 +776,16 @@ def main():
 
     print(f"ds4 proxy: no thinking at or below max_tokens={NOTHINK_BELOW}, "
           f"idle exit {IDLE_EXIT}s", flush=True)
+    # The classifier routes to Anthropic by default, but that only works if a
+    # subscription token is present. Failing open to ds4 is the documented
+    # safety valve (the classifier must not brick auto mode), but a silent
+    # fallback on a security gate would hide a misconfiguration — so warn.
+    if (CLASSIFIER_ROUTE == "anthropic"
+            and _classifier.classifier_token() is None):
+        print("  WARNING: classifier routed to Anthropic but "
+              "DS4_CLASSIFIER_TOKEN is unset — the classifier will fail open "
+              "to ds4. Set it (claude setup-token) and re-run install.sh.",
+              file=sys.stderr, flush=True)
     bound = [serve(name, cfg) for name, cfg in served.items()]
     if not any(bound):
         raise SystemExit("no profile bound; nothing to serve")
