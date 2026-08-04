@@ -26,7 +26,7 @@ Why any proxy exists at all:
 Run it with no arguments. It serves every profile in PROFILES whose directory
 exists, and exits once none of them is in use.
 """
-import ctypes, ctypes.util, http.server, json, os, re, socket, subprocess, sys, threading, time, urllib.request, urllib.error
+import ctypes, ctypes.util, collections, http.server, json, os, re, socket, subprocess, sys, threading, time, urllib.request, urllib.error
 
 # Vision: translate image blocks into text descriptions before forwarding. The
 # sibling module sits next to proxy.py (both in src/), so it imports without a
@@ -96,6 +96,127 @@ def should_retry(payload):
     return isinstance(tier, str) and tier != "ds4-xhigh"
 
 
+# ── circuit-breaker failover ────────────────────────────────────────────────
+# A profile whose upstream has sustained bad stretches (nous's Cloudflare 524 /
+# DeepSeek 503, ~10% of requests and clustering under load) can declare a
+# "failover" target in PROFILES. Once transient errors are FAILOVER_RATE of the
+# last FAILOVER_WINDOW requests, the breaker opens and that profile's requests
+# are served by the target's upstream and key until a probe recovers. Knobs are
+# read once at startup like every DS4_* var, so a change needs a proxy restart.
+FAILOVER_ENABLED = os.environ.get("DS4_FAILOVER", "1") == "1"
+FAILOVER_WINDOW = int(os.environ.get("DS4_FAILOVER_WINDOW", "10"))
+FAILOVER_RATE = float(os.environ.get("DS4_FAILOVER_RATE", "0.5"))
+FAILOVER_RECHECK = int(os.environ.get("DS4_FAILOVER_RECHECK", "60"))
+FAILOVER_PROBE_TIMEOUT = int(os.environ.get("DS4_FAILOVER_PROBE_TIMEOUT", "6"))
+
+# The failover target (direct) takes real model names and ignores
+# reasoning_effort, so the ds4-* sentinel rewrite leaves behind must map onto
+# one. Pro for the hard tiers, flash for the cheap ones — the same split the
+# direct profile itself uses for opus/fable vs sonnet/haiku.
+FAILOVER_MODEL = {
+    "ds4-max": "deepseek-v4-pro[1m]",
+    "ds4-xhigh": "deepseek-v4-pro[1m]",
+    "ds4-high": "deepseek-v4-flash[1m]",
+    "ds4-low": "deepseek-v4-flash[1m]",
+}
+
+# name -> {"outcomes": deque(bool, maxlen=window), "open": bool,
+#          "opened_at": float, "probed_at": float}; guarded by _lock.
+_failover = {}
+
+
+def _failover_state(name):
+    """State for one profile. Caller holds _lock."""
+    st = _failover.get(name)
+    if st is None:
+        st = {"outcomes": collections.deque(maxlen=FAILOVER_WINDOW),
+              "open": False, "opened_at": 0.0, "probed_at": 0.0}
+        _failover[name] = st
+    return st
+
+
+def _failover_threshold():
+    """Strikes in the window that trip the breaker (a floor of one)."""
+    return max(1, int(FAILOVER_WINDOW * FAILOVER_RATE))
+
+
+def _failover_probe(name, cfg):
+    """A GET on the models endpoint rides the same Cloudflare path as real
+    requests, so a 524 / 503 here means the outage is still on — without
+    spending a user request on the check."""
+    try:
+        get_json(name, cfg, "/v1/models", timeout=FAILOVER_PROBE_TIMEOUT)
+        return True
+    except Exception:
+        return False
+
+
+def failover_effective(name, cfg):
+    """(eff_cfg, eff_name) this request should hit.
+
+    Closed circuit: the profile's own cfg, one locked read of extra work.
+    Open: the failover target's cfg — unless the recheck interval has lapsed,
+    in which case one probe decides whether the profile has recovered. The
+    probe happens on this request thread but outside the lock, and probed_at is
+    reserved under the lock first, so concurrent requests never double-probe.
+    """
+    target = cfg.get("failover")
+    if not FAILOVER_ENABLED or not target:
+        return cfg, name
+    tcfg = PROFILES.get(target)
+    if tcfg is None or not os.path.isdir(tcfg["dir"]):
+        return cfg, name                  # target not installed; failover is moot
+    with _lock:
+        st = _failover_state(name)
+        if not st["open"]:
+            return cfg, name
+        if time.time() - st["probed_at"] < FAILOVER_RECHECK:
+            return tcfg, f"{name}->{target}"
+        st["probed_at"] = time.time()     # this request holds the probe
+    if _failover_probe(name, cfg):
+        with _lock:
+            st["open"] = False
+            st["opened_at"] = 0.0
+            st["outcomes"].clear()
+        print(f"  [{name}] failover: probe ok, closing circuit", flush=True)
+        return cfg, name
+    print(f"  [{name}] failover: probe failed, staying on {target}", flush=True)
+    return tcfg, f"{name}->{target}"
+
+
+def failover_record(name, cfg, eff_cfg, up, last_err):
+    """Feed one request's outcome into the breaker.
+
+    Only the profile's own upstream outcomes count — a request the target served
+    says nothing about the profile's upstream. A transient status or a
+    connection failure is a strike; anything else is a hit. Tripping resets the
+    probe clock so the fallback gets a quiet FAILOVER_RECHECK before the first
+    re-probe.
+    """
+    if eff_cfg is not cfg or not cfg.get("failover"):
+        return
+    # up is a real response only when the request succeeded — possibly after
+    # in-proxy retries, which leave a stale last_err. So read it first; None
+    # means the loop never got one (exhausted retries, or a connection error).
+    if up is None:
+        if isinstance(last_err, urllib.error.HTTPError):
+            bad = last_err.code in TRANSIENT_STATUS
+        else:
+            bad = True                    # non-HTTP network failure
+    else:
+        bad = up.status in TRANSIENT_STATUS
+    with _lock:
+        st = _failover_state(name)
+        st["outcomes"].append(bad)
+        if not st["open"] and sum(st["outcomes"]) >= _failover_threshold():
+            st["open"] = True
+            st["opened_at"] = time.time()
+            st["probed_at"] = time.time()
+            print(f"  [{name}] failover: {sum(st['outcomes'])} transient errors "
+                  f"in the last {len(st['outcomes'])} requests, "
+                  f"routing to {cfg['failover']}", flush=True)
+
+
 # The full set /ds4-effort accepts. The tier map above only names the four
 # Claude Code tiers; the override file may name any of these.
 EFFORT_LEVELS = ("max", "xhigh", "high", "medium", "low", "minimal", "none")
@@ -125,6 +246,7 @@ PROFILES = {
         # thinking block. Claude Code 2.x does replay it, so this is a guard
         # against a path that drops it, not a fix for an observed failure.
         "inject": True,
+        "failover": None,
     },
     "openrouter": {
         "port": 31501,
@@ -136,6 +258,7 @@ PROFILES = {
         # Smallest max_completion_tokens in the ZDR pool (DeepInfra, Io Net).
         "max_out": 65536,
         "inject": False,
+        "failover": None,
     },
     "nous": {
         "port": 31502,
@@ -147,6 +270,11 @@ PROFILES = {
         "spend": True,
         "max_out": 65536,
         "inject": False,
+        # Nous sits behind Cloudflare and has real bad stretches (524/503).
+        # When its transient errors pass the breaker threshold, its requests
+        # are served by the direct profile until a probe recovers. See the
+        # failover section below.
+        "failover": "direct",
     },
 }
 
@@ -526,6 +654,8 @@ def make_handler(name, cfg):
             except ValueError:
                 payload = None
 
+            eff_cfg = cfg
+            eff_name = name
             if isinstance(payload, dict):
                 # The classifier is the small ds4-high call that gates every
                 # tool call in auto mode. It is already an Anthropic-shaped
@@ -541,7 +671,16 @@ def make_handler(name, cfg):
                         if self._relay_anthropic(body2, token):
                             return
 
-                note = rewrite(payload, cfg)
+                eff_cfg, eff_name = failover_effective(name, cfg)
+
+                note = rewrite(payload, eff_cfg)
+
+                # The failover target (direct) takes real model names and
+                # ignores reasoning_effort, so a ds4-* sentinel the rewrite left
+                # untouched maps onto one of its models.
+                if eff_cfg is not cfg and isinstance(payload.get("model"), str):
+                    payload["model"] = FAILOVER_MODEL.get(payload["model"],
+                                                          payload["model"])
 
                 # vision: replace image blocks with text descriptions before
                 # the body is serialized, so the upstream never receives an
@@ -553,26 +692,37 @@ def make_handler(name, cfg):
                     try:
                         total, fresh = _vision.rewrite_images(payload, cache_dir)
                         if VERBOSE and total:
-                            print(f"  [{name}] vision: {total} image(s), {fresh} fresh", flush=True)
+                            print(f"  [{eff_name}] vision: {total} image(s), {fresh} fresh",
+                                  flush=True)
                     except Exception as e:
                         # Fail open, but never forward an image block: replace
                         # any that remain with the placeholder so the request
                         # is total.
                         _vision.placeholder_remaining(payload)
                         if VERBOSE:
-                            print(f"  [{name}] vision failed open: {e}", flush=True)
+                            print(f"  [{eff_name}] vision failed open: {e}", flush=True)
 
                 body = json.dumps(payload).encode()
                 if VERBOSE and note:
-                    print(f"  [{name}] {note}", flush=True)
+                    print(f"  [{eff_name}] {note}", flush=True)
 
             req = urllib.request.Request(
-                cfg["upstream"].rstrip("/") + self.path, data=body, method="POST")
+                eff_cfg["upstream"].rstrip("/") + self.path, data=body, method="POST")
+            failover_auth = eff_cfg is not cfg
             for k, v in self.headers.items():
-                if k.lower() not in ("host", "content-length", "accept-encoding"):
-                    req.add_header(k, v)
+                low = k.lower()
+                # On a failed-over request the client's Authorization is this
+                # profile's key, which the target rejects — drop it and add the
+                # target's own below.
+                if low in ("host", "content-length", "accept-encoding") \
+                        or (failover_auth and low == "authorization"):
+                    continue
+                req.add_header(k, v)
             req.add_header("user-agent", UA)   # Cloudflare-safe; overrides the client's
             req.add_header("content-length", str(len(body)))
+            if failover_auth:
+                req.add_header("authorization",
+                               "Bearer " + api_key(cfg["failover"], eff_cfg))
 
             # Transient upstream errors (rate limit / overload / cloudflare
             # timeout) kill a claude -p subagent when forwarded raw: the worker
@@ -594,12 +744,15 @@ def make_handler(name, cfg):
                     if e.code not in TRANSIENT_STATUS or attempt + 1 >= RETRY_ATTEMPTS:
                         break
                     if VERBOSE:
-                        print(f"  [{name}] <- {e.code}, retrying {attempt + 1}/{RETRY_ATTEMPTS}",
+                        print(f"  [{eff_name}] <- {e.code}, retrying {attempt + 1}/{RETRY_ATTEMPTS}",
                               flush=True)
                     time.sleep(RETRY_BACKOFF * (attempt + 1))
                 except Exception as e:
                     last_err = e
                     break
+
+            failover_record(name, cfg, eff_cfg, up, last_err)
+
             if up is None:
                 if isinstance(last_err, urllib.error.HTTPError):
                     up = last_err      # exhausted retries; forward the transient error
@@ -609,15 +762,16 @@ def make_handler(name, cfg):
                     self.send_response(502)
                     self.send_header("content-type", "application/json")
                     self.send_header("content-length", str(len(msg)))
+                    self.send_header("x-ds4-upstream", eff_cfg["upstream"])
                     self.send_header("connection", "close")
                     self.end_headers()
                     self.wfile.write(msg)
                     return
 
             if VERBOSE and up.status != 200:
-                print(f"  [{name}] <- {up.status}", flush=True)
+                print(f"  [{eff_name}] <- {up.status}", flush=True)
 
-            self._stream(up)
+            self._stream(up, eff_cfg["upstream"])
 
         def _relay_anthropic(self, body, token):
             """Forward a classifier request to the Anthropic subscription.
@@ -643,7 +797,7 @@ def make_handler(name, cfg):
                 # Claude Code sees the real error (headers + body, like the
                 # ds4 error-relay). Anything else fails open to ds4.
                 if e.code == 400:
-                    self._stream(e)
+                    self._stream(e, _classifier.CLASSIFIER_UPSTREAM)
                     return True
                 if VERBOSE:
                     print(f"  [{name}] classifier <- {e.code}, failing open to ds4", flush=True)
@@ -655,15 +809,21 @@ def make_handler(name, cfg):
                 return False
             if VERBOSE:
                 print(f"  [{name}] classifier -> Anthropic {up.status}", flush=True)
-            self._stream(up)
+            self._stream(up, _classifier.CLASSIFIER_UPSTREAM)
             return True
 
-        def _stream(self, up):
-            """Stream an upstream response back to the client, then close it."""
+        def _stream(self, up, via):
+            """Stream an upstream response back to the client, then close it.
+
+            via is the upstream that served it. The client can't tell from its
+            base URL (the proxy is anonymous to it) — the error template even
+            names 127.0.0.1 — so the real gateway rides out on a header.
+            """
             self.send_response(up.status)
             for k, v in up.headers.items():
                 if k.lower() not in ("transfer-encoding", "content-encoding", "connection"):
                     self.send_header(k, v)
+            self.send_header("x-ds4-upstream", via)
             self.send_header("connection", "close")
             self.end_headers()
             try:

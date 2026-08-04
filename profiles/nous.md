@@ -272,6 +272,36 @@ The override is per profile and survives a proxy restart. The OpenRouter
 prompt (step 6 there) has the full writeup, and the direct profile maps no
 effort at all, so the command refuses there.
 
+### Failover to direct when Nous is flaky
+
+Nous sits behind Cloudflare and has real bad stretches: a ~10% day-average
+transient error rate (524 Cloudflare origin-timeout, 503 DeepSeek overload)
+that clusters under load. When the proxy's circuit breaker trips, this
+profile's requests are served by the **direct** profile instead — `ds4-*`
+tiers map to `deepseek-v4-pro[1m]` (max/xhigh) and `deepseek-v4-flash[1m]`
+(high/low), the client's auth header is swapped for the direct key, and the
+main thread stops eating 524s entirely.
+
+- **Trips** when transient errors (429/502/503/524/529, or a connection
+  failure) make up `DS4_FAILOVER_RATE` (default 0.5) of the last
+  `DS4_FAILOVER_WINDOW` (default 10) requests.
+- **Recovers** by probing `GET /v1/models` every `DS4_FAILOVER_RECHECK`
+  (default 60) seconds while open; one good probe closes the circuit.
+- **Requires the direct profile installed** (`~/.claude-ds4` exists with a
+  key) — otherwise the breaker stays moot and the profile keeps its own
+  upstream. Set `DS4_FAILOVER=0` to disable.
+- Knobs are read once at startup like every `DS4_*` var, so a change needs a
+  proxy restart (re-run `./install.sh --profile nous` with the var exported,
+  or run the proxy by hand).
+
+**Which gateway served a request?** The error template's "inference gateway
+(127.0.0.1:31502)" is Claude Code's own string, composed client-side from
+`ANTHROPIC_BASE_URL` — the proxy cannot change it. The proxy tags every
+response with an `X-DS4-Upstream` header naming the real upstream (e.g.
+`https://inference-api.nousresearch.com` when on nous,
+`https://api.deepseek.com/anthropic` during a failover), and transient error
+bodies already carry it (`"zone":"inference-api.nousresearch.com"`).
+
 `./install.sh --profile nous` is what installs it: it points `settings.json` at
 `http://127.0.0.1:31502`, and on macOS writes and loads a single launch agent,
 `com.strml.cc-ds4.proxy`, that runs it. Confirm it answers:

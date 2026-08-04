@@ -4,8 +4,12 @@ The unit tests in test_proxies.py call rewrite() directly; these drive the
 actual handler that reads the socket, rewrites, forwards, and streams back.
 """
 import json
+import os
+import shutil
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, "tests")
 sys.path.insert(0, "src")
@@ -37,6 +41,20 @@ def post(srv, path, payload, headers=None):
             return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
+
+
+def raw_post(srv, payload):
+    """POST and return (status, headers, body) without collapsing errors."""
+    import urllib.request
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{srv.server_address[1]}/v1/messages",
+        data=json.dumps(payload).encode(), method="POST",
+        headers={"content-type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, r.headers, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read().decode()
 
 
 def get(srv, path, headers=None):
@@ -334,6 +352,69 @@ class ClassifierRelayTest(unittest.TestCase):
             status, body = post(srv, "/v1/messages", self._classifier_payload())
         self.assertEqual(status, 400)
         self.assertIn("bad", body)
+
+
+class FailoverRelayTest(unittest.TestCase):
+    """End to end: 503s trip the nous breaker, then the same port serves from
+    the direct upstream with the direct key and a real model name."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        with open(os.path.join(self.tmp, "settings.json"), "w") as fh:
+            json.dump({"env": {"ANTHROPIC_AUTH_TOKEN": "ds4-direct-key"}}, fh)
+        patched = {"direct": dict(proxy.PROFILES["direct"], dir=self.tmp),
+                   "nous": dict(proxy.PROFILES["nous"])}
+        self._profiles = mock.patch.object(proxy, "PROFILES", patched)
+        self._profiles.start()
+        self.addCleanup(self._profiles.stop)
+        self._w, self._r, self._rc = (proxy.FAILOVER_WINDOW,
+                                      proxy.FAILOVER_RATE, proxy.FAILOVER_RECHECK)
+        proxy.FAILOVER_WINDOW, proxy.FAILOVER_RATE, proxy.FAILOVER_RECHECK = 3, 1.0, 60
+        self.addCleanup(setattr, proxy, "FAILOVER_WINDOW", self._w)
+        self.addCleanup(setattr, proxy, "FAILOVER_RATE", self._r)
+        self.addCleanup(setattr, proxy, "FAILOVER_RECHECK", self._rc)
+        proxy._failover.clear()
+        self.addCleanup(proxy._failover.clear)
+
+    def test_requests_route_to_direct_after_tripping(self):
+        flaky = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (503, {}, b'{"error":"overloaded"}'))})
+        good = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(flaky.close)
+        self.addCleanup(good.close)
+        nous = dict(proxy.PROFILES["nous"], upstream=flaky.url)
+        # the failed-over path reads the direct profile's upstream
+        proxy.PROFILES["direct"]["upstream"] = good.url
+        srv = make_server(nous, flaky)
+        self.addCleanup(srv.server_close)
+        # window=3, rate=1.0 -> every failure is a strike, three open it
+        for _ in range(3):
+            status, _ = post(srv, "/v1/messages", SENTINEL)
+            self.assertEqual(status, 503)
+        self.assertTrue(proxy._failover["test"]["open"])
+        # the next request is served by the direct upstream
+        status, body = post(srv, "/v1/messages", SENTINEL)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"ok": True})
+        sent = json.loads(good.requests[-1]["body"])
+        self.assertEqual(sent["model"], "deepseek-v4-pro[1m]")   # ds4-xhigh -> pro
+        self.assertNotIn("reasoning_effort", sent)
+        self.assertEqual(good.requests[-1]["headers"].get("Authorization"),
+                         "Bearer ds4-direct-key")
+
+    def test_response_names_the_serving_upstream(self):
+        """The client's base URL hides the gateway; the header reveals it."""
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake.close)
+        nous = dict(proxy.PROFILES["nous"], upstream=fake.url)
+        srv = make_server(nous, fake)
+        self.addCleanup(srv.server_close)
+        status, headers, _ = raw_post(srv, SENTINEL)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("X-DS4-Upstream"), fake.url)
 
 
 if __name__ == "__main__":

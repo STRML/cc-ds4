@@ -18,12 +18,16 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
+from unittest import mock
 
 SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 sys.path.insert(0, SRC)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import proxy  # noqa: E402
+import helpers  # noqa: E402
 
 DISABLED = {"type": "disabled"}
 ADAPTIVE = {"type": "adaptive", "display": "omitted"}
@@ -75,9 +79,18 @@ class ProfileTable(unittest.TestCase):
             self.assertGreater(cfg["port"], 1024)
 
     def test_every_profile_declares_every_key(self):
-        keys = {"port", "dir", "upstream", "model", "zdr", "spend", "max_out", "inject"}
+        keys = {"port", "dir", "upstream", "model", "zdr", "spend", "max_out",
+                "inject", "failover"}
         for name, cfg in proxy.PROFILES.items():
             self.assertEqual(set(cfg), keys, name)
+
+    def test_only_nous_declares_a_failover_target(self):
+        """Nous sits behind Cloudflare with real bad stretches; direct is the
+        fallback. The mechanism is config-driven, so another profile can add a
+        target later without touching the breaker."""
+        self.assertEqual(NOUS["failover"], "direct")
+        self.assertIsNone(DIRECT["failover"])
+        self.assertIsNone(OPENROUTER["failover"])
 
     def test_only_the_direct_endpoint_replays_thinking_blocks(self):
         """OpenRouter and Nous were measured accepting a bare tool_use history."""
@@ -698,6 +711,180 @@ class AnthropicModelGuard(unittest.TestCase):
         p = call(model="ds4-something")
         proxy.rewrite(p, NOUS)
         self.assertEqual(p["model"], "ds4-something")
+
+
+class _OkUp:
+    status = 200
+
+
+class FailoverBreaker(unittest.TestCase):
+    """Circuit-breaker failover routes a flaky profile to its declared target.
+
+    The breaker opens once transient errors hit the threshold in a recent
+    window, serves from the target until a probe recovers, and never feeds a
+    target-served outcome back into the window.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patched = {
+            "direct": dict(proxy.PROFILES["direct"], dir=self.tmp.name),
+            "nous": dict(proxy.PROFILES["nous"]),
+        }
+        self._profiles = mock.patch.object(proxy, "PROFILES", patched)
+        self._profiles.start()
+        self.addCleanup(self._profiles.stop)
+        self.nous = dict(proxy.PROFILES["nous"])
+        self._w, self._r, self._rc = (proxy.FAILOVER_WINDOW,
+                                      proxy.FAILOVER_RATE, proxy.FAILOVER_RECHECK)
+        proxy.FAILOVER_WINDOW, proxy.FAILOVER_RATE, proxy.FAILOVER_RECHECK = 4, 0.5, 60
+        self.addCleanup(setattr, proxy, "FAILOVER_WINDOW", self._w)
+        self.addCleanup(setattr, proxy, "FAILOVER_RATE", self._r)
+        self.addCleanup(setattr, proxy, "FAILOVER_RECHECK", self._rc)
+        proxy._failover.clear()
+        self.addCleanup(proxy._failover.clear)
+
+    def state(self):
+        with proxy._lock:
+            return proxy._failover_state("nous")
+
+    # ── choosing where a request goes ────────────────────────────────────────
+
+    def test_circuit_starts_closed(self):
+        eff, name = proxy.failover_effective("nous", self.nous)
+        self.assertIs(eff, self.nous)
+        self.assertEqual(name, "nous")
+
+    def test_open_routes_to_target_within_recheck(self):
+        st = self.state()
+        st["open"] = True
+        st["opened_at"] = time.time()
+        st["probed_at"] = time.time()
+        eff, name = proxy.failover_effective("nous", self.nous)
+        self.assertIs(eff, proxy.PROFILES["direct"])
+        self.assertEqual(name, "nous->direct")
+
+    def test_disabled_never_fails_over(self):
+        st = self.state()
+        st["open"] = True
+        with mock.patch.object(proxy, "FAILOVER_ENABLED", False):
+            eff, _ = proxy.failover_effective("nous", self.nous)
+        self.assertIs(eff, self.nous)
+
+    def test_missing_target_never_fails_over(self):
+        proxy.PROFILES["direct"]["dir"] = "/nonexistent/ds4-direct"
+        st = self.state()
+        st["open"] = True
+        eff, _ = proxy.failover_effective("nous", self.nous)
+        self.assertIs(eff, self.nous)
+
+    # ── the half-open probe ──────────────────────────────────────────────────
+
+    def test_probe_success_closes_the_circuit(self):
+        fake = helpers.FakeUpstream({("GET", "/v1/models"): (lambda b: (200, {}, b'{}'))})
+        self.addCleanup(fake.close)
+        self.nous["upstream"] = fake.url
+        st = self.state()
+        st["open"] = True
+        st["opened_at"] = time.time() - 9999
+        st["probed_at"] = 0.0
+        eff, name = proxy.failover_effective("nous", self.nous)
+        self.assertIs(eff, self.nous)
+        self.assertEqual(name, "nous")
+        self.assertFalse(self.state()["open"])
+
+    def test_probe_failure_stays_on_target(self):
+        fake = helpers.FakeUpstream({("GET", "/v1/models"): (lambda b: (503, {}, b'{}'))})
+        self.addCleanup(fake.close)
+        self.nous["upstream"] = fake.url
+        st = self.state()
+        st["open"] = True
+        st["opened_at"] = time.time() - 9999
+        st["probed_at"] = 0.0
+        eff, name = proxy.failover_effective("nous", self.nous)
+        self.assertIs(eff, proxy.PROFILES["direct"])
+        self.assertEqual(name, "nous->direct")
+        self.assertTrue(self.state()["open"])
+
+    def test_probe_is_throttled_to_the_recheck_interval(self):
+        fake = helpers.FakeUpstream({("GET", "/v1/models"): (lambda b: (503, {}, b'{}'))})
+        self.addCleanup(fake.close)
+        self.nous["upstream"] = fake.url
+        st = self.state()
+        st["open"] = True
+        st["opened_at"] = time.time() - 9999
+        st["probed_at"] = 0.0
+        eff, _ = proxy.failover_effective("nous", self.nous)   # probe fails
+        self.assertIs(eff, proxy.PROFILES["direct"])
+        # a second request inside the recheck window must not probe again
+        eff, _ = proxy.failover_effective("nous", self.nous)
+        self.assertIs(eff, proxy.PROFILES["direct"])
+        self.assertEqual(len(fake.requests), 1)
+
+    # ── feeding the window ──────────────────────────────────────────────────
+
+    def _record(self, bad):
+        if bad:
+            proxy.failover_record("nous", self.nous, self.nous, None, None)
+        else:
+            proxy.failover_record("nous", self.nous, self.nous, _OkUp(), None)
+
+    def test_transient_http_error_is_a_strike(self):
+        # up is None at record time for an exhausted retry; last_err is the error
+        e = urllib.error.HTTPError("http://x", 524, "timeout", {}, None)
+        proxy.failover_record("nous", self.nous, self.nous, None, e)
+        self.assertEqual(list(self.state()["outcomes"]), [True])
+
+    def test_non_transient_error_is_not_a_strike(self):
+        e = urllib.error.HTTPError("http://x", 400, "bad", {}, None)
+        proxy.failover_record("nous", self.nous, self.nous, None, e)
+        self.assertEqual(list(self.state()["outcomes"]), [False])
+
+    def test_retried_request_that_succeeds_is_not_a_strike(self):
+        """In-proxy retries leave a stale last_err; a response means it worked."""
+        e = urllib.error.HTTPError("http://x", 503, "overload", {}, None)
+        proxy.failover_record("nous", self.nous, self.nous, _OkUp(), e)
+        self.assertEqual(list(self.state()["outcomes"]), [False])
+
+    def test_connection_failure_is_a_strike(self):
+        self._record(bad=True)
+        self.assertEqual(list(self.state()["outcomes"]), [True])
+
+    def test_success_is_not_a_strike(self):
+        self._record(bad=False)
+        self.assertEqual(list(self.state()["outcomes"]), [False])
+
+    def test_strikes_trip_the_circuit_at_threshold(self):
+        for _ in range(2):     # window=4, rate=0.5 -> threshold 2
+            self._record(bad=True)
+        st = self.state()
+        self.assertTrue(st["open"])
+        # the probe clock resets on open so the fallback gets a quiet window
+        self.assertGreaterEqual(st["probed_at"], st["opened_at"])
+
+    def test_a_good_run_never_trips(self):
+        for _ in range(20):
+            self._record(bad=False)
+        self.assertFalse(self.state()["open"])
+
+    def test_target_served_requests_are_not_recorded(self):
+        proxy.failover_record("nous", self.nous, proxy.PROFILES["direct"], None, None)
+        self.assertEqual(len(self.state()["outcomes"]), 0)
+
+    def test_profiles_without_a_target_are_ignored(self):
+        direct = dict(proxy.PROFILES["direct"])     # failover is None
+        proxy.failover_record("direct", direct, direct, None, None)
+        self.assertNotIn("direct", proxy._failover)
+
+    # ── the model map ────────────────────────────────────────────────────────
+
+    def test_failover_model_maps_every_sentinel_to_a_real_model(self):
+        for tier in ("ds4-max", "ds4-xhigh", "ds4-high", "ds4-low"):
+            model = proxy.FAILOVER_MODEL[tier]
+            self.assertIn(model, ("deepseek-v4-pro[1m]", "deepseek-v4-flash[1m]"))
+        self.assertEqual(proxy.FAILOVER_MODEL["ds4-xhigh"], "deepseek-v4-pro[1m]")
+        self.assertEqual(proxy.FAILOVER_MODEL["ds4-low"], "deepseek-v4-flash[1m]")
 
 
 if __name__ == "__main__":
