@@ -383,6 +383,94 @@ class RelayTimeoutTest(unittest.TestCase):
         self.assertLess(elapsed, 4, f"relay hung {elapsed:.1f}s instead of timing out")
 
 
+class FailoverStallRelayTest(unittest.TestCase):
+    """The full failure the breaker exists for: the upstream hangs (nous's 524
+    stall), the relay times out, the strikes trip the circuit, and the next
+    requests come from the failover target. Then, when the stall clears, a
+    probe closes the circuit and nous serves again.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        with open(os.path.join(self.tmp, "settings.json"), "w") as fh:
+            json.dump({"env": {"ANTHROPIC_AUTH_TOKEN": "ds4-direct-key"}}, fh)
+        patched = {"direct": dict(proxy.PROFILES["direct"], dir=self.tmp),
+                   "nous": dict(proxy.PROFILES["nous"])}
+        self._profiles = mock.patch.object(proxy, "PROFILES", patched)
+        self._profiles.start()
+        self.addCleanup(self._profiles.stop)
+        self._w, self._r = proxy.FAILOVER_WINDOW, proxy.FAILOVER_RATE
+        self._rc, self._rt = proxy.FAILOVER_RECHECK, proxy.RELAY_TIMEOUT
+        # window=4, rate=0.5 -> two strikes trip; a 1s relay timeout resolves
+        # each hang fast instead of blocking the test for minutes.
+        proxy.FAILOVER_WINDOW, proxy.FAILOVER_RATE = 4, 0.5
+        proxy.FAILOVER_RECHECK, proxy.RELAY_TIMEOUT = 60, 1
+        self.addCleanup(setattr, proxy, "FAILOVER_WINDOW", self._w)
+        self.addCleanup(setattr, proxy, "FAILOVER_RATE", self._r)
+        self.addCleanup(setattr, proxy, "FAILOVER_RECHECK", self._rc)
+        self.addCleanup(setattr, proxy, "RELAY_TIMEOUT", self._rt)
+        proxy._failover.clear()
+        self.addCleanup(proxy._failover.clear)
+
+    def _hanging(self):
+        """An upstream that accepts the request but never answers on time."""
+        import time
+        return helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (time.sleep(5) or (200, {}, b'{}')))})
+
+    def test_hang_times_out_trips_the_breaker_and_routes_to_direct(self):
+        hanging = self._hanging()
+        good = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(hanging.close)
+        self.addCleanup(good.close)
+        nous = dict(proxy.PROFILES["nous"], upstream=hanging.url)
+        proxy.PROFILES["direct"]["upstream"] = good.url
+        srv = make_server(nous, hanging)
+        self.addCleanup(srv.server_close)
+        # two stalls -> two strikes -> circuit opens
+        for _ in range(2):
+            status, body = post(srv, "/v1/messages", SENTINEL)
+            self.assertEqual(status, 502)
+            self.assertIn("proxy upstream failure", body)
+        self.assertTrue(proxy._failover["test"]["open"])
+        # the next request is served by the direct upstream, direct key swapped in
+        status, body = post(srv, "/v1/messages", SENTINEL)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"ok": True})
+        self.assertEqual(good.requests[-1]["headers"].get("Authorization"),
+                         "Bearer ds4-direct-key")
+
+    def test_breaker_recovers_when_the_stalled_upstream_comes_back(self):
+        hanging = self._hanging()
+        hanging.set_route("GET", "/v1/models", lambda b: (200, {}, b'{}'))
+        good = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(hanging.close)
+        self.addCleanup(good.close)
+        nous = dict(proxy.PROFILES["nous"], upstream=hanging.url)
+        proxy.PROFILES["direct"]["upstream"] = good.url
+        srv = make_server(nous, hanging)
+        self.addCleanup(srv.server_close)
+        for _ in range(2):
+            post(srv, "/v1/messages", SENTINEL)
+        self.assertTrue(proxy._failover["test"]["open"])
+        # the stall clears: nous answers promptly again
+        hanging.set_route("POST", "/v1/messages",
+                          lambda b: (200, {}, b'{"ok":"nous"}'))
+        with proxy._lock:
+            proxy._failover_state("test")["probed_at"] = 0.0   # recheck due now
+        # the next request probes nous, the probe succeeds, the circuit closes
+        status, body = post(srv, "/v1/messages", SENTINEL)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"ok": "nous"})
+        self.assertFalse(proxy._failover["test"]["open"])
+        # and nous keeps serving
+        status, body = post(srv, "/v1/messages", SENTINEL)
+        self.assertEqual(json.loads(body), {"ok": "nous"})
+
+
 class FailoverRelayTest(unittest.TestCase):
     """End to end: 503s trip the nous breaker, then the same port serves from
     the direct upstream with the direct key and a real model name."""
