@@ -112,9 +112,15 @@ def should_retry(payload):
 # last FAILOVER_WINDOW requests, the breaker opens and that profile's requests
 # are served by the target's upstream and key until a probe recovers. Knobs are
 # read once at startup like every DS4_* var, so a change needs a proxy restart.
+#
+# Tuning: window=12, rate=0.25 (3 strikes in the last 12 requests) is the sweet
+# spot against nous's observed ~10% sustained drip. The old 6/0.5 needed 3 of
+# the last 6 and almost never tripped on a drip — 1.6% per window at a 10%
+# error rate, one trip in ~24h. 12/0.25 trips ~11% per window on the same
+# drip while a healthy ~3% upstream variance only false-trips ~0.5%.
 FAILOVER_ENABLED = os.environ.get("DS4_FAILOVER", "1") == "1"
-FAILOVER_WINDOW = int(os.environ.get("DS4_FAILOVER_WINDOW", "6"))
-FAILOVER_RATE = float(os.environ.get("DS4_FAILOVER_RATE", "0.5"))
+FAILOVER_WINDOW = int(os.environ.get("DS4_FAILOVER_WINDOW", "12"))
+FAILOVER_RATE = float(os.environ.get("DS4_FAILOVER_RATE", "0.25"))
 FAILOVER_RECHECK = int(os.environ.get("DS4_FAILOVER_RECHECK", "60"))
 FAILOVER_PROBE_TIMEOUT = int(os.environ.get("DS4_FAILOVER_PROBE_TIMEOUT", "6"))
 

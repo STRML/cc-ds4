@@ -877,6 +877,53 @@ class FailoverBreaker(unittest.TestCase):
         proxy.failover_record("direct", direct, direct, None, None)
         self.assertNotIn("direct", proxy._failover)
 
+
+class FailoverDripTuning(unittest.TestCase):
+    """The shipped breaker tuning must catch a sustained drip, not just a burst.
+
+    Nous's upstream sits around a ~10% transient error rate that spikes to
+    25%+ under load. window=12/rate=0.25 (3 strikes in the last 12) trips ~11%
+    per window at a 10% drip — versus the old 6/0.5 which needed 3 of 6 and
+    tripped 1.6% per window, i.e. basically never. These tests pin that a drip
+    trips while a healthy run does not.
+    """
+
+    def setUp(self):
+        self.nous = dict(proxy.PROFILES["nous"])     # declares failover: direct
+        self._w, self._r = proxy.FAILOVER_WINDOW, proxy.FAILOVER_RATE
+        proxy.FAILOVER_WINDOW, proxy.FAILOVER_RATE = 12, 0.25
+        self.addCleanup(setattr, proxy, "FAILOVER_WINDOW", self._w)
+        self.addCleanup(setattr, proxy, "FAILOVER_RATE", self._r)
+        proxy._failover.clear()
+        self.addCleanup(proxy._failover.clear)
+
+    def _state(self):
+        with proxy._lock:
+            return proxy._failover_state("nous")
+
+    def _feed(self, outcomes):
+        for bad in outcomes:
+            if bad:
+                proxy.failover_record("nous", self.nous, self.nous, None, None)
+            else:
+                proxy.failover_record("nous", self.nous, self.nous, _OkUp(), None)
+
+    def test_three_strikes_in_twelve_trip_the_breaker(self):
+        # a 25% drip: 9 good, then 3 failures within the 12-window
+        self._feed([False] * 9 + [True] * 3)
+        self.assertTrue(self._state()["open"])
+
+    def test_healthy_variance_never_trips(self):
+        # ~3% variance: one failure in a full window never trips
+        self._feed([False] * 11 + [True])
+        self.assertFalse(self._state()["open"])
+
+    def test_drip_trips_even_interleaved(self):
+        # 25% failures interleaved across the window still add to 3 strikes
+        seq = [False, False, False, True, False, True, False, False, False, False, True, False]
+        self._feed(seq)
+        self.assertTrue(self._state()["open"])
+
     # ── the model map ────────────────────────────────────────────────────────
 
     def test_failover_model_maps_every_sentinel_to_a_real_model(self):
