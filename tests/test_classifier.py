@@ -47,14 +47,25 @@ class DetectTest(unittest.TestCase):
     """The classifier signature is ds4-high + small max_tokens + thinking off."""
 
     def payload(self, **kw):
+        # The classifier arrives with adaptive thinking (Claude Code sends it
+        # on every request); the proxy's rewrite disables it at small
+        # max_tokens, so the real inbound shape has thinking adaptive.
         p = {"model": "ds4-high", "max_tokens": 2112,
-             "thinking": {"type": "disabled"},
+             "thinking": {"type": "adaptive", "display": "omitted"},
              "messages": [{"role": "user", "content": "hi"}]}
         p.update(kw)
         return p
 
     def test_classifier_signature_is_detected(self):
+        # The classifier arrives with adaptive thinking; the proxy's rewrite
+        # disables it at small max_tokens. So the detector keys on ds4-high +
+        # small max_tokens, NOT on thinking-off.
         self.assertTrue(c.is_classifier(self.payload(), 8192))
+
+    def test_classifier_with_adaptive_thinking_is_detected(self):
+        self.assertTrue(c.is_classifier(
+            self.payload(thinking={"type": "adaptive", "display": "omitted"}),
+            8192))
 
     def test_main_loop_is_not_classifier(self):
         self.assertFalse(c.is_classifier(
@@ -63,13 +74,9 @@ class DetectTest(unittest.TestCase):
             8192))
 
     def test_subagent_is_not_classifier(self):
-        # ds4-high but large max_tokens and thinking on
+        # ds4-high but large max_tokens — the subagent tier
         self.assertFalse(c.is_classifier(
             self.payload(max_tokens=32000, thinking={"type": "adaptive"}), 8192))
-
-    def test_thinking_on_is_not_classifier(self):
-        self.assertFalse(c.is_classifier(
-            self.payload(thinking={"type": "adaptive"}), 8192))
 
     def test_max_tokens_above_threshold_is_not_classifier(self):
         self.assertFalse(c.is_classifier(self.payload(max_tokens=8193), 8192))
@@ -111,6 +118,20 @@ class BodyTest(unittest.TestCase):
         self.assertEqual(out["max_tokens"], 2112)
         self.assertEqual(out["messages"], [])
         self.assertNotIn("reasoning_effort", out)
+
+    def test_classifier_body_drops_ds4_specific_fields(self):
+        # provider (zdr block), metadata, and reasoning_effort are ds4 body
+        # shape and must not cross to Anthropic.
+        p = {"model": "ds4-high", "max_tokens": 2112,
+             "thinking": {"type": "disabled"},
+             "reasoning_effort": "high",
+             "provider": {"zdr": True, "data_collection": "deny"},
+             "metadata": {"project": "/Users/samuelreed/git/oss/cc-ds4"},
+             "messages": [{"role": "user", "content": "hi"}]}
+        out = c.classifier_body(p, "claude-haiku-4-5")
+        for key in ("provider", "metadata", "reasoning_effort"):
+            self.assertNotIn(key, out, f"ds4 field {key} leaked to Anthropic")
+        self.assertEqual(out["messages"], [{"role": "user", "content": "hi"}])
 
     def test_anthropic_endpoint_returns_body_and_token(self):
         with mock.patch.object(c, "classifier_token", return_value="tok"):
