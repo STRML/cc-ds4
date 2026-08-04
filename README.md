@@ -390,6 +390,44 @@ All three profiles share a layout: a directory under `~/.claude-<label>`, everyt
 symlinked to `~/.claude` except `settings.json`, which is a real copy so the overrides
 cannot leak back into your primary install.
 
+## Using the ds4 subagent skills
+
+`install.sh` symlinks the skill family into each profile's skills dir, which
+(like `~/.claude`'s) makes it invocable from a normal Anthropic session too. A
+coordinator on any profile dispatches a headless `claude -p` child onto one of
+the ds4 profiles, keeping the main loop cheap:
+
+| Skill | Role | Read-only | Tier | Notes |
+|---|---|---|---|---|
+| `/ds4-skill-family` | any | per role | all | the base CLI; pick `--profile`/`--tier`/`--role` |
+| `/ds4-plan` | plan | yes | xhigh/max | design, decomposition, architecture |
+| `/ds4-review` | review | yes | xhigh/max | critique a diff/spec/plan |
+| `/ds4-verify` | verify | yes | one above the artifact's | adversarial re-check; never same-tier |
+| `/ds4-implement` | implement | **no** | high | writes files + runs tests |
+
+The skills invoke the shared CLI (`skills/ds4-skill-family/bin/ds4-run`). A
+coordinator shells out via Bash:
+
+```bash
+~/.claude/skills/ds4-skill-family/bin/ds4-run \
+  --profile {nous|openrouter|direct} \
+  --tier {xhigh|max} \
+  --role plan \
+  --prompt-text 'propose an approach to X; do not write files'
+```
+
+- **Profile** — `nous` is cheapest (90% promo, no ZDR), `openrouter` is the safer
+  default (ZDR on), `direct` for scratch (ignores effort, sends to DeepSeek).
+- **Tier** — `max`/`xhigh` for planning and load-bearing review; `high` for
+  implementation; `low` for mechanical sweeps and quick verify.
+- **Read-only roles** (`plan`/`review`/`verify`) run inside the sandbox.
+  **`implement` must escape it** (`dangerouslyDisableSandbox: true` on the Bash
+  call) — the child's `session-env/` writes are EPERM'd otherwise.
+- **Verify floor** — never verify an artifact with the same tier that produced
+  it (ds4 `low` → `high` verify, `high` → `max`, `max` needs a Claude/Fable pass).
+- The child's `total_cost_usd` field is Anthropic-table-priced garbage on a ds4
+  profile — price from the JSON `usage` fields instead.
+
 ## Installing into an existing profile
 
 The setup prompts handle this. `install.sh` is for a profile that already exists and
