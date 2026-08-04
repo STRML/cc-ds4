@@ -178,6 +178,52 @@ class SpendEndpoint(unittest.TestCase):
         self.assertEqual(json.loads(body)["zdr"], cfg["zdr"])
 
 
+class LocalSecurityContract(unittest.TestCase):
+    def setUp(self):
+        self.tmp, self.cfg = helpers.temp_profile()
+        self.addCleanup(self.tmp.cleanup)
+        self.cfg.update(require_client_auth=True, zdr=True)
+        with open(os.path.join(self.cfg["dir"], "settings.json"), "w") as fh:
+            json.dump({"env": {"ANTHROPIC_AUTH_TOKEN": "local-token"}}, fh)
+        self.fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(self.fake.close)
+        self.cfg["upstream"] = self.fake.url
+        self.srv = make_server(self.cfg, self.fake)
+        self.addCleanup(self.srv.server_close)
+
+    def test_wrong_or_missing_local_credential_is_rejected(self):
+        self.assertEqual(post(self.srv, "/v1/messages", SENTINEL)[0], 401)
+        self.assertEqual(post(self.srv, "/v1/messages", SENTINEL,
+                              {"content-type": "application/json",
+                               "authorization": "Bearer wrong"})[0], 401)
+        self.assertEqual(len(self.fake.requests), 0)
+
+    def test_matching_local_credential_is_forwarded(self):
+        status, _ = post(self.srv, "/v1/messages", SENTINEL,
+                          {"content-type": "application/json",
+                           "authorization": "Bearer local-token"})
+        self.assertEqual(status, 200)
+
+    def test_zdr_request_is_rejected_on_non_zdr_route(self):
+        self.cfg["zdr"] = False
+        status, body = post(self.srv, "/v1/messages",
+                            dict(SENTINEL, ds4_require_zdr=True),
+                            {"content-type": "application/json",
+                             "authorization": "Bearer local-token"})
+        self.assertEqual(status, 409)
+        self.assertIn("requires ZDR", body)
+        self.assertEqual(len(self.fake.requests), 0)
+
+    def test_zdr_marker_is_not_forwarded(self):
+        status, _ = post(self.srv, "/v1/messages",
+                         dict(SENTINEL, ds4_require_zdr=True),
+                         {"content-type": "application/json",
+                          "authorization": "Bearer local-token"})
+        self.assertEqual(status, 200)
+        self.assertNotIn("ds4_require_zdr", json.loads(self.fake.requests[0]["body"]))
+
+
 class MalformedInput(unittest.TestCase):
     def test_non_json_body_is_passed_through(self):
         fake = helpers.FakeUpstream(

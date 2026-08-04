@@ -26,7 +26,7 @@ Why any proxy exists at all:
 Run it with no arguments. It serves every profile in PROFILES whose directory
 exists, and exits once none of them is in use.
 """
-import ctypes, ctypes.util, collections, http.server, json, os, re, socket, subprocess, sys, threading, time, urllib.request, urllib.error
+import ctypes, ctypes.util, collections, hmac, http.server, json, os, re, socket, subprocess, sys, threading, time, urllib.request, urllib.error
 
 # Vision: translate image blocks into text descriptions before forwarding. The
 # sibling module sits next to proxy.py (both in src/), so it imports without a
@@ -86,6 +86,18 @@ RETRY_BACKOFF = 1.5          # seconds, scaled by attempt number
 # long count as a failure. A live stream always has data flowing, so this only
 # fires on a real stall. 0 disables and restores the old no-timeout relay.
 RELAY_TIMEOUT = int(os.environ.get("DS4_RELAY_TIMEOUT", "60"))
+
+# Safe deployments set this in the socket-activation environment.  A
+# self-bound loopback socket is not an ownership boundary: another local user
+# can win the bind during a restart.  Keep manual development invocation
+# available with the explicit default-off compatibility mode; install.sh turns
+# it on for launchd.
+REQUIRE_OWNED_SOCKET = os.environ.get("DS4_REQUIRE_OWNED_SOCKET", "0") == "1"
+
+# Internal request contract.  Claude Code can carry this as a JSON field even
+# when it cannot add a custom header.  It is removed before forwarding.
+REQUIRE_ZDR_HEADER = "x-ds4-require-zdr"
+REQUIRE_ZDR_FIELD = "ds4_require_zdr"
 
 
 def _is_anthropic_model(name):
@@ -425,6 +437,30 @@ def api_key(name, cfg):
     return os.environ.get(f"DS4_KEY_{name.upper()}", "")
 
 
+def client_token(name, cfg):
+    """Expected credential for a local client.
+
+    It is deliberately the profile key, not a process-wide token.  Empty keys
+    are a configuration error for production profiles; test/custom handlers
+    without a configured profile key retain the pre-auth compatibility path.
+    """
+    return api_key(name, cfg)
+
+
+def request_requires_zdr(headers, payload):
+    """Return and remove the proxy-local per-request ZDR signal."""
+    header = headers.get(REQUIRE_ZDR_HEADER, "").strip().lower()
+    required = header in ("1", "true", "yes")
+    if isinstance(payload, dict) and payload.pop(REQUIRE_ZDR_FIELD, False) is True:
+        required = True
+    return required
+
+
+def client_auth_required(name, cfg):
+    """Only listeners created by serve() opt into the production boundary."""
+    return cfg.get("require_client_auth", False)
+
+
 def get_json(name, cfg, path, timeout=6):
     req = urllib.request.Request(cfg["upstream"].rstrip("/") + path)
     req.add_header("authorization", "Bearer " + api_key(name, cfg))
@@ -652,6 +688,13 @@ def make_handler(name, cfg):
             self._touch()
             self._count(1)
             try:
+                expected = client_token(name, cfg)
+                supplied = self.headers.get("authorization", "")
+                if (client_auth_required(name, cfg)
+                        and (not expected or not hmac.compare_digest(
+                            supplied, "Bearer " + expected))):
+                    self._json(401, {"error": {"message": "invalid proxy client credential"}})
+                    return
                 self._relay()
             finally:
                 self._count(-1)
@@ -666,6 +709,11 @@ def make_handler(name, cfg):
             eff_cfg = cfg
             eff_name = name
             if isinstance(payload, dict):
+                requires_zdr = request_requires_zdr(self.headers, payload)
+                if requires_zdr:
+                    if not cfg["zdr"] or os.environ.get("DS4_ZDR", "1") == "0":
+                        self._json(409, {"error": {"message": "request requires ZDR, but this route cannot enforce it"}})
+                        return
                 # The classifier is the small ds4-high call that gates every
                 # tool call in auto mode. It is already an Anthropic-shaped
                 # request, so when the profile routes it to the subscription we
@@ -723,7 +771,8 @@ def make_handler(name, cfg):
                 # On a failed-over request the client's Authorization is this
                 # profile's key, which the target rejects — drop it and add the
                 # target's own below.
-                if low in ("host", "content-length", "accept-encoding") \
+                if low in ("host", "content-length", "accept-encoding",
+                           REQUIRE_ZDR_HEADER) \
                         or (failover_auth and low == "authorization"):
                     continue
                 req.add_header(k, v)
@@ -906,6 +955,9 @@ def server_on_fd(fd, handler):
 def serve(name, cfg):
     """Bind one listener. False on bind failure so the rest still get served."""
     port = int(os.environ.get(f"DS4_PORT_{name.upper()}", cfg["port"]))
+    # Mark only the real profile listeners. Tests and embedders can construct a
+    # handler with a custom cfg without having to mint a credential.
+    cfg = dict(cfg, require_client_auth=True)
     handler = make_handler(name, cfg)
     inherited = launchd_sockets(name)
     try:
@@ -919,6 +971,10 @@ def serve(name, cfg):
             port = srvs[0].server_address[1]
             origin = "launchd"
         else:
+            if REQUIRE_OWNED_SOCKET:
+                print(f"  {name:<11} :{port} FAILED: no OS-owned socket (socket activation required)",
+                      file=sys.stderr, flush=True)
+                return False
             srvs = [http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)]
             origin = "self-bound"
     except OSError as e:
