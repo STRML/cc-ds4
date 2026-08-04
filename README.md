@@ -349,6 +349,8 @@ src/
   commands/
     ds4-effort.md       /ds4-effort slash command; the write side of the
                         per-profile effort override
+  skills/
+    ds4-skill-family/   headless ds4 subagents for plan/verify/review/implement
   vision.py             image blocks -> text via a local `claude -p --model haiku`
                         child, content-hash cached, fail-open
   ds4-proxy-kickstart.sh   SessionStart hook that starts the proxy (see below)
