@@ -66,3 +66,41 @@ jobs:
             test "$code" != "000"
           done
           kill $pid
+
+  macos:
+    # macOS is the primary platform (launchd agents, plists, /usr/bin/python3),
+    # but the rest of this file is Linux-only, so every Darwin-only path ships
+    # unverified. Mirror the Linux jobs on a real macOS runner and add a plutil
+    # lint on the generated plist. Free on public repos.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: system python3 (what launchd runs)
+        run: /usr/bin/python3 -m unittest discover -s tests -v
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: python 3.12
+        run: python3 -m unittest discover -s tests -v
+      - name: compile
+        run: python3 -m compileall -q src tools
+      - name: shell checks
+        run: |
+          brew install shellcheck >/dev/null 2>&1
+          bash -n install.sh src/ds4-proxy-kickstart.sh
+          shellcheck --severity=warning install.sh src/ds4-proxy-kickstart.sh
+      - name: install-script tests
+        run: bash tests/test_install.sh
+      - name: generated plist is valid (plutil)
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          mkdir -p "$tmp/.claude-ds4" "$tmp/Library/LaunchAgents"
+          printf '{"env":{}}' > "$tmp/.claude-ds4/settings.json"
+          stub="$(mktemp -d)"
+          printf '#!/bin/sh\nexit 0\n' > "$stub/launchctl"
+          chmod +x "$stub/launchctl"
+          PATH="$stub:$PATH" HOME="$tmp" bash install.sh --profile direct >/dev/null
+          plist="$tmp/Library/LaunchAgents/com.strml.cc-ds4.proxy.plist"
+          test -f "$plist" || { echo "plist not generated"; exit 1; }
+          plutil -lint "$plist"
