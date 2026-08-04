@@ -1,0 +1,26 @@
+#!/bin/bash
+# Read or write a profile's effort override (proxy reads it per request).
+# Usage: ds4-effort [--profile {direct|openrouter|nous}] [max|xhigh|high|medium|low|minimal|none]
+set -euo pipefail
+PROFILE="${DS4_PROFILE:-nous}"
+case "$PROFILE" in
+  direct) echo "error:effort is unproven on the direct profile"; exit 1 ;;
+  openrouter|nous) ;;
+  *) echo "error:unknown profile $PROFILE"; exit 1 ;;
+esac
+DIR="$HOME/.claude-$PROFILE"
+FILE="$DIR/effort-override"
+LEVEL="${1:-}"
+if [ -z "$LEVEL" ]; then
+  if [ -f "$FILE" ]; then printf 'effort: %s\n' "$(cat "$FILE")"
+  else printf 'effort: (default)\n'; fi
+  exit 0
+fi
+case "$LEVEL" in
+  max|xhigh|high|medium|low|minimal|none) ;;
+  *) echo "error:invalid level '$LEVEL'"; exit 1 ;;
+esac
+tmp="$(mktemp "$FILE.XXXXXX")"
+printf '%s\n' "$LEVEL" > "$tmp"
+mv "$tmp" "$FILE"
+printf 'effort: %s\n' "$LEVEL"
