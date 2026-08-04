@@ -354,6 +354,35 @@ class ClassifierRelayTest(unittest.TestCase):
         self.assertIn("bad", body)
 
 
+class RelayTimeoutTest(unittest.TestCase):
+    """A stalled upstream must fail fast, not tie up a relay thread.
+
+    nous's Cloudflare 524 hangs up to its 100s relay window; with no socket
+    timeout the proxy waits it out, and the failover breaker can't count a
+    strike until the request resolves. The socket timeout bounds both.
+    """
+
+    def test_stalled_upstream_fails_fast_with_a_timeout(self):
+        import time
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (time.sleep(5) or (200, {}, b'{}')))})
+        self.addCleanup(fake.close)
+        self.tmp, cfg = helpers.temp_profile()
+        self.addCleanup(self.tmp.cleanup)
+        cfg["upstream"] = fake.url
+        orig = proxy.RELAY_TIMEOUT
+        proxy.RELAY_TIMEOUT = 1
+        self.addCleanup(setattr, proxy, "RELAY_TIMEOUT", orig)
+        srv = make_server(cfg, fake)
+        self.addCleanup(srv.server_close)
+        t0 = time.time()
+        status, body = post(srv, "/v1/messages", SENTINEL)
+        elapsed = time.time() - t0
+        self.assertEqual(status, 502)
+        self.assertIn("proxy upstream failure", body)
+        self.assertLess(elapsed, 4, f"relay hung {elapsed:.1f}s instead of timing out")
+
+
 class FailoverRelayTest(unittest.TestCase):
     """End to end: 503s trip the nous breaker, then the same port serves from
     the direct upstream with the direct key and a real model name."""

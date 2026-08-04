@@ -78,6 +78,15 @@ TRANSIENT_STATUS = {429, 502, 503, 524, 529}
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF = 1.5          # seconds, scaled by attempt number
 
+# Socket timeout for the upstream relay. A stalled origin (nous's Cloudflare
+# 524 hangs up to its 100s relay window) would otherwise tie up a relay thread
+# for minutes with no way to resolve, and the failover breaker only sees a
+# strike once a request resolves — so the hang also delays tripping by minutes
+# per strike. A socket timeout bounds both: reads that produce no data for this
+# long count as a failure. A live stream always has data flowing, so this only
+# fires on a real stall. 0 disables and restores the old no-timeout relay.
+RELAY_TIMEOUT = int(os.environ.get("DS4_RELAY_TIMEOUT", "60"))
+
 
 def _is_anthropic_model(name):
     """True for a literal Anthropic model id that the sentinel system missed."""
@@ -104,7 +113,7 @@ def should_retry(payload):
 # are served by the target's upstream and key until a probe recovers. Knobs are
 # read once at startup like every DS4_* var, so a change needs a proxy restart.
 FAILOVER_ENABLED = os.environ.get("DS4_FAILOVER", "1") == "1"
-FAILOVER_WINDOW = int(os.environ.get("DS4_FAILOVER_WINDOW", "10"))
+FAILOVER_WINDOW = int(os.environ.get("DS4_FAILOVER_WINDOW", "6"))
 FAILOVER_RATE = float(os.environ.get("DS4_FAILOVER_RATE", "0.5"))
 FAILOVER_RECHECK = int(os.environ.get("DS4_FAILOVER_RECHECK", "60"))
 FAILOVER_PROBE_TIMEOUT = int(os.environ.get("DS4_FAILOVER_PROBE_TIMEOUT", "6"))
@@ -733,11 +742,12 @@ def make_handler(name, cfg):
             # the main loop to ds4-xhigh via ANTHROPIC_MODEL). Non-transient
             # statuses pass through unchanged.
             do_retry = should_retry(payload)
+            open_kw = {} if RELAY_TIMEOUT <= 0 else {"timeout": RELAY_TIMEOUT}
             up = None
             last_err = None
             for attempt in range(RETRY_ATTEMPTS if do_retry else 1):
                 try:
-                    up = urllib.request.urlopen(req)
+                    up = urllib.request.urlopen(req, **open_kw)
                     break
                 except urllib.error.HTTPError as e:
                     last_err = e

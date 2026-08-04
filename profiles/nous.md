@@ -282,9 +282,9 @@ tiers map to `deepseek-v4-pro[1m]` (max/xhigh) and `deepseek-v4-flash[1m]`
 (high/low), the client's auth header is swapped for the direct key, and the
 main thread stops eating 524s entirely.
 
-- **Trips** when transient errors (429/502/503/524/529, or a connection
-  failure) make up `DS4_FAILOVER_RATE` (default 0.5) of the last
-  `DS4_FAILOVER_WINDOW` (default 10) requests.
+- **Trips** when transient errors (429/502/503/524/529, a connection failure,
+  or a relay stall) make up `DS4_FAILOVER_RATE` (default 0.5) of the last
+  `DS4_FAILOVER_WINDOW` (default 6) requests.
 - **Recovers** by probing `GET /v1/models` every `DS4_FAILOVER_RECHECK`
   (default 60) seconds while open; one good probe closes the circuit.
 - **Requires the direct profile installed** (`~/.claude-ds4` exists with a
@@ -293,6 +293,11 @@ main thread stops eating 524s entirely.
 - Knobs are read once at startup like every `DS4_*` var, so a change needs a
   proxy restart (re-run `./install.sh --profile nous` with the var exported,
   or run the proxy by hand).
+- **`DS4_RELAY_TIMEOUT`** (default 60, seconds) bounds the upstream socket:
+  a stalled origin (the 524 hang lasts up to Cloudflare's 100s window) would
+  otherwise hold a relay thread for minutes and delay the breaker from
+  counting a strike. A live stream always has data flowing, so the timeout
+  only fires on a real stall. `0` restores the old no-timeout relay.
 
 **Which gateway served a request?** The error template's "inference gateway
 (127.0.0.1:31502)" is Claude Code's own string, composed client-side from
