@@ -674,17 +674,26 @@ class RetryGuard(unittest.TestCase):
 
     def test_subagent_tiers_are_retried(self):
         for tier in ("ds4-high", "ds4-low", "ds4-max"):
-            self.assertTrue(proxy.should_retry(call(model=tier)), tier)
+            self.assertTrue(proxy.should_retry(tier), tier)
 
     def test_main_thread_tier_is_not_retried(self):
         # the main loop sends ds4-xhigh (ANTHROPIC_MODEL)
-        self.assertFalse(proxy.should_retry(call(model="ds4-xhigh")))
+        self.assertFalse(proxy.should_retry("ds4-xhigh"))
 
     def test_unknown_model_is_retried(self):
         # defensive: a tier we do not recognize is a subagent tier
-        self.assertTrue(proxy.should_retry(call(model="ds4-sonnet")))
+        self.assertTrue(proxy.should_retry("ds4-sonnet"))
 
-    def test_absent_payload_is_not_retried(self):
+    def test_failover_remap_does_not_retry_the_main_loop(self):
+        # The failover remap rewrites payload["model"] to the target's literal
+        # id (deepseek-v4-flash[1m]). should_retry is called with the
+        # client-sent tier, so a failed-over main-loop request stays exempt
+        # from in-proxy retry - it must not double up with the main thread's
+        # own 10x-backoff retry.
+        self.assertTrue(proxy.should_retry("ds4-high"))
+        self.assertFalse(proxy.should_retry("ds4-xhigh"))
+
+    def test_absent_tier_is_not_retried(self):
         self.assertFalse(proxy.should_retry(None))
         self.assertFalse(proxy.should_retry({}))
 
@@ -785,7 +794,8 @@ class FailoverBreaker(unittest.TestCase):
     # ── the half-open probe ──────────────────────────────────────────────────
 
     def test_probe_success_closes_the_circuit(self):
-        fake = helpers.FakeUpstream({("GET", "/v1/models"): (lambda b: (200, {}, b'{}'))})
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
         self.addCleanup(fake.close)
         self.nous["upstream"] = fake.url
         st = self.state()
@@ -806,7 +816,8 @@ class FailoverBreaker(unittest.TestCase):
         self.assertFalse(self.state()["open"])
 
     def test_probe_failure_stays_on_target(self):
-        fake = helpers.FakeUpstream({("GET", "/v1/models"): (lambda b: (503, {}, b'{}'))})
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (503, {}, b'{"error":"overloaded"}'))})
         self.addCleanup(fake.close)
         self.nous["upstream"] = fake.url
         st = self.state()
@@ -819,7 +830,8 @@ class FailoverBreaker(unittest.TestCase):
         self.assertTrue(self.state()["open"])
 
     def test_probe_is_throttled_to_the_recheck_interval(self):
-        fake = helpers.FakeUpstream({("GET", "/v1/models"): (lambda b: (503, {}, b'{}'))})
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (503, {}, b'{"error":"overloaded"}'))})
         self.addCleanup(fake.close)
         self.nous["upstream"] = fake.url
         st = self.state()
@@ -832,6 +844,26 @@ class FailoverBreaker(unittest.TestCase):
         eff, _ = proxy.failover_effective("nous", self.nous)
         self.assertIs(eff, proxy.PROFILES["direct"])
         self.assertEqual(len(fake.requests), 1)
+
+    def test_probe_body_uses_the_profile_own_model_id(self):
+        # The probe must send the profile's model id: nous serves
+        # deepseek/deepseek-v4-flash-0731, and a hardcoded direct id would
+        # 404 there and keep the breaker open forever.
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake.close)
+        self.nous["upstream"] = fake.url
+        self.assertTrue(proxy._failover_probe("nous", self.nous))
+        body = json.loads(fake.requests[0]["body"])
+        self.assertEqual(body["model"], "deepseek/deepseek-v4-flash-0731")
+        # a profile with no model (direct) falls back to the direct id
+        fake2 = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake2.close)
+        direct = dict(proxy.PROFILES["direct"], upstream=fake2.url)
+        self.assertTrue(proxy._failover_probe("direct", direct))
+        body2 = json.loads(fake2.requests[0]["body"])
+        self.assertEqual(body2["model"], "deepseek-v4-flash[1m]")
 
     # ── feeding the window ──────────────────────────────────────────────────
 
@@ -937,12 +969,12 @@ class FailoverDripTuning(unittest.TestCase):
 
     # ── the model map ────────────────────────────────────────────────────────
 
-    def test_failover_model_maps_every_sentinel_to_a_real_model(self):
+    def test_failover_model_maps_every_sentinel_to_flash(self):
+        # Every tier maps to flash: the direct profile runs flash for all tiers
+        # and no failover path may bill pro (the cost difference is the point
+        # of the fallback).
         for tier in ("ds4-max", "ds4-xhigh", "ds4-high", "ds4-low"):
-            model = proxy.FAILOVER_MODEL[tier]
-            self.assertIn(model, ("deepseek-v4-pro[1m]", "deepseek-v4-flash[1m]"))
-        self.assertEqual(proxy.FAILOVER_MODEL["ds4-xhigh"], "deepseek-v4-pro[1m]")
-        self.assertEqual(proxy.FAILOVER_MODEL["ds4-low"], "deepseek-v4-flash[1m]")
+            self.assertEqual(proxy.FAILOVER_MODEL[tier], "deepseek-v4-flash[1m]")
 
 
 if __name__ == "__main__":

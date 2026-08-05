@@ -15,6 +15,9 @@ exposes only `deepseek-v4-flash[1m]`/`deepseek-v4-pro[1m]` and ignores
 `reasoning_effort`. A `--tier max` on direct silently runs flash with thinking on.
 Use or-ds4/nous when the task needs effort control or a verify floor.
 
+When `nous` fails over to `direct`, every tier runs `deepseek-v4-flash[1m]` —
+the fallback is deliberately flash-only, never pro.
+
 Latency: `openrouter` (ZDR) is markedly slower than `nous`/`direct` per request —
 a review run on or-ds4 exceeded 180s and needed a 300s timeout, while the same
 run on nous finished well under that. Budget the `--timeout` accordingly for
