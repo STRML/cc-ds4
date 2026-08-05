@@ -448,14 +448,17 @@ class FailoverStallRelayTest(unittest.TestCase):
         self.addCleanup(self._profiles.stop)
         self._w, self._r = proxy.FAILOVER_WINDOW, proxy.FAILOVER_RATE
         self._rc, self._rt = proxy.FAILOVER_RECHECK, proxy.RELAY_TIMEOUT
+        self._pc = proxy.FAILOVER_PROBES_TO_CLOSE
         # window=4, rate=0.5 -> two strikes trip; a 1s relay timeout resolves
         # each hang fast instead of blocking the test for minutes.
         proxy.FAILOVER_WINDOW, proxy.FAILOVER_RATE = 4, 0.5
         proxy.FAILOVER_RECHECK, proxy.RELAY_TIMEOUT = 60, 1
+        proxy.FAILOVER_PROBES_TO_CLOSE = 1            # keep single-probe close here
         self.addCleanup(setattr, proxy, "FAILOVER_WINDOW", self._w)
         self.addCleanup(setattr, proxy, "FAILOVER_RATE", self._r)
         self.addCleanup(setattr, proxy, "FAILOVER_RECHECK", self._rc)
         self.addCleanup(setattr, proxy, "RELAY_TIMEOUT", self._rt)
+        self.addCleanup(setattr, proxy, "FAILOVER_PROBES_TO_CLOSE", self._pc)
         proxy._failover.clear()
         self.addCleanup(proxy._failover.clear)
 
@@ -533,10 +536,13 @@ class FailoverRelayTest(unittest.TestCase):
         self.addCleanup(self._profiles.stop)
         self._w, self._r, self._rc = (proxy.FAILOVER_WINDOW,
                                       proxy.FAILOVER_RATE, proxy.FAILOVER_RECHECK)
+        self._pc = proxy.FAILOVER_PROBES_TO_CLOSE
         proxy.FAILOVER_WINDOW, proxy.FAILOVER_RATE, proxy.FAILOVER_RECHECK = 3, 1.0, 60
+        proxy.FAILOVER_PROBES_TO_CLOSE = 1
         self.addCleanup(setattr, proxy, "FAILOVER_WINDOW", self._w)
         self.addCleanup(setattr, proxy, "FAILOVER_RATE", self._r)
         self.addCleanup(setattr, proxy, "FAILOVER_RECHECK", self._rc)
+        self.addCleanup(setattr, proxy, "FAILOVER_PROBES_TO_CLOSE", self._pc)
         proxy._failover.clear()
         self.addCleanup(proxy._failover.clear)
 
@@ -578,6 +584,125 @@ class FailoverRelayTest(unittest.TestCase):
         status, headers, _ = raw_post(srv, SENTINEL)
         self.assertEqual(status, 200)
         self.assertEqual(headers.get("X-DS4-Upstream"), fake.url)
+
+
+class FailoverBugTest(unittest.TestCase):
+    """Regression tests for the two breaker bugs found in #17:
+    500 was not in TRANSIENT_STATUS so 500s never tripped the breaker;
+    a single clean probe closed the circuit and caused flapping."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        with open(os.path.join(self.tmp, "settings.json"), "w") as fh:
+            json.dump({"env": {"ANTHROPIC_AUTH_TOKEN": "ds4-direct-key"}}, fh)
+        patched = {"direct": dict(proxy.PROFILES["direct"], dir=self.tmp),
+                   "nous": dict(proxy.PROFILES["nous"])}
+        self._profiles = mock.patch.object(proxy, "PROFILES", patched)
+        self._profiles.start()
+        self.addCleanup(self._profiles.stop)
+        self._w, self._r, self._rc = (proxy.FAILOVER_WINDOW,
+                                      proxy.FAILOVER_RATE, proxy.FAILOVER_RECHECK)
+        self._pc = proxy.FAILOVER_PROBES_TO_CLOSE
+        proxy.FAILOVER_WINDOW, proxy.FAILOVER_RATE = 4, 0.5
+        proxy.FAILOVER_RECHECK = 60
+        proxy.FAILOVER_PROBES_TO_CLOSE = 2  # need 2 probes to close
+        self.addCleanup(setattr, proxy, "FAILOVER_WINDOW", self._w)
+        self.addCleanup(setattr, proxy, "FAILOVER_RATE", self._r)
+        self.addCleanup(setattr, proxy, "FAILOVER_RECHECK", self._rc)
+        self.addCleanup(setattr, proxy, "FAILOVER_PROBES_TO_CLOSE", self._pc)
+        proxy._failover.clear()
+        self.addCleanup(proxy._failover.clear)
+
+    def test_bug1_500s_trip_the_breaker(self):
+        """500 is now in TRANSIENT_STATUS — two 500s trip the breaker."""
+        server500 = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (500, {}, b'{"error":"internal"}'))})
+        good = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(server500.close)
+        self.addCleanup(good.close)
+        nous = dict(proxy.PROFILES["nous"], upstream=server500.url)
+        proxy.PROFILES["direct"]["upstream"] = good.url
+        srv = make_server(nous, server500)
+        self.addCleanup(srv.server_close)
+        # window=4, rate=0.5 → two 500s trip
+        for _ in range(2):
+            status, body = post(srv, "/v1/messages", SENTINEL)
+            self.assertEqual(status, 500)
+            self.assertIn("internal", body)      # the upstream 500 is relayed
+        self.assertTrue(proxy._failover["test"]["open"])
+        # the next request is served by direct (failover did its job on 500s)
+        status, body = post(srv, "/v1/messages", SENTINEL)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"ok": True})
+
+    def test_bug2_circuit_stays_open_after_single_probe(self):
+        """A single clean probe does NOT close the circuit (PROBES_TO_CLOSE=2)."""
+        flaky = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (503, {}, b'{}'))})
+        flaky.set_route("GET", "/v1/models", lambda b: (200, {}, b'{}'))
+        good = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(flaky.close)
+        self.addCleanup(good.close)
+        nous = dict(proxy.PROFILES["nous"], upstream=flaky.url)
+        proxy.PROFILES["direct"]["upstream"] = good.url
+        srv = make_server(nous, flaky)
+        self.addCleanup(srv.server_close)
+        # trip the breaker
+        for _ in range(2):
+            post(srv, "/v1/messages", SENTINEL)
+        self.assertTrue(proxy._failover["test"]["open"])
+        # force recheck now
+        with proxy._lock:
+            proxy._failover_state("test")["probed_at"] = 0.0
+        # first probe: clean, probes=1, circuit stays open
+        post(srv, "/v1/messages", SENTINEL)
+        self.assertTrue(proxy._failover["test"]["open"])
+        self.assertEqual(proxy._failover["test"]["probes"], 1)
+        # second probe (force recheck again): clean, probes=2 — closes
+        with proxy._lock:
+            proxy._failover_state("test")["probed_at"] = 0.0
+        post(srv, "/v1/messages", SENTINEL)
+        self.assertFalse(proxy._failover["test"]["open"])
+
+    def test_bug2_failed_probe_resets_the_streak(self):
+        """A failed probe zeroes the probe counter; fresh probes are needed."""
+        flaky = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (503, {}, b'{}'))})
+        # a clean models endpoint once the streak-check probes start
+        flaky.set_route("GET", "/v1/models", lambda b: (200, {}, b'{}'))
+        good = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(flaky.close)
+        self.addCleanup(good.close)
+        nous = dict(proxy.PROFILES["nous"], upstream=flaky.url)
+        proxy.PROFILES["direct"]["upstream"] = good.url
+        srv = make_server(nous, flaky)
+        self.addCleanup(srv.server_close)
+        # trip
+        for _ in range(2):
+            post(srv, "/v1/messages", SENTINEL)
+        self.assertTrue(proxy._failover["test"]["open"])
+        # force a recheck whose probe FAILS -> streak stays at 0, still open
+        with mock.patch.object(proxy, "_failover_probe", return_value=False):
+            with proxy._lock:
+                proxy._failover_state("test")["probed_at"] = 0.0
+            post(srv, "/v1/messages", SENTINEL)
+        self.assertTrue(proxy._failover["test"]["open"])
+        self.assertEqual(proxy._failover["test"]["probes"], 0)
+        # now real probes succeed: one clean probe gets probes=1 (still open)
+        with proxy._lock:
+            proxy._failover_state("test")["probed_at"] = 0.0
+        post(srv, "/v1/messages", SENTINEL)
+        self.assertEqual(proxy._failover["test"]["probes"], 1)
+        self.assertTrue(proxy._failover["test"]["open"])
+        # second consecutive clean probe closes
+        with proxy._lock:
+            proxy._failover_state("test")["probed_at"] = 0.0
+        post(srv, "/v1/messages", SENTINEL)
+        self.assertFalse(proxy._failover["test"]["open"])
 
 
 if __name__ == "__main__":

@@ -738,10 +738,13 @@ class FailoverBreaker(unittest.TestCase):
         self.nous = dict(proxy.PROFILES["nous"])
         self._w, self._r, self._rc = (proxy.FAILOVER_WINDOW,
                                       proxy.FAILOVER_RATE, proxy.FAILOVER_RECHECK)
+        self._pc = proxy.FAILOVER_PROBES_TO_CLOSE
         proxy.FAILOVER_WINDOW, proxy.FAILOVER_RATE, proxy.FAILOVER_RECHECK = 4, 0.5, 60
+        proxy.FAILOVER_PROBES_TO_CLOSE = 2
         self.addCleanup(setattr, proxy, "FAILOVER_WINDOW", self._w)
         self.addCleanup(setattr, proxy, "FAILOVER_RATE", self._r)
         self.addCleanup(setattr, proxy, "FAILOVER_RECHECK", self._rc)
+        self.addCleanup(setattr, proxy, "FAILOVER_PROBES_TO_CLOSE", self._pc)
         proxy._failover.clear()
         self.addCleanup(proxy._failover.clear)
 
@@ -788,6 +791,14 @@ class FailoverBreaker(unittest.TestCase):
         st = self.state()
         st["open"] = True
         st["opened_at"] = time.time() - 9999
+        st["probed_at"] = 0.0
+        # PROBES_TO_CLOSE=2: one clean probe keeps it open (still on target)
+        eff, name = proxy.failover_effective("nous", self.nous)
+        self.assertIs(eff, proxy.PROFILES["direct"])
+        self.assertEqual(name, "nous->direct")
+        self.assertTrue(self.state()["open"])
+        self.assertEqual(self.state()["probes"], 1)
+        # a second consecutive clean probe closes it
         st["probed_at"] = 0.0
         eff, name = proxy.failover_effective("nous", self.nous)
         self.assertIs(eff, self.nous)
