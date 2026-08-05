@@ -493,7 +493,6 @@ class FailoverStallRelayTest(unittest.TestCase):
 
     def test_breaker_recovers_when_the_stalled_upstream_comes_back(self):
         hanging = self._hanging()
-        hanging.set_route("GET", "/v1/models", lambda b: (200, {}, b'{}'))
         good = helpers.FakeUpstream(
             {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
         self.addCleanup(hanging.close)
@@ -568,7 +567,7 @@ class FailoverRelayTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"ok": True})
         sent = json.loads(good.requests[-1]["body"])
-        self.assertEqual(sent["model"], "deepseek-v4-pro[1m]")   # ds4-xhigh -> pro
+        self.assertEqual(sent["model"], "deepseek-v4-flash[1m]")   # failover is flash-only
         self.assertNotIn("reasoning_effort", sent)
         self.assertEqual(good.requests[-1]["headers"].get("Authorization"),
                          "Bearer ds4-direct-key")
@@ -641,7 +640,6 @@ class FailoverBugTest(unittest.TestCase):
         """A single clean probe does NOT close the circuit (PROBES_TO_CLOSE=2)."""
         flaky = helpers.FakeUpstream(
             {("POST", "/v1/messages"): (lambda b: (503, {}, b'{}'))})
-        flaky.set_route("GET", "/v1/models", lambda b: (200, {}, b'{}'))
         good = helpers.FakeUpstream(
             {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
         self.addCleanup(flaky.close)
@@ -654,6 +652,7 @@ class FailoverBugTest(unittest.TestCase):
         for _ in range(2):
             post(srv, "/v1/messages", SENTINEL)
         self.assertTrue(proxy._failover["test"]["open"])
+        flaky.set_route("POST", "/v1/messages", lambda b: (200, {}, b'{"ok":"nous"}'))
         # force recheck now
         with proxy._lock:
             proxy._failover_state("test")["probed_at"] = 0.0
@@ -671,8 +670,6 @@ class FailoverBugTest(unittest.TestCase):
         """A failed probe zeroes the probe counter; fresh probes are needed."""
         flaky = helpers.FakeUpstream(
             {("POST", "/v1/messages"): (lambda b: (503, {}, b'{}'))})
-        # a clean models endpoint once the streak-check probes start
-        flaky.set_route("GET", "/v1/models", lambda b: (200, {}, b'{}'))
         good = helpers.FakeUpstream(
             {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
         self.addCleanup(flaky.close)
@@ -693,6 +690,7 @@ class FailoverBugTest(unittest.TestCase):
         self.assertTrue(proxy._failover["test"]["open"])
         self.assertEqual(proxy._failover["test"]["probes"], 0)
         # now real probes succeed: one clean probe gets probes=1 (still open)
+        flaky.set_route("POST", "/v1/messages", lambda b: (200, {}, b'{"ok":"nous"}'))
         with proxy._lock:
             proxy._failover_state("test")["probed_at"] = 0.0
         post(srv, "/v1/messages", SENTINEL)
