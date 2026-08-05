@@ -37,8 +37,10 @@ socket-activated by launchd on macOS.
   injects ZDR block; injects missing thinking blocks (direct only).
 - **Relay**: forwards to upstream, retries transient statuses, streams back.
 - **Classifier routing** (`classifier.py`): the auto-mode permission classifier
-  is forwarded to the Anthropic subscription (not DeepSeek). Opt out with
-  `DS4_CLASSIFIER=ds4`.
+  is forwarded to the Anthropic subscription (not DeepSeek) by default.
+  `DS4_CLASSIFIER=zdr` routes it to the or-ds4 (OpenRouter ZDR) route instead;
+  `DS4_CLASSIFIER=ds4` keeps it on the profile's own upstream. zdr fails open to
+  Anthropic, then ds4.
 - **Failover breaker** (circuit-breaker): on sustained transient errors a
   profile routes to its `failover` target. Closes only after
   `FAILOVER_PROBES_TO_CLOSE` consecutive clean probes.
@@ -65,7 +67,7 @@ socket-activated by launchd on macOS.
 | `FAILOVER_PROBES_TO_CLOSE` | 3 | consecutive clean probes to close circuit |
 | `EFFORT` | max/xhigh/high/low | `ds4-*` sentinel → reasoning_effort |
 | `IDLE_EXIT` | 900s | proxy exits after idle |
-| `CLASSIFIER_ROUTE` / `CLASSIFIER_MODEL` | anthropic / claude-sonnet-5 | classifier relay target |
+| `CLASSIFIER_ROUTE` / `CLASSIFIER_MODEL` | anthropic / claude-sonnet-5 | classifier relay target; `zdr` routes to or-ds4 (OpenRouter ZDR) |
 
 ## Vision (src/vision.py)
 

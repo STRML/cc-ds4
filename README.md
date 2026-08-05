@@ -276,24 +276,33 @@ The proxies apply this at or below `max_tokens=8192` (`DS4_NOTHINK_BELOW`), whic
 separates the utility calls from the main loop with a wide margin. Nothing observed
 lands between the two.
 
-## The permission classifier routes to Anthropic
+## The permission classifier routes to a trusted boundary
 
 The auto-mode permission classifier (the small `ds4-high` call that gates every tool
 call) is a security gate: it sees the intent of every tool call before anything else.
-Rather than send that intent to a China-hosted DeepSeek backend, the proxy forwards
-the classifier to your **Anthropic subscription** — a trusted boundary — and relays the
-reply. The classifier body is already an Anthropic-shaped request, so this is a relay
-swap, not a rewrite.
+By default the proxy forwards it to your **Anthropic subscription** — a trusted
+boundary — and relays the reply. The classifier body is already an Anthropic-shaped
+request, so this is a relay swap, not a rewrite.
 
-- **Opt out** with `DS4_CLASSIFIER=ds4` (exported before `install.sh`, like the other
-  `DS4_*` knobs) to keep the classifier on DeepSeek.
-- **Auth** is `DS4_CLASSIFIER_TOKEN`, a long-lived subscription token from
-  `claude setup-token`. Set it before running `install.sh` so it reaches the launchd
-  agent. Without it the classifier fails open to the ds4 path.
+`DS4_CLASSIFIER` (exported before `install.sh`, baked into the launchd agent) picks
+the route:
+
+- **`anthropic`** (default) — forwarded to the Anthropic subscription. Auth is
+  `DS4_CLASSIFIER_TOKEN`, a long-lived subscription token from `claude setup-token`.
+  Without it the classifier fails open to the ds4 path. The gate stays in a trusted
+  boundary, at the cost of burning subscription tokens on every tool call.
+- **`zdr`** — forwarded to the **or-ds4 route** (OpenRouter, ZDR forced on): no
+  subscription token spent, and ZDR keeps the classifier's view of tool-call intent
+  off training. The gate now runs on DeepSeek V4 Flash via OpenRouter rather than
+  Anthropic — a lower-trust boundary, so this is opt-in. Requires or-ds4 installed
+  with a key; without it the classifier fails open to the Anthropic route, then ds4.
+- **`ds4`** — old behavior: the classifier rides the profile's own upstream.
+
 - **Model** defaults to `claude-sonnet-5` (`DS4_CLASSIFIER_MODEL` overrides). Sonnet
   matches the 1M context window the profiles advertise — the classifier transcript
   can be large in a long auto-mode session, and a 200K-window model (haiku) overflows
-  it. Still the trusted Anthropic boundary.
+  it. Still the trusted Anthropic boundary. The or-ds4 route uses the or-ds4 profile's
+  model (`DS4_ORDS4_CLASSIFIER_MODEL` overrides).
 - Only the classifier moves. The main loop and subagents keep the DeepSeek routing.
 
 ## Things that cost real time to discover

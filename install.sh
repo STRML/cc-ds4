@@ -249,14 +249,21 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   # than DeepSeek — which needs a subscription token. Ask once at install time,
   # since whoever runs install.sh is almost certainly using their own claude:
   #   * Anthropic (default) — run `claude setup-token` and bake the token.
+  #   * or-ds4 / ZDR — bake DS4_CLASSIFIER=zdr; the classifier uses the or-ds4
+  #     route (OpenRouter, ZDR on). No subscription token, no training — the
+  #     gate runs on DeepSeek V4 Flash via OpenRouter instead.
   #   * DeepSeek — bake DS4_CLASSIFIER=ds4; no token, classifier stays local.
   # A pre-set DS4_CLASSIFIER or DS4_CLASSIFIER_TOKEN skips the prompt. Only
   # prompt on an interactive TTY (tests/CI/--dry-run are non-interactive).
   if [ -z "${DS4_CLASSIFIER:-}" ] && [ -z "${DS4_CLASSIFIER_TOKEN:-}" ]; then
     if [ "$DRY" = 0 ] && [ -t 0 ]; then
-      printf "  Route the permission classifier to your Anthropic subscription? [Y/n] " >&2
+      printf "  Route the permission classifier to your Anthropic subscription? [Y/n] (z = or-ds4 ZDR) " >&2
       read -r _route
       case "${_route:-y}" in
+        z|Z)
+          export DS4_CLASSIFIER=zdr
+          echo "  Classifier -> or-ds4 (OpenRouter ZDR)." >&2
+          ;;
         y|Y|"")
           if command -v claude >/dev/null 2>&1; then
             echo "  Running 'claude setup-token' to mint a subscription token..." >&2
@@ -290,7 +297,8 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
       esac
     else
       echo "  (non-interactive: classifier defaults to Anthropic and fails open to ds4"
-      echo "   until DS4_CLASSIFIER_TOKEN is set, or set DS4_CLASSIFIER=ds4 to opt out)" >&2
+      echo "   until DS4_CLASSIFIER_TOKEN is set, or set DS4_CLASSIFIER=zdr to use"
+      echo "   or-ds4 / OpenRouter ZDR, or DS4_CLASSIFIER=ds4 to opt out)" >&2
     fi
   fi
 
