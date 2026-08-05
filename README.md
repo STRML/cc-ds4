@@ -381,6 +381,8 @@ skills/
     ds4-review/         discrete /ds4-review wrapper (read-only, xhigh/max)
     ds4-verify/         discrete /ds4-verify wrapper (read-only, verify floor)
     ds4-implement/      discrete /ds4-implement wrapper (write-capable, sandbox-off)
+codemaps/
+    architecture.md     token-lean architecture map loaded at session start
 config/             cship configs with the Anthropic-only segments removed
 tests/              tests over the money maths and transcript parsing
 install.sh          point an existing profile at the corrected status line
