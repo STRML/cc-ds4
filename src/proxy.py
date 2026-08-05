@@ -74,7 +74,7 @@ EFFORT = {"ds4-max": "max", "ds4-xhigh": "xhigh", "ds4-high": "high", "ds4-low":
 # these kills the whole claude -p process ("Execution error") and loses the
 # worker's in-flight work; absorbing them here turns a blip into a success.
 # 524 is Cloudflare's origin-timeout; 429/529 are rate limit / overload.
-TRANSIENT_STATUS = {429, 502, 503, 524, 529}
+TRANSIENT_STATUS = {429, 500, 502, 503, 524, 529}
 RETRY_ATTEMPTS = 3
 RETRY_BACKOFF = 1.5          # seconds, scaled by attempt number
 
@@ -135,6 +135,13 @@ FAILOVER_WINDOW = int(os.environ.get("DS4_FAILOVER_WINDOW", "12"))
 FAILOVER_RATE = float(os.environ.get("DS4_FAILOVER_RATE", "0.25"))
 FAILOVER_RECHECK = int(os.environ.get("DS4_FAILOVER_RECHECK", "60"))
 FAILOVER_PROBE_TIMEOUT = int(os.environ.get("DS4_FAILOVER_PROBE_TIMEOUT", "6"))
+# A probe is a GET /v1/models — a different, simpler path than /v1/messages.
+# One clean probe can close the circuit while completions are still failing,
+# then the breaker re-trips after a few user requests and flaps. Require N
+# consecutive clean probes (spaced FAILOVER_RECHECK apart) before closing, so a
+# genuinely recovered upstream survives the window and a still-bad one stays on
+# the target.
+FAILOVER_PROBES_TO_CLOSE = int(os.environ.get("DS4_FAILOVER_PROBES_TO_CLOSE", "3"))
 
 # The failover target (direct) takes real model names and ignores
 # reasoning_effort, so the ds4-* sentinel rewrite leaves behind must map onto
@@ -157,7 +164,8 @@ def _failover_state(name):
     st = _failover.get(name)
     if st is None:
         st = {"outcomes": collections.deque(maxlen=FAILOVER_WINDOW),
-              "open": False, "opened_at": 0.0, "probed_at": 0.0}
+              "open": False, "opened_at": 0.0, "probed_at": 0.0,
+              "probes": 0}
         _failover[name] = st
     return st
 
@@ -202,11 +210,20 @@ def failover_effective(name, cfg):
         st["probed_at"] = time.time()     # this request holds the probe
     if _failover_probe(name, cfg):
         with _lock:
-            st["open"] = False
-            st["opened_at"] = 0.0
-            st["outcomes"].clear()
-        print(f"  [{name}] failover: probe ok, closing circuit", flush=True)
-        return cfg, name
+            st["probes"] += 1
+            if st["probes"] >= FAILOVER_PROBES_TO_CLOSE:
+                st["open"] = False
+                st["opened_at"] = 0.0
+                st["outcomes"].clear()
+                st["probes"] = 0
+                print(f"  [{name}] failover: probe ok x{FAILOVER_PROBES_TO_CLOSE}, "
+                      "closing circuit", flush=True)
+                return cfg, name
+        print(f"  [{name}] failover: probe ok ({st['probes']}/{FAILOVER_PROBES_TO_CLOSE}), "
+              f"staying on {target}", flush=True)
+        return tcfg, f"{name}->{target}"
+    with _lock:
+        st["probes"] = 0                 # a failed probe resets the streak
     print(f"  [{name}] failover: probe failed, staying on {target}", flush=True)
     return tcfg, f"{name}->{target}"
 
@@ -239,6 +256,7 @@ def failover_record(name, cfg, eff_cfg, up, last_err):
             st["open"] = True
             st["opened_at"] = time.time()
             st["probed_at"] = time.time()
+            st["probes"] = 0                 # fresh streak on the next recovery
             print(f"  [{name}] failover: {sum(st['outcomes'])} transient errors "
                   f"in the last {len(st['outcomes'])} requests, "
                   f"routing to {cfg['failover']}", flush=True)
