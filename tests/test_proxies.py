@@ -785,7 +785,7 @@ class FailoverBreaker(unittest.TestCase):
     # ── the half-open probe ──────────────────────────────────────────────────
 
     def test_probe_success_closes_the_circuit(self):
-        fake = helpers.FakeUpstream({("GET", "/v1/models"): (lambda b: (200, {}, b'{}'))})
+        fake = helpers.FakeUpstream({("POST", "/v1/messages"): (lambda b: (200, {}, b'{}'))})
         self.addCleanup(fake.close)
         self.nous["upstream"] = fake.url
         st = self.state()
@@ -806,7 +806,7 @@ class FailoverBreaker(unittest.TestCase):
         self.assertFalse(self.state()["open"])
 
     def test_probe_failure_stays_on_target(self):
-        fake = helpers.FakeUpstream({("GET", "/v1/models"): (lambda b: (503, {}, b'{}'))})
+        fake = helpers.FakeUpstream({("POST", "/v1/messages"): (lambda b: (503, {}, b'{}'))})
         self.addCleanup(fake.close)
         self.nous["upstream"] = fake.url
         st = self.state()
@@ -819,7 +819,7 @@ class FailoverBreaker(unittest.TestCase):
         self.assertTrue(self.state()["open"])
 
     def test_probe_is_throttled_to_the_recheck_interval(self):
-        fake = helpers.FakeUpstream({("GET", "/v1/models"): (lambda b: (503, {}, b'{}'))})
+        fake = helpers.FakeUpstream({("POST", "/v1/messages"): (lambda b: (503, {}, b'{}'))})
         self.addCleanup(fake.close)
         self.nous["upstream"] = fake.url
         st = self.state()
@@ -940,9 +940,22 @@ class FailoverDripTuning(unittest.TestCase):
     def test_failover_model_maps_every_sentinel_to_a_real_model(self):
         for tier in ("ds4-max", "ds4-xhigh", "ds4-high", "ds4-low"):
             model = proxy.FAILOVER_MODEL[tier]
-            self.assertIn(model, ("deepseek-v4-pro[1m]", "deepseek-v4-flash[1m]"))
-        self.assertEqual(proxy.FAILOVER_MODEL["ds4-xhigh"], "deepseek-v4-pro[1m]")
+            self.assertEqual(model, "deepseek-v4-flash[1m]")
+        self.assertEqual(proxy.FAILOVER_MODEL["ds4-xhigh"], "deepseek-v4-flash[1m]")
         self.assertEqual(proxy.FAILOVER_MODEL["ds4-low"], "deepseek-v4-flash[1m]")
+
+    def test_probe_uses_messages_with_minimal_disabled_thinking_payload(self):
+        fake = helpers.FakeUpstream({("POST", "/v1/messages"): (lambda b: (200, {}, b'{}'))})
+        self.addCleanup(fake.close)
+        cfg = dict(self.nous, upstream=fake.url)
+        self.assertTrue(proxy._failover_probe("nous", cfg))
+        self.assertEqual(len(fake.requests), 1)
+        request = fake.requests[0]
+        self.assertEqual(request["method"], "POST")
+        self.assertEqual(request["path"], "/v1/messages")
+        payload = json.loads(request["body"])
+        self.assertEqual(payload["max_tokens"], 1)
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
 
 
 if __name__ == "__main__":

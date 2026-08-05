@@ -135,21 +135,21 @@ FAILOVER_WINDOW = int(os.environ.get("DS4_FAILOVER_WINDOW", "12"))
 FAILOVER_RATE = float(os.environ.get("DS4_FAILOVER_RATE", "0.25"))
 FAILOVER_RECHECK = int(os.environ.get("DS4_FAILOVER_RECHECK", "60"))
 FAILOVER_PROBE_TIMEOUT = int(os.environ.get("DS4_FAILOVER_PROBE_TIMEOUT", "6"))
-# A probe is a GET /v1/models — a different, simpler path than /v1/messages.
-# One clean probe can close the circuit while completions are still failing,
-# then the breaker re-trips after a few user requests and flaps. Require N
-# consecutive clean probes (spaced FAILOVER_RECHECK apart) before closing, so a
-# genuinely recovered upstream survives the window and a still-bad one stays on
-# the target.
+# A probe is a minimal POST /v1/messages, the same completion path used by real
+# requests.  A models endpoint can be healthy while completions still fail;
+# probing the actual path prevents that split from closing the circuit and
+# immediately re-tripping it. Require N consecutive clean probes (spaced
+# FAILOVER_RECHECK apart) before closing, so a genuinely recovered upstream
+# survives the window and a still-bad one stays on the target.
 FAILOVER_PROBES_TO_CLOSE = int(os.environ.get("DS4_FAILOVER_PROBES_TO_CLOSE", "3"))
 
 # The failover target (direct) takes real model names and ignores
 # reasoning_effort, so the ds4-* sentinel rewrite leaves behind must map onto
-# one. Pro for the hard tiers, flash for the cheap ones — the same split the
-# direct profile itself uses for opus/fable vs sonnet/haiku.
+# one. Keep this flash-only: failover is a budget-preservation path and must
+# never turn a main-loop request into a more expensive pro request.
 FAILOVER_MODEL = {
-    "ds4-max": "deepseek-v4-pro[1m]",
-    "ds4-xhigh": "deepseek-v4-pro[1m]",
+    "ds4-max": "deepseek-v4-flash[1m]",
+    "ds4-xhigh": "deepseek-v4-flash[1m]",
     "ds4-high": "deepseek-v4-flash[1m]",
     "ds4-low": "deepseek-v4-flash[1m]",
 }
@@ -176,11 +176,26 @@ def _failover_threshold():
 
 
 def _failover_probe(name, cfg):
-    """A GET on the models endpoint rides the same Cloudflare path as real
-    requests, so a 524 / 503 here means the outage is still on — without
-    spending a user request on the check."""
+    """Send a minimal completion on the same path as real user requests.
+
+    Do not use /v1/models: it can succeed while /v1/messages remains
+    unavailable.  The one-token probe is intentionally cheap and disables
+    thinking so recovery checks cannot spend a large reasoning budget.
+    """
+    payload = {
+        "model": cfg.get("model") or "deepseek-v4-flash[1m]",
+        "max_tokens": 1,
+        "thinking": {"type": "disabled"},
+        "messages": [{"role": "user", "content": "ping"}],
+    }
+    req = urllib.request.Request(
+        cfg["upstream"].rstrip("/") + "/v1/messages",
+        data=json.dumps(payload).encode(), method="POST",
+        headers={"authorization": "Bearer " + api_key(name, cfg),
+                 "content-type": "application/json", "user-agent": UA})
     try:
-        get_json(name, cfg, "/v1/models", timeout=FAILOVER_PROBE_TIMEOUT)
+        with urllib.request.urlopen(req, timeout=FAILOVER_PROBE_TIMEOUT) as response:
+            response.read()
         return True
     except Exception:
         return False
