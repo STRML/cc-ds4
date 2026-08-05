@@ -43,17 +43,28 @@ VERBOSE = os.environ.get("DS4_VERBOSE") == "1" or os.environ.get("DS4_DEBUG") ==
 VISION = os.environ.get("DS4_VISION", "1") == "1"
 
 # Classifier routing: the auto-mode permission classifier (ds4-high + small
-# max_tokens + thinking off) is forwarded to the Anthropic subscription instead
-# of DeepSeek — the security gate should live in a trusted boundary. "ds4"
-# restores the old behavior; DS4_CLASSIFIER_MODEL overrides the Anthropic model.
-# Default is sonnet-5, NOT haiku: the profile advertises a 1M context window
-# and Claude Code sizes the classifier transcript against it, so a 200K-window
-# model (haiku) overflows on a long auto-mode session ("classifier transcript
-# exceeded context window"). Sonnet 5 matches the 1M window the profiles claim.
+# max_tokens + thinking off) gates every tool call, so it defaults to the
+# Anthropic subscription instead of DeepSeek — the security gate should live
+# in a trusted boundary. Three routes, set by DS4_CLASSIFIER:
+#   * anthropic (default) — forwarded to the subscription. "ds4" would bill
+#     subscription tokens for the classifier on every tool call.
+#   * zdr — forwarded to the or-ds4 (OpenRouter ZDR) route instead: no
+#     subscription token spent, and ZDR keeps the intent off training. The
+#     gate runs on DeepSeek V4 Flash via OpenRouter rather than Anthropic;
+#     opt-in because that is a lower-trust boundary. Fails open to the
+#     Anthropic route, then ds4, so auto mode never bricks.
+#   * ds4 — old behavior: the classifier rides the profile's own upstream.
+# DS4_CLASSIFIER_MODEL overrides the Anthropic model. Default is sonnet-5, NOT
+# haiku: the profile advertises a 1M context window and Claude Code sizes the
+# classifier transcript against it, so a 200K-window model (haiku) overflows
+# on a long auto-mode session ("classifier transcript exceeded context
+# window"). Sonnet 5 matches the 1M window the profiles claim.
 # DS4_CLASSIFIER_TOKEN holds the subscription token (claude setup-token);
 # without it the classifier fails open to ds4.
 CLASSIFIER_ROUTE = os.environ.get("DS4_CLASSIFIER", "anthropic")
 CLASSIFIER_MODEL = os.environ.get("DS4_CLASSIFIER_MODEL", "claude-sonnet-5")
+# The or-ds4 route's model, defaulting to the openrouter profile's own.
+ORDS4_CLASSIFIER_MODEL = os.environ.get("DS4_ORDS4_CLASSIFIER_MODEL", "")
 
 # Below this many max_tokens, turn thinking off. Claude Code's utility calls
 # arrive with a few hundred tokens of budget; the main loop arrives at 32000.
@@ -772,12 +783,19 @@ def make_handler(name, cfg):
                         return
                 # The classifier is the small ds4-high call that gates every
                 # tool call in auto mode. It is already an Anthropic-shaped
-                # request, so when the profile routes it to the subscription we
-                # forward it before the ds4 rewrite touches it (the ds4
-                # sentinel/effort logic must not see it). Fail open to ds4 on
-                # any failure. DS4_CLASSIFIER=ds4 opts out entirely.
-                if (CLASSIFIER_ROUTE == "anthropic"
+                # request, so we forward it before the ds4 rewrite touches it
+                # (the ds4 sentinel/effort logic must not see it). The route is
+                # DS4_CLASSIFIER: anthropic -> subscription, zdr -> or-ds4
+                # (OpenRouter, ZDR on), ds4 -> this profile's own upstream.
+                # Fail open to ds4 on any failure so auto mode never bricks.
+                if (CLASSIFIER_ROUTE in ("anthropic", "zdr")
                         and _classifier.is_classifier(payload, NOTHINK_BELOW)):
+                    if CLASSIFIER_ROUTE == "zdr":
+                        ep = self._or_ds4_endpoint(payload)
+                        if ep is not None:
+                            body2, url, key = ep
+                            if self._relay_or_ds4(body2, url, key):
+                                return
                     ep = _classifier.anthropic_endpoint(payload, CLASSIFIER_MODEL)
                     if ep is not None:
                         body2, token = ep
@@ -887,6 +905,66 @@ def make_handler(name, cfg):
                 print(f"  [{eff_name}] <- {up.status}", flush=True)
 
             self._stream(up, eff_cfg["upstream"])
+
+        def _or_ds4_endpoint(self, payload):
+            """The or-ds4 (OpenRouter ZDR) classifier request, or None.
+
+            Reads the openrouter profile from PROFILES; None when the profile
+            isn't installed, has no key, or is mid-failover (the breaker would
+            otherwise send the classifier to a dead upstream on a security
+            gate). The model defaults to the profile's own; the ZDR block is
+            forced on in _relay_or_ds4.
+            """
+            ocfg = PROFILES.get("openrouter")
+            if not ocfg or not os.path.isdir(ocfg["dir"]):
+                return None
+            okey = api_key("openrouter", ocfg)
+            if not okey:
+                return None
+            if failover_effective("openrouter", ocfg)[0] is not ocfg:
+                return None
+            model = ORDS4_CLASSIFIER_MODEL or ocfg["model"]
+            return _classifier.or_ds4_endpoint(payload, model, ocfg["upstream"], okey)
+
+        def _relay_or_ds4(self, body, url, key):
+            """Forward a classifier request to the or-ds4 (OpenRouter ZDR) route.
+
+            The ZDR block is forced on here — an or-ds4 classifier that silently
+            lost ZDR would violate the reason this route exists. Returns True
+            when the request was fully handled, False when it failed and the
+            caller should fall through to the ds4 relay. A 400 is streamed as-is
+            — the classifier's shape being rejected means Claude Code sent
+            something unexpected, and failing open would mask it.
+            """
+            # or_ds4_endpoint builds a plain messages body; the ZDR block is
+            # OpenRouter-specific and stays out of classifier.py.
+            body["provider"] = {"zdr": True, "data_collection": "deny"}
+            raw = json.dumps(body).encode()
+            req = urllib.request.Request(url, data=raw, method="POST")
+            req.add_header("authorization", "Bearer " + key)
+            req.add_header("anthropic-version", _classifier.ANTHROPIC_VERSION)
+            req.add_header("content-type", "application/json")
+            req.add_header("content-length", str(len(raw)))
+            req.add_header("user-agent", UA)
+            try:
+                up = urllib.request.urlopen(req)
+            except urllib.error.HTTPError as e:
+                if e.code == 400:
+                    self._stream(e, url)
+                    return True
+                if VERBOSE:
+                    print(f"  [{name}] classifier(or-ds4) <- {e.code}, failing open to ds4",
+                          flush=True)
+                return False
+            except Exception as e:
+                if VERBOSE:
+                    print(f"  [{name}] classifier(or-ds4) upstream failure: {e}, failing open to ds4",
+                          flush=True)
+                return False
+            if VERBOSE:
+                print(f"  [{name}] classifier -> or-ds4 {up.status}", flush=True)
+            self._stream(up, url)
+            return True
 
         def _relay_anthropic(self, body, token):
             """Forward a classifier request to the Anthropic subscription.
@@ -1071,6 +1149,17 @@ def main():
               "DS4_CLASSIFIER_TOKEN is unset — the classifier will fail open "
               "to ds4. Set it (claude setup-token) and re-run install.sh.",
               file=sys.stderr, flush=True)
+    # The zdr route needs the or-ds4 profile installed with a key; without it
+    # the classifier silently falls back to Anthropic (then ds4). Warn so the
+    # opt-in ZDR gate never quietly becomes something else.
+    if CLASSIFIER_ROUTE == "zdr":
+        ocfg = PROFILES.get("openrouter")
+        if not ocfg or not os.path.isdir(ocfg["dir"]) or not api_key("openrouter", ocfg):
+            print("  WARNING: classifier routed to or-ds4 (zdr) but the "
+                  "openrouter profile has no API key — the classifier will "
+                  "fail open to Anthropic. Install/configure or-ds4, or set "
+                  "DS4_CLASSIFIER to 'anthropic' or 'ds4'.",
+                  file=sys.stderr, flush=True)
     bound = [serve(name, cfg) for name, cfg in served.items()]
     if not any(bound):
         raise SystemExit("no profile bound; nothing to serve")

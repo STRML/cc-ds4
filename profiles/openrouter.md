@@ -317,6 +317,7 @@ What it does for this profile:
 | context floor | `ignore: ["Io Net"]` — ZDR-eligible but only 262,100 context vs 1,048,576 elsewhere |
 | output ceiling | clamps `max_tokens` to 65536, the floor of the ZDR pool |
 | cost reporting | serves `GET /__spend` with live rates, 7-day spend, and credits remaining |
+| classifier (optional) | `DS4_CLASSIFIER=zdr` routes the auto-mode permission classifier here (ZDR forced on) instead of the Anthropic subscription — no subscription tokens spent, gate runs on DeepSeek V4 Flash via OpenRouter |
 | Cloudflare | sends a `curl`-style `User-Agent` (`DS4_UA`) |
 | debugging | `DS4_DEBUG=1` logs each rewrite and any non-200 status |
 

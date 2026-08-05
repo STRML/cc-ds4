@@ -145,5 +145,62 @@ class BodyTest(unittest.TestCase):
             self.assertIsNone(c.anthropic_endpoint({}, "m"))
 
 
+class OrDS4BodyTest(unittest.TestCase):
+    """The zdr classifier becomes an or-ds4 Messages request.
+
+    The or-ds4 route is OpenRouter's /v1/messages, which accepts the same
+    Anthropic Messages shape the classifier already has — so the body is the
+    Anthropic whitelist with the model swapped and thinking forced off. The
+    ZDR provider block is injected by the relay, not here.
+    """
+
+    def payload(self, **kw):
+        p = {"model": "ds4-high", "max_tokens": 2112,
+             "thinking": {"type": "adaptive", "display": "omitted"},
+             "reasoning_effort": "high",
+             "provider": {"zdr": True, "data_collection": "deny"},
+             "metadata": {"project": "/x"},
+             "messages": [{"role": "user", "content": "hi"}]}
+        p.update(kw)
+        return p
+
+    def test_or_ds4_body_swaps_model_and_forces_thinking_off(self):
+        out = c.or_ds4_body(self.payload(), "deepseek/deepseek-v4-flash-0731")
+        self.assertEqual(out["model"], "deepseek/deepseek-v4-flash-0731")
+        self.assertEqual(out["thinking"], {"type": "disabled"})
+        self.assertEqual(out["max_tokens"], 2112)
+        self.assertEqual(out["messages"], [{"role": "user", "content": "hi"}])
+        # ds4-specific fields must not cross to OpenRouter.
+        for key in ("provider", "metadata", "reasoning_effort"):
+            self.assertNotIn(key, out, f"ds4 field {key} leaked to or-ds4")
+        # the original is untouched
+        self.assertEqual(self.payload()["model"], "ds4-high")
+
+    def test_or_ds4_body_keeps_tools_and_system(self):
+        out = c.or_ds4_body(
+            self.payload(tools=[{"type": "function", "function": {"name": "x"}}],
+                         system="sys"), "m")
+        self.assertEqual(out["tools"], [{"type": "function", "function": {"name": "x"}}])
+        self.assertEqual(out["system"], "sys")
+
+    def test_or_ds4_endpoint_builds_url_and_key(self):
+        ep = c.or_ds4_endpoint(self.payload(), "m",
+                               "https://openrouter.ai/api", "sk-or-test")
+        body, url, key = ep
+        self.assertEqual(url, "https://openrouter.ai/api/v1/messages")
+        self.assertEqual(key, "sk-or-test")
+        self.assertEqual(body["model"], "m")
+
+    def test_or_ds4_endpoint_none_without_key(self):
+        self.assertIsNone(c.or_ds4_endpoint(self.payload(), "m",
+                                            "https://openrouter.ai/api", ""))
+        self.assertIsNone(c.or_ds4_endpoint(self.payload(), "m",
+                                            "https://openrouter.ai/api", None))
+
+    def test_or_ds4_endpoint_strips_trailing_slash_on_upstream(self):
+        ep = c.or_ds4_endpoint(self.payload(), "m", "https://openrouter.ai/api/", "k")
+        self.assertEqual(ep[1], "https://openrouter.ai/api/v1/messages")
+
+
 if __name__ == "__main__":
     unittest.main()

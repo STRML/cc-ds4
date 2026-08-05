@@ -400,6 +400,133 @@ class ClassifierRelayTest(unittest.TestCase):
         self.assertIn("bad", body)
 
 
+class ClassifierOrDS4RelayTest(unittest.TestCase):
+    """The zdr classifier routes to the or-ds4 (OpenRouter) route.
+
+    DS4_CLASSIFIER=zdr sends the classifier to the openrouter profile's
+    upstream as a Messages request with the ZDR block forced on, using the
+    or-ds4 API key. It fails open to the Anthropic route (then ds4) when the
+    or-ds4 route can't serve. The subagent tier never reaches or-ds4.
+    """
+
+    def _cfg(self, fake, classifier="zdr"):
+        # The ds4 relay forwards to cfg["upstream"]; point it at the fake so
+        # the ds4 path stays offline too.
+        return dict(proxy.PROFILES["nous"], classifier=classifier,
+                    upstream=fake.url)
+
+    def _classifier_payload(self, **kw):
+        p = {"model": "ds4-high", "max_tokens": 2112,
+             "thinking": {"type": "adaptive", "display": "omitted"},
+             "messages": [{"role": "user", "content": "hi"}]}
+        p.update(kw)
+        return p
+
+    def _with_or_ds4(self, profile_dir, upstream=None):
+        """Patch PROFILES so openrouter resolves to a temp profile dir.
+
+        upstream points the or-ds4 route at a FakeUpstream when given (else the
+        real OpenRouter URL, which a relay test must never reach).
+        """
+        with open(os.path.join(profile_dir, "settings.json"), "w") as fh:
+            json.dump({"env": {"ANTHROPIC_AUTH_TOKEN": "sk-or-key"}}, fh)
+        oc = dict(proxy.PROFILES["openrouter"], dir=profile_dir)
+        if upstream:
+            oc["upstream"] = upstream
+        return mock.patch.object(proxy, "PROFILES",
+                                 {"openrouter": oc, "nous": proxy.PROFILES["nous"]})
+
+    def test_classifier_goes_to_or_ds4_with_zdr(self):
+        from unittest import mock
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake.close)
+        srv = make_server(self._cfg(fake), fake)
+        self.addCleanup(srv.server_close)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with mock.patch.object(proxy, "CLASSIFIER_ROUTE", "zdr"), \
+             self._with_or_ds4(tmp, upstream=fake.url):
+            status, body = post(srv, "/v1/messages", self._classifier_payload())
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"ok": True})
+        req = fake.requests[0]
+        sent = json.loads(req["body"])
+        self.assertEqual(sent["model"], proxy.PROFILES["openrouter"]["model"])
+        self.assertEqual(sent["thinking"], {"type": "disabled"})
+        self.assertEqual(sent["provider"]["zdr"], True)
+        self.assertNotIn("reasoning_effort", sent)
+        self.assertEqual(req["headers"].get("Authorization"), "Bearer sk-or-key")
+        self.assertEqual(req["headers"].get("Anthropic-Version"), "2023-06-01")
+        self.assertIn("/v1/messages", req["path"])
+
+    def test_classifier_zdr_without_or_ds4_key_fails_open_to_anthropic(self):
+        from unittest import mock
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake.close)
+        srv = make_server(self._cfg(fake), fake)
+        self.addCleanup(srv.server_close)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        # or-ds4 profile dir exists but has no key.
+        with open(os.path.join(tmp, "settings.json"), "w") as fh:
+            json.dump({"env": {}}, fh)
+        oc = dict(proxy.PROFILES["openrouter"], dir=tmp)
+        with mock.patch.object(proxy, "CLASSIFIER_ROUTE", "zdr"), \
+             mock.patch.object(proxy, "PROFILES",
+                               {"openrouter": oc, "nous": proxy.PROFILES["nous"]}), \
+             mock.patch.object(proxy._classifier, "classifier_token",
+                               return_value="sk-ant-test"), \
+             mock.patch.object(proxy._classifier, "CLASSIFIER_UPSTREAM",
+                               fake.url + "/v1/messages"):
+            status, body = post(srv, "/v1/messages", self._classifier_payload())
+        self.assertEqual(status, 200)
+        sent = json.loads(fake.requests[0]["body"])
+        # fell through to the Anthropic relay (the fake) — NOT the or-ds4 body
+        self.assertEqual(sent["model"], "claude-sonnet-5")
+        self.assertEqual(fake.requests[0]["headers"].get("Authorization"),
+                         "Bearer sk-ant-test")
+
+    def test_classifier_zdr_falls_back_to_ds4_when_all_routes_offline(self):
+        from unittest import mock
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake.close)
+        srv = make_server(self._cfg(fake), fake)
+        self.addCleanup(srv.server_close)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        # or-ds4 absent (no profile), Anthropic token absent -> ds4 relay
+        with mock.patch.object(proxy, "CLASSIFIER_ROUTE", "zdr"), \
+             mock.patch.object(proxy, "PROFILES",
+                               {"nous": proxy.PROFILES["nous"]}), \
+             mock.patch.object(proxy._classifier, "classifier_token",
+                               return_value=None):
+            status, _ = post(srv, "/v1/messages", self._classifier_payload())
+        self.assertEqual(status, 200)
+        sent = json.loads(fake.requests[0]["body"])
+        self.assertEqual(sent["model"], proxy.PROFILES["nous"]["model"])
+
+    def test_subagent_request_never_goes_to_or_ds4(self):
+        from unittest import mock
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake.close)
+        srv = make_server(self._cfg(fake), fake)
+        self.addCleanup(srv.server_close)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with mock.patch.object(proxy, "CLASSIFIER_ROUTE", "zdr"), \
+             self._with_or_ds4(tmp):
+            post(srv, "/v1/messages",
+                 self._classifier_payload(max_tokens=32000))
+        sent = json.loads(fake.requests[0]["body"])
+        # a subagent (large max_tokens) is NOT the classifier -> stays on ds4
+        self.assertEqual(sent["model"], proxy.PROFILES["nous"]["model"])
+        self.assertEqual(fake.requests[0]["headers"].get("Authorization"), None)
+
+
 class RelayTimeoutTest(unittest.TestCase):
     """A stalled upstream must fail fast, not tie up a relay thread.
 
