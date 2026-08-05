@@ -186,8 +186,14 @@ def _failover_probe(name, cfg):
     small as 20 lines). The probe mirrors a tiny thinking-disabled request, so
     a clean probe means the completions endpoint has actually recovered.
     """
+    # cfg is the profile being probed, so its model id is the one its own
+    # requests use. Nous serves deepseek/deepseek-v4-flash-0731; a hardcoded
+    # direct id (deepseek-v4-flash[1m]) 404s there, which would keep the
+    # breaker open forever. Fall back to the direct id only for profiles with
+    # no model (the direct profile itself).
+    model = cfg["model"] or "deepseek-v4-flash[1m]"
     body = json.dumps({
-        "model": "deepseek-v4-flash[1m]",
+        "model": model,
         "max_tokens": 1,
         "thinking": {"type": "disabled"},
         "messages": [{"role": "user", "content": "ping"}],

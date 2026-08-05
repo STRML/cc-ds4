@@ -836,6 +836,26 @@ class FailoverBreaker(unittest.TestCase):
         self.assertIs(eff, proxy.PROFILES["direct"])
         self.assertEqual(len(fake.requests), 1)
 
+    def test_probe_body_uses_the_profile_own_model_id(self):
+        # The probe must send the profile's model id: nous serves
+        # deepseek/deepseek-v4-flash-0731, and a hardcoded direct id would
+        # 404 there and keep the breaker open forever.
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake.close)
+        self.nous["upstream"] = fake.url
+        self.assertTrue(proxy._failover_probe("nous", self.nous))
+        body = json.loads(fake.requests[0]["body"])
+        self.assertEqual(body["model"], "deepseek/deepseek-v4-flash-0731")
+        # a profile with no model (direct) falls back to the direct id
+        fake2 = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake2.close)
+        direct = dict(proxy.PROFILES["direct"], upstream=fake2.url)
+        self.assertTrue(proxy._failover_probe("direct", direct))
+        body2 = json.loads(fake2.requests[0]["body"])
+        self.assertEqual(body2["model"], "deepseek-v4-flash[1m]")
+
     # ── feeding the window ──────────────────────────────────────────────────
 
     def _record(self, bad):

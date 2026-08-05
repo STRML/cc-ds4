@@ -522,6 +522,9 @@ class FailoverStallRelayTest(unittest.TestCase):
         p = json.loads(probe["body"])
         self.assertEqual(p["max_tokens"], 1)
         self.assertEqual(p["thinking"], {"type": "disabled"})
+        # the probe uses the profile's own model id (nous serves the -0731
+        # id; a hardcoded direct id would 404 there and never close)
+        self.assertEqual(p["model"], "deepseek/deepseek-v4-flash-0731")
         self.assertEqual(json.loads(body), {"ok": "nous"})
         self.assertFalse(proxy._failover["test"]["open"])
         # and nous keeps serving
