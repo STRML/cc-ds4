@@ -145,11 +145,13 @@ FAILOVER_PROBES_TO_CLOSE = int(os.environ.get("DS4_FAILOVER_PROBES_TO_CLOSE", "3
 
 # The failover target (direct) takes real model names and ignores
 # reasoning_effort, so the ds4-* sentinel rewrite leaves behind must map onto
-# one. Pro for the hard tiers, flash for the cheap ones — the same split the
-# direct profile itself uses for opus/fable vs sonnet/haiku.
+# one. Flash only: the direct profile's own config runs flash for every tier,
+# and the cost difference between flash and pro is what makes failover worth
+# it — a pro main-loop request on the target would bill more than the nous
+# trip it is trying to ride out (observed: 121 trips in 25h).
 FAILOVER_MODEL = {
-    "ds4-max": "deepseek-v4-pro[1m]",
-    "ds4-xhigh": "deepseek-v4-pro[1m]",
+    "ds4-max": "deepseek-v4-flash[1m]",
+    "ds4-xhigh": "deepseek-v4-flash[1m]",
     "ds4-high": "deepseek-v4-flash[1m]",
     "ds4-low": "deepseek-v4-flash[1m]",
 }
@@ -176,12 +178,28 @@ def _failover_threshold():
 
 
 def _failover_probe(name, cfg):
-    """A GET on the models endpoint rides the same Cloudflare path as real
-    requests, so a 524 / 503 here means the outage is still on — without
-    spending a user request on the check."""
+    """A minimal /v1/messages POST probes the exact path real requests ride.
+
+    A GET /v1/models was the old probe: it never measured completions health,
+    so a models-ok / messages-still-503 split closed the circuit and the
+    breaker re-tripped a few requests later (observed: close->trip gaps as
+    small as 20 lines). The probe mirrors a tiny thinking-disabled request, so
+    a clean probe means the completions endpoint has actually recovered.
+    """
+    body = json.dumps({
+        "model": "deepseek-v4-flash[1m]",
+        "max_tokens": 1,
+        "thinking": {"type": "disabled"},
+        "messages": [{"role": "user", "content": "ping"}],
+    }).encode()
+    req = urllib.request.Request(cfg["upstream"].rstrip("/") + "/v1/messages",
+                                 data=body, method="POST")
+    req.add_header("authorization", "Bearer " + api_key(name, cfg))
+    req.add_header("content-type", "application/json")
+    req.add_header("user-agent", UA)
     try:
-        get_json(name, cfg, "/v1/models", timeout=FAILOVER_PROBE_TIMEOUT)
-        return True
+        with urllib.request.urlopen(req, timeout=FAILOVER_PROBE_TIMEOUT) as r:
+            return r.status == 200
     except Exception:
         return False
 

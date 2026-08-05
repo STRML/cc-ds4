@@ -32,9 +32,10 @@ and the data flow diagram are load-bearing for correctness.
 ## Profiles
 
 - `claude-ds4` (direct): fastest, cheapest, no ZDR, sends prompts to DeepSeek
-  (retention/training). Model is literal `deepseek-v4-flash[1m]` / `-pro[1m]`;
-  no effort knob. Tier sentinels don't rewrite — the CLI passes literal model
-  names.
+  (retention/training). Model is literal `deepseek-v4-flash[1m]`; no effort
+  knob. Tier sentinels don't rewrite — the CLI passes literal model names.
+  Failover from other profiles lands here flash-only (`FAILOVER_MODEL`), never
+  pro.
 - `claude-or-ds4` (OpenRouter): ZDR on, pinned `-0731` build, slower. Sentinel
   tiers + effort control.
 - `claude-nous` (Nous Portal): cheapest (90% promo), pinned `-0731`, no ZDR.
