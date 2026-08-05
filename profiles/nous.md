@@ -283,10 +283,11 @@ fallback must stay cheap), the client's auth header is swapped for the direct
 key, and the main thread stops eating 524s entirely.
 
 - **Trips** when transient errors (429/502/503/524/529, a connection failure,
-  or a relay stall) make up `DS4_FAILOVER_RATE` (default 0.5) of the last
-  `DS4_FAILOVER_WINDOW` (default 6) requests.
-- **Recovers** by probing `GET /v1/models` every `DS4_FAILOVER_RECHECK`
-  (default 60) seconds while open; one good probe closes the circuit.
+  or a relay stall) make up `DS4_FAILOVER_RATE` (default 0.25) of the last
+  `DS4_FAILOVER_WINDOW` (default 12) requests.
+- **Recovers** by probing `POST /v1/messages` every `DS4_FAILOVER_RECHECK`
+  (default 60) seconds while open; it takes `DS4_FAILOVER_PROBES_TO_CLOSE`
+  (default 3) consecutive clean probes to close the circuit.
 - **Requires the direct profile installed** (`~/.claude-ds4` exists with a
   key) — otherwise the breaker stays moot and the profile keeps its own
   upstream. Set `DS4_FAILOVER=0` to disable.

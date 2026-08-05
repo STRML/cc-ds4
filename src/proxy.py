@@ -106,14 +106,17 @@ def _is_anthropic_model(name):
     return any(k in n for k in ("sonnet", "opus", "haiku", "claude-"))
 
 
-def should_retry(payload):
+def should_retry(tier):
     """True when a transient error on this request should be retried in-proxy.
 
     The main thread (ds4-xhigh) has its own 10x-backoff retry, so retrying here
     would double up. Subagent tiers (ds4-high/max/low via CLAUDE_CODE_SUBAGENT_MODEL)
     die with "Execution error" on a raw forward, so they need the proxy guard.
+
+    tier is the client-sent model, captured before any failover remap: the
+    remap rewrites payload['model'] to the target's literal id, which would
+    make every failed-over request look like a retryable subagent call.
     """
-    tier = payload.get("model") if isinstance(payload, dict) else None
     return isinstance(tier, str) and tier != "ds4-xhigh"
 
 
@@ -135,12 +138,11 @@ FAILOVER_WINDOW = int(os.environ.get("DS4_FAILOVER_WINDOW", "12"))
 FAILOVER_RATE = float(os.environ.get("DS4_FAILOVER_RATE", "0.25"))
 FAILOVER_RECHECK = int(os.environ.get("DS4_FAILOVER_RECHECK", "60"))
 FAILOVER_PROBE_TIMEOUT = int(os.environ.get("DS4_FAILOVER_PROBE_TIMEOUT", "6"))
-# A probe is a GET /v1/models — a different, simpler path than /v1/messages.
-# One clean probe can close the circuit while completions are still failing,
-# then the breaker re-trips after a few user requests and flaps. Require N
-# consecutive clean probes (spaced FAILOVER_RECHECK apart) before closing, so a
-# genuinely recovered upstream survives the window and a still-bad one stays on
-# the target.
+# A probe is a minimal POST /v1/messages (see _failover_probe) - the same path
+# real requests ride, so a clean probe means completions recovered, not just
+# the models list. Require N consecutive clean probes (spaced FAILOVER_RECHECK
+# apart) before closing, so a genuinely recovered upstream survives the window
+# and a still-bad one stays on the target.
 FAILOVER_PROBES_TO_CLOSE = int(os.environ.get("DS4_FAILOVER_PROBES_TO_CLOSE", "3"))
 
 # The failover target (direct) takes real model names and ignores
@@ -756,6 +758,12 @@ def make_handler(name, cfg):
 
             eff_cfg = cfg
             eff_name = name
+            # The client-sent tier, before the failover remap rewrites
+            # payload["model"] to the target's literal id. should_retry must
+            # see this original tier or a failed-over main-loop request would
+            # be retried in-proxy on top of the main thread's own 10x-backoff
+            # retry. Default None: a non-JSON body never reaches should_retry.
+            orig_tier = payload.get("model") if isinstance(payload, dict) else None
             if isinstance(payload, dict):
                 requires_zdr = request_requires_zdr(self.headers, payload)
                 if requires_zdr:
@@ -838,7 +846,7 @@ def make_handler(name, cfg):
             # tier: subagents default to ds4-high via CLAUDE_CODE_SUBAGENT_MODEL,
             # the main loop to ds4-xhigh via ANTHROPIC_MODEL). Non-transient
             # statuses pass through unchanged.
-            do_retry = should_retry(payload)
+            do_retry = should_retry(orig_tier)
             open_kw = {} if RELAY_TIMEOUT <= 0 else {"timeout": RELAY_TIMEOUT}
             up = None
             last_err = None

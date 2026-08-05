@@ -674,17 +674,26 @@ class RetryGuard(unittest.TestCase):
 
     def test_subagent_tiers_are_retried(self):
         for tier in ("ds4-high", "ds4-low", "ds4-max"):
-            self.assertTrue(proxy.should_retry(call(model=tier)), tier)
+            self.assertTrue(proxy.should_retry(tier), tier)
 
     def test_main_thread_tier_is_not_retried(self):
         # the main loop sends ds4-xhigh (ANTHROPIC_MODEL)
-        self.assertFalse(proxy.should_retry(call(model="ds4-xhigh")))
+        self.assertFalse(proxy.should_retry("ds4-xhigh"))
 
     def test_unknown_model_is_retried(self):
         # defensive: a tier we do not recognize is a subagent tier
-        self.assertTrue(proxy.should_retry(call(model="ds4-sonnet")))
+        self.assertTrue(proxy.should_retry("ds4-sonnet"))
 
-    def test_absent_payload_is_not_retried(self):
+    def test_failover_remap_does_not_retry_the_main_loop(self):
+        # The failover remap rewrites payload["model"] to the target's literal
+        # id (deepseek-v4-flash[1m]). should_retry is called with the
+        # client-sent tier, so a failed-over main-loop request stays exempt
+        # from in-proxy retry - it must not double up with the main thread's
+        # own 10x-backoff retry.
+        self.assertTrue(proxy.should_retry("ds4-high"))
+        self.assertFalse(proxy.should_retry("ds4-xhigh"))
+
+    def test_absent_tier_is_not_retried(self):
         self.assertFalse(proxy.should_retry(None))
         self.assertFalse(proxy.should_retry({}))
 
