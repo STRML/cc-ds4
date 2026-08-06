@@ -400,6 +400,91 @@ class ClassifierRelayTest(unittest.TestCase):
         self.assertIn("bad", body)
 
 
+class ZdrBypassRegressionTest(unittest.TestCase):
+    """Issue #29: the per-request ZDR marker must not be bypassed by the
+    classifier branch.
+
+    A classifier-matched request (ds4-high + max_tokens <= NOTHINK_BELOW)
+    that also carries the per-request ZDR marker must be served by its ZDR
+    route (rewrite() injects the block), not rerouted to the Anthropic
+    subscription — the classifier relays build a fresh body that cannot
+    carry the ZDR provider block. The marker is a routing demand.
+    """
+
+    def _cfg(self, fake):
+        # openrouter is the ZDR-capable route; point it at the fake. The
+        # classifier relays fail open to the same fake, so a bug that lets
+        # the classifier branch run would be visible as an Anthropic-shaped
+        # (model-swapped) relay to the fake.
+        return dict(proxy.PROFILES["openrouter"], upstream=fake.url)
+
+    def _classifier_payload(self, **kw):
+        p = {"model": "ds4-high", "max_tokens": 2112,
+             "thinking": {"type": "adaptive", "display": "omitted"},
+             "messages": [{"role": "user", "content": "hi"}]}
+        p.update(kw)
+        return p
+
+    def test_zdr_marker_stays_on_route_not_classifier_relay(self):
+        from unittest import mock
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake.close)
+        srv = make_server(self._cfg(fake), fake)
+        self.addCleanup(srv.server_close)
+        with mock.patch.object(proxy, "CLASSIFIER_ROUTE", "anthropic"), \
+             mock.patch.object(proxy._classifier, "CLASSIFIER_UPSTREAM",
+                               fake.url + "/v1/messages"), \
+             mock.patch.object(proxy._classifier, "classifier_token",
+                               return_value="sk-ant-oat01-test"):
+            status, body = post(srv, "/v1/messages",
+                                self._classifier_payload(ds4_require_zdr=True))
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"ok": True})
+        sent = json.loads(fake.requests[0]["body"])
+        # served by the openrouter route — model not swapped to an Anthropic id,
+        # and the ZDR provider block injected by rewrite()
+        self.assertEqual(sent["model"], proxy.PROFILES["openrouter"]["model"])
+        self.assertEqual(sent["provider"]["zdr"], True)
+        self.assertNotIn("ds4_require_zdr", sent)
+
+    def test_zdr_marker_bypasses_zdr_classifier_route_too(self):
+        """The marker must also gate the DS4_CLASSIFIER=zdr classifier branch.
+
+        That branch's or-ds4 relay forces ZDR, but its fail-open falls through
+        to the Anthropic subscription, which cannot carry the block. A
+        ZDR-demanding classifier request must instead be served by the route's
+        own rewrite (ZDR injected), not enter the classifier branch at all.
+        """
+        from unittest import mock
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake.close)
+        srv = make_server(self._cfg(fake), fake)
+        self.addCleanup(srv.server_close)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        # or-ds4 present and keyed so the classifier branch would serve if reached.
+        with mock.patch.object(proxy, "CLASSIFIER_ROUTE", "zdr"), \
+             mock.patch.object(proxy, "PROFILES",
+                               {"openrouter": dict(proxy.PROFILES["openrouter"],
+                                                   dir=tmp, upstream=fake.url),
+                                "nous": proxy.PROFILES["nous"]}), \
+             mock.patch.object(proxy._classifier, "classifier_token",
+                               return_value="sk-ant-test"):
+            with open(os.path.join(tmp, "settings.json"), "w") as fh:
+                json.dump({"env": {"ANTHROPIC_AUTH_TOKEN": "sk-or-key"}}, fh)
+            status, body = post(srv, "/v1/messages",
+                                self._classifier_payload(ds4_require_zdr=True))
+        self.assertEqual(status, 200)
+        sent = json.loads(fake.requests[0]["body"])
+        # served by the route's own rewrite — reasoning_effort is injected here
+        # but the or-ds4 classifier body whitelists it out
+        self.assertEqual(sent["model"], proxy.PROFILES["openrouter"]["model"])
+        self.assertEqual(sent["reasoning_effort"], "high")
+        self.assertEqual(sent["provider"]["zdr"], True)
+
+
 class ClassifierOrDS4RelayTest(unittest.TestCase):
     """The zdr classifier routes to the or-ds4 (OpenRouter) route.
 
