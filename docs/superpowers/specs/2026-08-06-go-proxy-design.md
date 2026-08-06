@@ -76,7 +76,7 @@ src/go/
 - **Idle-exit shutdown test:** an explicit test proves that after the idle-exit decision is made, the server refuses to accept/start new work — `http.Server.Shutdown(ctx)` drains in-flight connections while rejecting new accepts, and the test asserts no request begins after the decision.
 - **Context propagation** from the incoming request to the upstream HTTP client, classifier relays, and vision child — a client disconnect cancels the upstream SSE stream.
 - **Graceful shutdown with a session-aware idle-exit.** `http.Server.Shutdown(ctx)` drains active connections, but **`http.Server` alone cannot implement Python's `sessions_live`/`claude_running` semantics** — it would idle-exit the instant connections drop to zero, even while a Claude session is logically mid-flight between requests. Go ports Python's out-of-band lifecycle: a **session-aware tracker** (e.g. a session-token WaitGroup) defers idle-exit while a `.ds4-sessions` entry or `claude` process indicates an active session, exactly as Python's lifecycle logic does. Shutdown = `http.Server.Shutdown(ctx)` once the tracker allows it, with an explicit test that no request begins after the idle-exit decision. No admission semaphore and no separate HTTP connection tracker in Phase A (both contradict the "no semaphore" boundary); the session tracker is out-of-band state, not connection tracking.
-- Same PROFILES table as Python (ports 31500/31501/31502, upstreams, zdr, max_out, failover target), **consumed from one shared config source** (below) rather than a hand-copied table.
+- Same PROFILES table as Python (ports 31500/31501/31502, upstreams, zdr, max_out, failover target), **generated from Python's `PROFILES` dict at build time** (see Source of truth below) rather than a hand-copied table.
 - Classifier relay is **one generic helper** `relayClassifier(body, endpoint, auth, headers)` (Python duplicates `_relay_or_ds4`/`_relay_anthropic`; Go does not). **Classifier requests use the request context without a deadline** in Phase A (match Python's no-timeout); ordinary ds4 relay requests use the idle-timeout wrapper. Distinct retry/no-retry boundaries preserved: the main relay retries per `ds4-high`/`ds4-xhigh`; classifier and vision child calls do **not** carry the main retry policy.
 - **Client auth preserved exactly as Python does it**: POST-only check, constant-time compare, `DS4_KEY_<PROFILE>` fallback (proxy.py:498,752-757). `/__spend` GET stays unauthenticated.
 - **Malformed bodies are safety-tested, not parity-tested.** Python's `int(Content-Length)` behavior (raises on invalid, empty body on chunked/no-length) is an implementation accident, not a contract. Go writes one safety test: malformed or absent length must not panic and must not reach the upstream. Do not reproduce Python's exception behavior.
@@ -97,7 +97,7 @@ tests/diff/
 
 **Method:** a fake upstream serves canned SSE responses **and records every outbound request** (method, path, headers, auth, retry count/order, raw body bytes). The harness fires identical requests at both proxies and asserts:
 
-1. **Response** — byte-for-byte status + body for relayed responses; status + error shape for proxy-generated failures.
+1. **Response** — identical status codes + byte-for-byte body for relayed responses; status + error shape for proxy-generated failures.
 2. **Outbound request** — the two proxies must send the **same rewritten outbound request** (same URL, headers, auth policy, raw body bytes, retry count). This proves `rewrite()` parity — a response-only comparison cannot. **Compare raw body bytes, not decoded JSON**, so whitespace/order/escaping divergence is caught (the recorder may also decode for diagnostics, but the parity assertion is on bytes).
 
 The recorder must handle **three separate endpoints** (auditor): the classifier traffic to the Anthropic/`or-ds4` upstream, and the profile traffic to the DeepSeek upstream, must each have their own recorder so the complete route sequence (classifier attempt → fail-open → profile relay) is compared independently. Extend the existing `tests/helpers.py` `FakeUpstream` (which already inspects forwarded requests) rather than creating a parallel fake.
@@ -111,7 +111,7 @@ The recorder must handle **three separate endpoints** (auditor): the classifier 
 - classifier statuses: 400 (terminal), 401/503/timeout (fail-open, as Python does)
 - client auth: missing/wrong/correct bearer on POST; prove no upstream request on failure
 - ZDR: marker from header or JSON, removed before forwarding; 409 on unsupported route
-- retries: `ds4-high` makes two upstream calls on 429→200; `ds4-xhigh` returns the first 429. **Go must rewind the request body on retry (`GetBody`)** so attempt two isn't empty
+- retries: `ds4-high` makes two upstream calls on 429→200; `ds4-xhigh` returns the first 429. **Go must rewind the request body on retry** (fresh `http.Request` per attempt from the retained `[]byte` — see Architecture) so attempt two isn't empty
 - **JSON number fidelity:** `UseNumber` or equivalent — Python preserves big ints, Go's float64 mangles `9007199254740993`. Add a large-integer corpus case
 - redirects: **assert both proxies follow them identically** (Phase A parity; no-follow is Phase B)
 - `/__spend` full pricing/credits/ledger semantics (proxy.py:533-638), **unauthenticated**, with **isolated profile dirs + deterministic pricing + identical ledger seeds + controlled time** (spend is stateful)
@@ -127,7 +127,7 @@ The complete schema ported (not a subset): `dir`, `spend`, `inject`, `zdr`, `max
 
 - **Go's config is generated from Python's table at build time** (antigravity: don't mutate the legacy oracle's config loading right before using it to validate a rewrite). A small build step emits the Go profile table from `src/proxy.py`'s `PROFILES` dict — no hand-copied `main.go` table, and Python's `proxy.py` stays untouched as the frozen oracle. `install.sh` consumes the ports via the Go binary's `--ports` (no new `jq`/Python dependency). A later consolidation to a shared declarative file is a post-cutover cleanup, not a Phase A prerequisite.
 - **"Byte-for-byte status" is a misnomer — it means identical status codes.** Byte parity applies to relayed bodies and recorded outbound requests; status codes are compared as integers.
-- **Go owns runtime proxy configuration after cutover.** `src/go/main.go` reads the shared file.
+- **Go owns runtime proxy configuration after cutover.** `src/go/main.go` holds the config generated from Python's `PROFILES` at build time.
 - **Python's table remains a frozen differential oracle** until archived.
 - `--ports` is consumed by **`install.sh` only** (both now and after cutover).
 - **`ds4-run` retains its launcher metadata** (`sentinel`, `dir`) — not forced to invoke the Go binary.
