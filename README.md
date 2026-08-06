@@ -276,16 +276,17 @@ The proxies apply this at or below `max_tokens=8192` (`DS4_NOTHINK_BELOW`), whic
 separates the utility calls from the main loop with a wide margin. Nothing observed
 lands between the two.
 
-## The permission classifier routes to a trusted boundary
+## Routing the permission classifier
 
 The auto-mode permission classifier (the small `ds4-high` call that gates every tool
 call) is a security gate: it sees the intent of every tool call before anything else.
-By default the proxy forwards it to your **Anthropic subscription** — a trusted
-boundary — and relays the reply. The classifier body is already an Anthropic-shaped
-request, so this is a relay swap, not a rewrite.
+By default the gate lives in a trusted boundary; the other routes trade that boundary
+for cost or simplicity. The classifier body is already an Anthropic-shaped request, so
+forwarding it is a relay swap, not a rewrite.
 
-`DS4_CLASSIFIER` (exported before `install.sh`, baked into the launchd agent) picks
-the route:
+`DS4_CLASSIFIER` picks the route. Set it before `install.sh`; to change an already
+installed setup, export it and re-run `install.sh` (it rewrites the launchd agent and
+restarts the proxy).
 
 - **`anthropic`** (default) — forwarded to the Anthropic subscription. Auth is
   `DS4_CLASSIFIER_TOKEN`, a long-lived subscription token from `claude setup-token`.
@@ -296,7 +297,9 @@ the route:
   off training. The gate now runs on DeepSeek V4 Flash via OpenRouter rather than
   Anthropic — a lower-trust boundary, so this is opt-in. Requires or-ds4 installed
   with a key; without it the classifier fails open to the Anthropic route, then ds4.
-- **`ds4`** — old behavior: the classifier rides the profile's own upstream.
+- **`ds4`** — the classifier rides the profile's own upstream, same as a normal
+  request. No trusted boundary, no ZDR, nothing spent. The tradeoff is documented in
+  the profiles; the safest non-Anthropic option is `zdr`, not this.
 
 - **Model** defaults to `claude-sonnet-5` (`DS4_CLASSIFIER_MODEL` overrides). Sonnet
   matches the 1M context window the profiles advertise — the classifier transcript
