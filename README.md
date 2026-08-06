@@ -301,6 +301,13 @@ restarts the proxy).
   request. No trusted boundary, no ZDR, nothing spent. The tradeoff is documented in
   the profiles; the safest non-Anthropic option is `zdr`, not this.
 
+A request that carries the per-request ZDR marker (`ds4_require_zdr` /
+`X-DS4-Require-ZDR`) never takes a classifier relay: the marker is a routing demand, so
+the request is served on the selected profile's own upstream with the full ZDR block
+(or rejected with 409 when the route cannot enforce it). This keeps the fail-closed
+contract — a ZDR-demanding request cannot be silently re-routed to a boundary that
+would drop the block.
+
 - **Model** defaults to `claude-sonnet-5` (`DS4_CLASSIFIER_MODEL` overrides). Sonnet
   matches the 1M context window the profiles advertise — the classifier transcript
   can be large in a long auto-mode session, and a 200K-window model (haiku) overflows

@@ -367,6 +367,44 @@ class ClassifierRelayTest(unittest.TestCase):
         sent = json.loads(fake.requests[0]["body"])
         self.assertEqual(sent["model"], proxy.PROFILES["nous"]["model"])
 
+    def test_zdr_demanding_classifier_stays_on_route(self):
+        """A marker-carrying classifier-shaped request must not reach the
+        Anthropic subscription relay.
+
+        ds4_require_zdr is a routing demand: the request is served on the
+        selected ZDR-capable route's own upstream with the full rewrite ZDR
+        block, never re-routed through the classifier relay (whose body
+        whitelist strips the provider block entirely). Regression for #29.
+        """
+        from unittest import mock
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake.close)
+        # openrouter is the ZDR-capable profile; anthropic is the classifier
+        # route that cannot honor ZDR.
+        cfg = dict(proxy.PROFILES["openrouter"], classifier="anthropic",
+                   upstream=fake.url)
+        srv = make_server(cfg, fake)
+        self.addCleanup(srv.server_close)
+        # CLASSIFIER_UPSTREAM is patched so a regression (branch re-enabled)
+        # fails the assertions below instead of leaking to the real API.
+        with mock.patch.object(proxy, "CLASSIFIER_ROUTE", "anthropic"), \
+             mock.patch.object(proxy._classifier, "CLASSIFIER_UPSTREAM",
+                               fake.url + "/v1/messages"), \
+             mock.patch.object(proxy._classifier, "classifier_token",
+                               return_value="tok"):
+            status, _ = post(srv, "/v1/messages",
+                             self._classifier_payload(ds4_require_zdr=True))
+        self.assertEqual(status, 200)
+        sent = json.loads(fake.requests[0]["body"])
+        # went to the route's own upstream with the full ZDR block, not the
+        # anthropic classifier relay (which would send CLASSIFIER_MODEL with
+        # no provider block)
+        self.assertEqual(sent["model"], proxy.PROFILES["openrouter"]["model"])
+        self.assertEqual(sent["provider"]["zdr"], True)
+        self.assertIn("ignore", sent["provider"])
+        self.assertNotIn("ds4_require_zdr", sent)
+
     def test_subagent_request_never_goes_to_anthropic(self):
         from unittest import mock
         fake = helpers.FakeUpstream(
@@ -459,6 +497,39 @@ class ClassifierOrDS4RelayTest(unittest.TestCase):
         self.assertEqual(req["headers"].get("Authorization"), "Bearer sk-or-key")
         self.assertEqual(req["headers"].get("Anthropic-Version"), "2023-06-01")
         self.assertIn("/v1/messages", req["path"])
+
+    def test_zdr_demanding_classifier_skips_or_ds4_relay(self):
+        """A marker-carrying classifier-shaped request must not be re-routed
+        through the or-ds4 relay.
+
+        ds4_require_zdr is a routing demand: the request stays on the selected
+        ZDR-capable route's own upstream and gets the full rewrite ZDR block
+        (with the LOW_CONTEXT ignore list), not the minimal block the or-ds4
+        relay forces on a different upstream. Regression for #29.
+        """
+        from unittest import mock
+        fake = helpers.FakeUpstream(
+            {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
+        self.addCleanup(fake.close)
+        # openrouter is the ZDR-capable profile; zdr is the classifier route.
+        cfg = dict(proxy.PROFILES["openrouter"], classifier="zdr",
+                   upstream=fake.url)
+        srv = make_server(cfg, fake)
+        self.addCleanup(srv.server_close)
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with mock.patch.object(proxy, "CLASSIFIER_ROUTE", "zdr"), \
+             self._with_or_ds4(tmp, upstream=fake.url):
+            status, _ = post(srv, "/v1/messages",
+                             self._classifier_payload(ds4_require_zdr=True))
+        self.assertEqual(status, 200)
+        sent = json.loads(fake.requests[0]["body"])
+        # full rewrite block — the or-ds4 relay only forces the minimal
+        # {zdr, data_collection} and drops reasoning_effort entirely
+        self.assertEqual(sent["provider"]["zdr"], True)
+        self.assertIn("ignore", sent["provider"])
+        self.assertIn("reasoning_effort", sent)
+        self.assertNotIn("ds4_require_zdr", sent)
 
     def test_classifier_zdr_without_or_ds4_key_fails_open_to_anthropic(self):
         from unittest import mock
