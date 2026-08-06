@@ -788,7 +788,13 @@ def make_handler(name, cfg):
                 # DS4_CLASSIFIER: anthropic -> subscription, zdr -> or-ds4
                 # (OpenRouter, ZDR on), ds4 -> this profile's own upstream.
                 # Fail open to ds4 on any failure so auto mode never bricks.
-                if (CLASSIFIER_ROUTE in ("anthropic", "zdr")
+                # A request that demands ZDR is excluded: its ZDR provider
+                # block is injected by rewrite() on this route, and the
+                # classifier relays rebuild the body from a whitelist that
+                # cannot carry it. The marker is a routing demand — a
+                # ZDR-demanding classifier request stays on its ZDR route.
+                if (not requires_zdr
+                        and CLASSIFIER_ROUTE in ("anthropic", "zdr")
                         and _classifier.is_classifier(payload, NOTHINK_BELOW)):
                     if CLASSIFIER_ROUTE == "zdr":
                         ep = self._or_ds4_endpoint(payload)
