@@ -133,10 +133,20 @@ class ClampPinned(unittest.TestCase):
     def test_max_out_value_is_pinned(self):
         self.assertEqual(proxy.PROFILES["openrouter"]["max_out"], 65536)
         self.assertEqual(proxy.PROFILES["nous"]["max_out"], 65536)
+        self.assertEqual(proxy.PROFILES["direct"]["max_out"], 65536)
 
     def test_max_out_clamps_with_literal(self):
         p = call(max_tokens=70000)
         proxy.rewrite(p, proxy.PROFILES["openrouter"])
+        self.assertEqual(p["max_tokens"], 65536)
+
+    def test_direct_clamps_a_failed_over_1m_completion(self):
+        """The direct profile is the failover target for the 1M profiles; an
+        uncapped 131072 completion on it overflowed the endpoint (observed 400:
+        923380 input + 131072 completion > 1048576). It must clamp like every
+        other 1M profile."""
+        p = call(max_tokens=131072)
+        proxy.rewrite(p, proxy.PROFILES["direct"])
         self.assertEqual(p["max_tokens"], 65536)
 
 

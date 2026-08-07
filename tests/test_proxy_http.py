@@ -862,7 +862,9 @@ class FailoverBugTest(unittest.TestCase):
         self.assertEqual(json.loads(body), {"ok": True})
 
     def test_bug2_circuit_stays_open_after_single_probe(self):
-        """A single clean probe does NOT close the circuit (PROBES_TO_CLOSE=2)."""
+        """A single clean probe does NOT close the circuit; the circuit closes
+        only when the profile's own upstream serves a real request clean
+        (PROBES_TO_CLOSE=2 arms the trial)."""
         flaky = helpers.FakeUpstream(
             {("POST", "/v1/messages"): (lambda b: (503, {}, b'{}'))})
         good = helpers.FakeUpstream(
@@ -877,18 +879,33 @@ class FailoverBugTest(unittest.TestCase):
         for _ in range(2):
             post(srv, "/v1/messages", SENTINEL)
         self.assertTrue(proxy._failover["test"]["open"])
-        # force recheck now; probe succeeds -> probes=1, circuit stays open
+        # force recheck now; probe succeeds -> probes=1, circuit stays open,
+        # the request itself is still served by the target (direct)
         with mock.patch.object(proxy, "_failover_probe", return_value=True):
             with proxy._lock:
                 proxy._failover_state("test")["probed_at"] = 0.0
-            post(srv, "/v1/messages", SENTINEL)
+            status, body = post(srv, "/v1/messages", SENTINEL)
         self.assertTrue(proxy._failover["test"]["open"])
         self.assertEqual(proxy._failover["test"]["probes"], 1)
-        # second probe (force recheck again): clean, probes=2 — closes
+        self.assertEqual(json.loads(body), {"ok": True})   # direct served it
+        # second probe (force recheck again): clean, probes=2 — arms a trial.
+        # nous is still 503ing, so the trial request fails and the circuit
+        # stays open.
         with mock.patch.object(proxy, "_failover_probe", return_value=True):
             with proxy._lock:
                 proxy._failover_state("test")["probed_at"] = 0.0
-            post(srv, "/v1/messages", SENTINEL)
+            status, _ = post(srv, "/v1/messages", SENTINEL)
+        self.assertTrue(proxy._failover["test"]["open"])
+        self.assertEqual(proxy._failover["test"]["probes"], 0)   # trial reset it
+        # nous recovers: two more clean probes re-arm the trial (probes=1,
+        # then probes=2 arms), and the trial serves clean, closing the circuit
+        flaky.set_route("POST", "/v1/messages",
+                        lambda b: (200, {}, b'{"ok":"nous"}'))
+        for _ in range(2):
+            with mock.patch.object(proxy, "_failover_probe", return_value=True):
+                with proxy._lock:
+                    proxy._failover_state("test")["probed_at"] = 0.0
+                post(srv, "/v1/messages", SENTINEL)
         self.assertFalse(proxy._failover["test"]["open"])
 
     def test_bug2_failed_probe_resets_the_streak(self):
@@ -921,11 +938,24 @@ class FailoverBugTest(unittest.TestCase):
             post(srv, "/v1/messages", SENTINEL)
         self.assertEqual(proxy._failover["test"]["probes"], 1)
         self.assertTrue(proxy._failover["test"]["open"])
-        # second consecutive clean probe closes
+        # second consecutive clean probe arms a trial, but nous is still
+        # 503ing — the trial fails and keeps the circuit open, zeroing the
+        # streak (the probe can never close alone; only a clean real request
+        # on the profile's own upstream does).
         with mock.patch.object(proxy, "_failover_probe", return_value=True):
             with proxy._lock:
                 proxy._failover_state("test")["probed_at"] = 0.0
             post(srv, "/v1/messages", SENTINEL)
+        self.assertTrue(proxy._failover["test"]["open"])
+        self.assertEqual(proxy._failover["test"]["probes"], 0)
+        # nous recovers: two clean probes re-arm, and the trial serves clean
+        flaky.set_route("POST", "/v1/messages",
+                        lambda b: (200, {}, b'{"ok":"nous"}'))
+        for _ in range(2):
+            with mock.patch.object(proxy, "_failover_probe", return_value=True):
+                with proxy._lock:
+                    proxy._failover_state("test")["probed_at"] = 0.0
+                post(srv, "/v1/messages", SENTINEL)
         self.assertFalse(proxy._failover["test"]["open"])
 
 
