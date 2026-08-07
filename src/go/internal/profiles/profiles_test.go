@@ -1,7 +1,6 @@
 package profiles
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -51,24 +50,17 @@ func TestPortsMatchesPython(t *testing.T) {
 
 // TestPortsEnvOverride pins the DS4_PORT_<NAME> override that src/proxy.py
 // honors: the environment value (name uppercased, int-parsed) wins over the
-// static table port, and --ports output reflects it.
+// static table port. Asserted at the effectivePort level, not through Ports(),
+// because Ports() filters via Served() (config-dir existence), which varies by
+// host — the same reason the sibling tests assert against All().
 func TestPortsEnvOverride(t *testing.T) {
 	t.Setenv("DS4_PORT_DIRECT", "31999")
-	found := false
-	for _, line := range strings.Split(strings.TrimSpace(Ports()), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			t.Fatalf("Ports() line %q", line)
-		}
-		if fields[0] == "direct" {
-			found = true
-			if fields[1] != "31999" {
-				t.Fatalf("direct port = %s, want 31999", fields[1])
+	for _, p := range All() {
+		if p.Name == "direct" {
+			if got := effectivePort(p); got != 31999 {
+				t.Fatalf("effectivePort(direct) = %d, want 31999", got)
 			}
 		}
-	}
-	if !found {
-		t.Fatal("Ports() did not emit the direct profile; override never exercised")
 	}
 }
 
