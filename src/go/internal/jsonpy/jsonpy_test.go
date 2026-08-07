@@ -13,6 +13,17 @@ func TestMarshalMatchesPythonDumps(t *testing.T) {
 		{`{"big": 9007199254740993}`, `{"big": 9007199254740993}`},
 		// Python separators: ", " and ": "
 		{`{"a": 1, "b": [2, 3]}`, `{"a": 1, "b": [2, 3]}`},
+		// astral runes -> UTF-16 surrogate pairs (CPython ensure_ascii).
+		// Verified: python3 -c "import json; print(json.dumps({'c':'🦀'}, ensure_ascii=True))"
+		{`{"c": "\ud83e\udd80"}`, `{"c": "\ud83e\udd80"}`},
+		// BMP non-ASCII and U+2028/U+2029 (CPython escapes these too).
+		{`{"c": "\u00e9\u4e2d\u6587\u2028\u2029"}`, `{"c": "\u00e9\u4e2d\u6587\u2028\u2029"}`},
+		// negative big int and exponent spelling preserved verbatim (UseNumber).
+		{`{"n": -9007199254740993, "e": 1e100}`, `{"n": -9007199254740993, "e": 1e100}`},
+		// integral float keeps the trailing .0 (Python float repr), not Go's 1.
+		{`{"f": 1.0, "z": -0.0}`, `{"f": 1.0, "z": -0.0}`},
+		// empty string stays a string even after an empty-string parse (isStr).
+		{`{"s": "", "o": {}, "a": []}`, `{"s": "", "o": {}, "a": []}`},
 		// characters CPython escapes beyond ensure_ascii: quote, backslash,
 		// short-escape control chars, and \uXXXX for the rest (incl. DEL).
 		// The JSON-escaped input round-trips to identical output.
