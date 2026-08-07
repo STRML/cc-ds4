@@ -494,8 +494,11 @@ def _go_reference_port(proc, label):
     not surface reliably (it blocks waiting to fill its buffer even after the
     newline), which showed up as an intermittent hang. Chunked accumulation
     with a line-boundary scan is deterministic.
+    """
+    buf = b""
+    deadline = time.time() + 30
     while time.time() < deadline:
-        r, _, _ = select.select([proc.stdout], [], [], 2)
+        r, _, _ = select.select([proc.stdout.fileno()], [], [], 2)
         if not r:
             if proc.poll() is not None:
                 break
