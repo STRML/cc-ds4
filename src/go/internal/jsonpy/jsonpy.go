@@ -197,6 +197,15 @@ func (o *OrderedValue) Get(key string) *OrderedValue {
 	return o.vals[key]
 }
 
+// Has reports whether key is present on this object.
+func (o *OrderedValue) Has(key string) bool {
+	if o == nil || !o.obj {
+		return false
+	}
+	_, ok := o.vals[key]
+	return ok
+}
+
 // IsString reports whether o holds a JSON string.
 func (o *OrderedValue) IsString() bool {
 	return o != nil && o.isStr
@@ -212,6 +221,21 @@ func (o *OrderedValue) String() string {
 		return o.str
 	}
 	return o.num
+}
+
+// Raw re-emits this value as JSON bytes with Python's separators, letting a
+// caller compare an entire subtree against a canonical spelling (e.g. the
+// {"type": "disabled"} thinking sentinel). The bytes share the Marshal
+// encoder, so a value round-trips byte-for-byte. A nil value emits "null",
+// which is never equal to any object sentinel — the Python analogue is
+// None != DISABLED.
+func (o *OrderedValue) Raw() string {
+	if o == nil {
+		return "null"
+	}
+	var b bytes.Buffer
+	o.emit(&b)
+	return b.String()
 }
 
 // Set stores v under key, appending key to the object's order if it is new.
@@ -233,4 +257,145 @@ func (o *OrderedValue) SetString(key, val string) {
 // SetInt stores a JSON number under key using its decimal spelling.
 func (o *OrderedValue) SetInt(key string, val int) {
 	o.Set(key, &OrderedValue{num: strconv.Itoa(val)})
+}
+
+// IsObject reports whether o holds a JSON object.
+func (o *OrderedValue) IsObject() bool {
+	return o != nil && o.obj
+}
+
+// IsArray reports whether o holds a JSON array.
+func (o *OrderedValue) IsArray() bool {
+	return o != nil && o.arr
+}
+
+// Items returns the array's elements, or nil if o is not an array. The slice
+// is the array's own backing store; callers may read it but must not append.
+func (o *OrderedValue) Items() []*OrderedValue {
+	if o == nil || !o.arr {
+		return nil
+	}
+	return o.items
+}
+
+// Insert places v at index i in an array, shifting later elements right.
+// Indices out of range clamp to the ends; no-op on a non-array.
+func (o *OrderedValue) Insert(i int, v *OrderedValue) {
+	if o == nil || !o.arr {
+		return
+	}
+	if i < 0 {
+		i = 0
+	}
+	if i > len(o.items) {
+		i = len(o.items)
+	}
+	o.items = append(o.items, nil)
+	copy(o.items[i+1:], o.items[i:])
+	o.items[i] = v
+}
+
+// GetInt returns the integer stored under key, or 0 when key is absent or the
+// value is not a JSON integer literal (a string, float, object, or array).
+// Mirrors Python's isinstance(want, int) guard in proxy.py rewrite(): only an
+// integer literal is a candidate for clamping or thinking-disable.
+func (o *OrderedValue) GetInt(key string) int {
+	v, ok := o.AsInt(key)
+	if !ok {
+		return 0
+	}
+	return v
+}
+
+// AsInt returns the integer stored under key and whether the value is a JSON
+// integer literal. The second return distinguishes an absent or non-integer
+// value (ok=false) from a present integer (ok=true), which GetInt collapses.
+func (o *OrderedValue) AsInt(key string) (int, bool) {
+	v := o.Get(key)
+	if v == nil || v.isStr || v.obj || v.arr {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(v.num, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return int(n), true
+}
+
+// SetBefore stores v under key, inserting key immediately before the existing
+// key before. When key already exists it is updated in place (position kept);
+// when before is absent the key is appended, like Set.
+func (o *OrderedValue) SetBefore(key string, v *OrderedValue, before string) {
+	if o == nil || !o.obj {
+		return
+	}
+	if _, ok := o.vals[key]; ok {
+		o.vals[key] = v
+		return
+	}
+	idx := -1
+	for i, k := range o.keys {
+		if k == before {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		o.Set(key, v)
+		return
+	}
+	o.keys = append(o.keys, "")
+	copy(o.keys[idx+1:], o.keys[idx:])
+	o.keys[idx] = key
+	o.vals[key] = v
+}
+
+// Val converts a Go value into an OrderedValue leaf. Supported types: string,
+// bool, int, int64, float64, *OrderedValue (passed through), and nil. Unknown
+// types become JSON null.
+func Val(v any) *OrderedValue {
+	switch t := v.(type) {
+	case string:
+		return &OrderedValue{str: t, isStr: true}
+	case bool:
+		if t {
+			return &OrderedValue{num: "true"}
+		}
+		return &OrderedValue{num: "false"}
+	case int:
+		return &OrderedValue{num: strconv.Itoa(t)}
+	case int64:
+		return &OrderedValue{num: strconv.FormatInt(t, 10)}
+	case float64:
+		return &OrderedValue{num: strconv.FormatFloat(t, 'f', -1, 64)}
+	case *OrderedValue:
+		return t
+	case nil:
+		return &OrderedValue{num: "null"}
+	}
+	return &OrderedValue{num: "null"}
+}
+
+// MustObj builds an object from alternating key/value pairs, mirroring the
+// dict(...) literals in proxy.py. Non-string keys are skipped; values go
+// through Val.
+func MustObj(pairs ...any) *OrderedValue {
+	o := &OrderedValue{obj: true, vals: map[string]*OrderedValue{}}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		key, ok := pairs[i].(string)
+		if !ok {
+			continue
+		}
+		o.Set(key, Val(pairs[i+1]))
+	}
+	return o
+}
+
+// MustArr builds an array from the given items, each through Val.
+func MustArr(items ...any) *OrderedValue {
+	a := &OrderedValue{arr: true}
+	for _, it := range items {
+		a.items = append(a.items, Val(it))
+	}
+	return a
 }
