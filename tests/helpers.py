@@ -52,9 +52,15 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self):
         body = self._body()
+        endpoint = (self.command, self.path)
         self.server.fake.requests.append(
             {"method": self.command, "path": self.path,
              "headers": dict(self.headers), "body": body})
+        bucket = self.server.fake.requests_by_endpoint.setdefault(endpoint, [])
+        bucket.append(self.server.fake.requests[-1])
+        # A consecutive run against the same endpoint is a retry sequence.
+        self.server.fake.retry_count[endpoint] = \
+            self.server.fake.retry_count.get(endpoint, 0) + 1
         route = self.server.fake._routes.get((self.command, self.path),
                                              self.server.fake._routes.get((self.command, "*"),
                                              self.server.fake._default))
@@ -80,6 +86,12 @@ class FakeUpstream:
         self._routes = {(m, p): h for (m, p), h in (routes or {}).items()}
         self._default = (lambda b: (404, {"content-type": "application/json"}, b"{}"))
         self.requests = []
+        # Keyed by (method, path): the outbound requests per endpoint, in
+        # arrival order, plus a running count of every hit. The differential
+        # harness asserts on these so each proxy's outbound calls can be
+        # compared, not just the bytes the client saw.
+        self.requests_by_endpoint = {}
+        self.retry_count = {}
         server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         server.fake = self
         self._server = server
