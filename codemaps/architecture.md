@@ -42,8 +42,9 @@ socket-activated by launchd on macOS.
   `DS4_CLASSIFIER=ds4` keeps it on the profile's own upstream. zdr fails open to
   Anthropic, then ds4.
 - **Failover breaker** (circuit-breaker): on sustained transient errors a
-  profile routes to its `failover` target. Closes only after
-  `FAILOVER_PROBES_TO_CLOSE` consecutive clean probes.
+  profile routes to its `failover` target. Clean probes arm a real-request
+  trial; the circuit closes only when that request is served clean by the
+  profile's own upstream (a probe passing on a lull is not proof of recovery).
 - **Vision** (`vision.py`): image blocks → text via a local `claude -p` child,
   content-hash cached, fail-open.
 - **Effort override**: per-profile `effort-override` file read on each request.
@@ -52,7 +53,7 @@ socket-activated by launchd on macOS.
 
 | profile | port | upstream | model | zdr | max_out | failover |
 |---|---|---|---|---|---|---|
-| direct | 31500 | api.deepseek.com/anthropic | none (literal) | no | — | none |
+| direct | 31500 | api.deepseek.com/anthropic | none (literal) | no | 65536 | none |
 | openrouter | 31501 | openrouter.ai/api | deepseek/deepseek-v4-flash-0731 | yes | 65536 | none |
 | nous | 31502 | inference-api.nousresearch.com | deepseek/deepseek-v4-flash-0731 | no | 65536 | direct |
 

@@ -764,36 +764,38 @@ class FailoverBreaker(unittest.TestCase):
     # ── choosing where a request goes ────────────────────────────────────────
 
     def test_circuit_starts_closed(self):
-        eff, name = proxy.failover_effective("nous", self.nous)
+        eff, name, trial = proxy.failover_effective("nous", self.nous)
         self.assertIs(eff, self.nous)
         self.assertEqual(name, "nous")
+        self.assertFalse(trial)
 
     def test_open_routes_to_target_within_recheck(self):
         st = self.state()
         st["open"] = True
         st["opened_at"] = time.time()
         st["probed_at"] = time.time()
-        eff, name = proxy.failover_effective("nous", self.nous)
+        eff, name, trial = proxy.failover_effective("nous", self.nous)
         self.assertIs(eff, proxy.PROFILES["direct"])
         self.assertEqual(name, "nous->direct")
+        self.assertFalse(trial)
 
     def test_disabled_never_fails_over(self):
         st = self.state()
         st["open"] = True
         with mock.patch.object(proxy, "FAILOVER_ENABLED", False):
-            eff, _ = proxy.failover_effective("nous", self.nous)
+            eff, _, _ = proxy.failover_effective("nous", self.nous)
         self.assertIs(eff, self.nous)
 
     def test_missing_target_never_fails_over(self):
         proxy.PROFILES["direct"]["dir"] = "/nonexistent/ds4-direct"
         st = self.state()
         st["open"] = True
-        eff, _ = proxy.failover_effective("nous", self.nous)
+        eff, _, _ = proxy.failover_effective("nous", self.nous)
         self.assertIs(eff, self.nous)
 
     # ── the half-open probe ──────────────────────────────────────────────────
 
-    def test_probe_success_closes_the_circuit(self):
+    def test_probe_success_arms_a_trial_that_rides_the_profile(self):
         fake = helpers.FakeUpstream(
             {("POST", "/v1/messages"): (lambda b: (200, {}, b'{"ok":true}'))})
         self.addCleanup(fake.close)
@@ -803,17 +805,25 @@ class FailoverBreaker(unittest.TestCase):
         st["opened_at"] = time.time() - 9999
         st["probed_at"] = 0.0
         # PROBES_TO_CLOSE=2: one clean probe keeps it open (still on target)
-        eff, name = proxy.failover_effective("nous", self.nous)
+        eff, name, trial = proxy.failover_effective("nous", self.nous)
         self.assertIs(eff, proxy.PROFILES["direct"])
         self.assertEqual(name, "nous->direct")
+        self.assertFalse(trial)
         self.assertTrue(self.state()["open"])
         self.assertEqual(self.state()["probes"], 1)
-        # a second consecutive clean probe closes it
+        # a second consecutive clean probe arms a trial: the NEXT request rides
+        # the profile's OWN upstream so its outcome closes the circuit
         st["probed_at"] = 0.0
-        eff, name = proxy.failover_effective("nous", self.nous)
+        eff, name, trial = proxy.failover_effective("nous", self.nous)
         self.assertIs(eff, self.nous)
         self.assertEqual(name, "nous")
+        self.assertTrue(trial)
+        self.assertTrue(self.state()["open"])     # not closed by the probe
+        self.assertEqual(self.state()["probes"], 2)
+        # a clean real request on the profile's upstream is what closes it
+        proxy.failover_trial_close("nous")
         self.assertFalse(self.state()["open"])
+        self.assertEqual(self.state()["probes"], 0)
 
     def test_probe_failure_stays_on_target(self):
         fake = helpers.FakeUpstream(
@@ -824,7 +834,7 @@ class FailoverBreaker(unittest.TestCase):
         st["open"] = True
         st["opened_at"] = time.time() - 9999
         st["probed_at"] = 0.0
-        eff, name = proxy.failover_effective("nous", self.nous)
+        eff, name, _ = proxy.failover_effective("nous", self.nous)
         self.assertIs(eff, proxy.PROFILES["direct"])
         self.assertEqual(name, "nous->direct")
         self.assertTrue(self.state()["open"])
@@ -838,10 +848,10 @@ class FailoverBreaker(unittest.TestCase):
         st["open"] = True
         st["opened_at"] = time.time() - 9999
         st["probed_at"] = 0.0
-        eff, _ = proxy.failover_effective("nous", self.nous)   # probe fails
+        eff, _, _ = proxy.failover_effective("nous", self.nous)   # probe fails
         self.assertIs(eff, proxy.PROFILES["direct"])
         # a second request inside the recheck window must not probe again
-        eff, _ = proxy.failover_effective("nous", self.nous)
+        eff, _, _ = proxy.failover_effective("nous", self.nous)
         self.assertIs(eff, proxy.PROFILES["direct"])
         self.assertEqual(len(fake.requests), 1)
 

@@ -224,45 +224,52 @@ def _failover_probe(name, cfg):
 
 
 def failover_effective(name, cfg):
-    """(eff_cfg, eff_name) this request should hit.
+    """(eff_cfg, eff_name) this request should hit, plus a close flag.
 
     Closed circuit: the profile's own cfg, one locked read of extra work.
     Open: the failover target's cfg — unless the recheck interval has lapsed,
     in which case one probe decides whether the profile has recovered. The
     probe happens on this request thread but outside the lock, and probed_at is
     reserved under the lock first, so concurrent requests never double-probe.
+
+    A probe success does not close the circuit (a minimal ping never carries
+    real load, and closing on a lull-pass is the close->503->reopen flap). It
+    arms a trial: this request rides the profile's OWN upstream, and the relay
+    closes the circuit only if that trial serves clean (see
+    failover_trial_close).
     """
     target = cfg.get("failover")
     if not FAILOVER_ENABLED or not target:
-        return cfg, name
+        return cfg, name, False
     tcfg = PROFILES.get(target)
     if tcfg is None or not os.path.isdir(tcfg["dir"]):
-        return cfg, name                  # target not installed; failover is moot
+        return cfg, name, False           # target not installed; failover is moot
     with _lock:
         st = _failover_state(name)
         if not st["open"]:
-            return cfg, name
+            return cfg, name, False
         if time.time() - st["probed_at"] < FAILOVER_RECHECK:
-            return tcfg, f"{name}->{target}"
+            return tcfg, f"{name}->{target}", False
         st["probed_at"] = time.time()     # this request holds the probe
     if _failover_probe(name, cfg):
         with _lock:
             st["probes"] += 1
-            if st["probes"] >= FAILOVER_PROBES_TO_CLOSE:
-                st["open"] = False
-                st["opened_at"] = 0.0
-                st["outcomes"].clear()
-                st["probes"] = 0
-                print(f"  [{name}] failover: probe ok x{FAILOVER_PROBES_TO_CLOSE}, "
-                      "closing circuit", flush=True)
-                return cfg, name
+            armed = st["probes"] >= FAILOVER_PROBES_TO_CLOSE
+        if armed:
+            # Route this request to the profile's OWN upstream as the trial.
+            # The relay closes the circuit only if this real request serves
+            # clean (failover_trial_close); a probe passing is not evidence
+            # the upstream handles real load.
+            print(f"  [{name}] failover: probe ok x{FAILOVER_PROBES_TO_CLOSE}, "
+                  f"serving a real trial", flush=True)
+            return cfg, name, True
         print(f"  [{name}] failover: probe ok ({st['probes']}/{FAILOVER_PROBES_TO_CLOSE}), "
               f"staying on {target}", flush=True)
-        return tcfg, f"{name}->{target}"
+        return tcfg, f"{name}->{target}", False
     with _lock:
         st["probes"] = 0                 # a failed probe resets the streak
     print(f"  [{name}] failover: probe failed, staying on {target}", flush=True)
-    return tcfg, f"{name}->{target}"
+    return tcfg, f"{name}->{target}", False
 
 
 def failover_record(name, cfg, eff_cfg, up, last_err):
@@ -299,6 +306,29 @@ def failover_record(name, cfg, eff_cfg, up, last_err):
                   f"routing to {cfg['failover']}", flush=True)
 
 
+def failover_trial_close(name):
+    """Close the circuit after a clean trial request on the profile's own upstream.
+
+    The half-open probe only tells us the upstream accepts a minimal ping — it
+    says nothing about real load, and a lull-passed probe followed by the next
+    heavy request 503ing is exactly the close->reopen flap this prevents. So a
+    probe success only arms a trial; the first real request the profile's own
+    upstream serves without a transient error is the evidence that closes the
+    circuit. A trial that fails (transient error / connection failure) or never
+    happens keeps the circuit open. Returns True when the circuit closed.
+    """
+    with _lock:
+        st = _failover_state(name)
+        if not st["open"]:
+            return False
+        st["open"] = False
+        st["opened_at"] = 0.0
+        st["outcomes"].clear()
+        st["probes"] = 0
+    print(f"  [{name}] failover: trial ok, closing circuit", flush=True)
+    return True
+
+
 # The full set /ds4-effort accepts. The tier map above only names the four
 # Claude Code tiers; the override file may name any of these.
 EFFORT_LEVELS = ("max", "xhigh", "high", "medium", "low", "minimal", "none")
@@ -323,7 +353,13 @@ PROFILES = {
         "model": None,
         "zdr": False,
         "spend": False,
-        "max_out": None,
+        # The direct profile is the failover target for the 1M profiles. Its
+        # endpoint counts input + completion against the same 1M cap, while
+        # Claude Code budgets 131072 output against the advertised window — so
+        # an uncapped failover session overflows at ~923K input and 400s
+        # ("maximum context length"). Same cap as the other 1M profiles keeps
+        # a failed-over request inside the endpoint's real limit.
+        "max_out": 65536,
         # Only this endpoint requires an assistant tool_use message to replay its
         # thinking block. Claude Code 2.x does replay it, so this is a guard
         # against a path that drops it, not a fix for an observed failure.
@@ -769,6 +805,7 @@ def make_handler(name, cfg):
 
             eff_cfg = cfg
             eff_name = name
+            trial = False
             # The client-sent tier, before the failover remap rewrites
             # payload["model"] to the target's literal id. should_retry must
             # see this original tier or a failed-over main-loop request would
@@ -808,7 +845,12 @@ def make_handler(name, cfg):
                         if self._relay_anthropic(body2, token):
                             return
 
-                eff_cfg, eff_name = failover_effective(name, cfg)
+                eff_cfg, eff_name, trial = failover_effective(name, cfg)
+                # An armed trial is a request routed back to the profile's OWN
+                # upstream once the half-open probes have passed. The target
+                # serving a request is not evidence the profile recovered — only
+                # the profile's own upstream handling a real request is. The
+                # relay closes the circuit on this request's success below.
 
                 note = rewrite(payload, eff_cfg)
 
@@ -891,6 +933,18 @@ def make_handler(name, cfg):
                     break
 
             failover_record(name, cfg, eff_cfg, up, last_err)
+
+            # A clean trial — the armed request that rode the profile's OWN
+            # upstream after the half-open probes passed — is the evidence the
+            # probe cannot carry: the upstream handled a real request, so the
+            # circuit closes. A transient response or connection failure keeps
+            # it open (and resets the probe streak so the next recovery starts
+            # fresh).
+            if trial and up is not None and up.status not in TRANSIENT_STATUS:
+                failover_trial_close(name)
+            elif trial and (up is None or up.status in TRANSIENT_STATUS):
+                with _lock:
+                    _failover_state(name)["probes"] = 0
 
             if up is None:
                 if isinstance(last_err, urllib.error.HTTPError):
