@@ -23,10 +23,12 @@ failure), with a report on stdout.
 import argparse
 import json
 import os
+import select
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from unittest import mock
@@ -486,23 +488,32 @@ def _go_reference_port(proc, label):
         "  <name> :<port> -> <upstream>"
     exactly like Python's serve(). The harness wants the REFERENCE_PROFILE's
     bound port (the one the corpus is fired at). Returns (port, stdout_buf).
-    """
-    buf = b""
-    while True:
-        line = proc.stdout.readline()
-        if not line:
-            raise RuntimeError(f"Go process exited before advertising a port; "
-                               f"output so far:\n{buf.decode(errors='replace')}")
-        buf += line
-        text = line.decode(errors="replace")
-        # "  <name> :<port> -> ..." — the reference profile's line.
-        prefix = f"  {REFERENCE_PROFILE} :"
-        if text.startswith(prefix):
-            port = int(text[len(prefix):].split(" ", 1)[0])
-            return port, buf
-        if label != REFERENCE_PROFILE and text.startswith("  "):
-            # A non-reference profile booting first; keep reading.
+
+    Uses select + chunked reads, not readline(): the Go binary's banner to a
+    pipe under Popen can sit in a chunk that readline()'s buffered reader does
+    not surface reliably (it blocks waiting to fill its buffer even after the
+    newline), which showed up as an intermittent hang. Chunked accumulation
+    with a line-boundary scan is deterministic.
+    while time.time() < deadline:
+        r, _, _ = select.select([proc.stdout], [], [], 2)
+        if not r:
+            if proc.poll() is not None:
+                break
             continue
+        chunk = proc.stdout.read(4096)
+        if not chunk:
+            break
+        buf += chunk
+        # Find the reference profile's banner line in the accumulated output.
+        for line in buf.split(b"\n"):
+            text = line.decode(errors="replace")
+            prefix = f"  {REFERENCE_PROFILE} :"
+            if text.startswith(prefix):
+                port = int(text[len(prefix):].split(" ", 1)[0])
+                return port, buf
+    raise RuntimeError(f"Go process never advertised a port for "
+                       f"{REFERENCE_PROFILE}; output so far:\n"
+                       f"{buf.decode(errors='replace')}")
 
 
 def _fire_go(case, fakes, flags):
