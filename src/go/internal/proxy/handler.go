@@ -36,11 +36,11 @@ func NewHandler(cfg profiles.Profile, relayTimeout time.Duration) http.Handler {
 }
 
 // ServeHTTP dispatches the request. Only POST is a relayed request: GET is
-// the spend endpoint (Task 6, 404 for now), and everything else is 501
-// (mirroring Python's do_GET/do_POST only having two methods).
+// the spend endpoint (Task 6), and everything else is 501 (mirroring Python's
+// do_GET/do_POST only having two methods).
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		h.notFound(w)
+		h.spend(w, r)
 		return
 	}
 	if r.Method != http.MethodPost {
