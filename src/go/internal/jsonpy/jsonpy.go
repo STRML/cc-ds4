@@ -350,6 +350,26 @@ func (o *OrderedValue) SetBefore(key string, v *OrderedValue, before string) {
 	o.vals[key] = v
 }
 
+// PeekModelMaxTokens reads the top-level "model" string and "max_tokens"
+// integer without re-emitting the body. The second return is whether
+// max_tokens was PRESENT as a JSON integer literal — mirroring Python's
+// isinstance(payload.get("max_tokens"), int) guard, where an absent key is
+// None and therefore not an int. A caller that needs "0 when absent" (e.g.
+// rewrite's thinking decision) should use GetInt instead; a caller that needs
+// to distinguish "no max_tokens" from "max_tokens: 0" (e.g. the classifier
+// detector) needs the presence flag.
+func PeekModelMaxTokens(data []byte) (model string, maxTokens int, ok bool) {
+	root, err := parseOrdered(data)
+	if err != nil {
+		return "", 0, false
+	}
+	if m := root.Get("model"); m != nil && m.IsString() {
+		model = m.String()
+	}
+	mt, present := root.AsInt("max_tokens")
+	return model, mt, present
+}
+
 // Val converts a Go value into an OrderedValue leaf. Supported types: string,
 // bool, int, int64, float64, *OrderedValue (passed through), and nil. Unknown
 // types become JSON null.

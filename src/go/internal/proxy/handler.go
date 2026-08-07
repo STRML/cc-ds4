@@ -12,11 +12,13 @@ import (
 
 // Handler is one profile's proxy: an HTTP handler that authenticates local
 // clients, rewrites the Claude Code request for the profile's upstream, and
-// relays it. The classifier client (a separate, no-timeout transport) is
-// added in Task 7.
+// relays it. client carries the idle-deadline DialContext wrapper (Task 3);
+// classifierClient is a SEPARATE deadline-free transport so the RELAY_TIMEOUT
+// wrapper never applies to the no-timeout classifier path.
 type Handler struct {
-	cfg    profiles.Profile
-	client *http.Client // relay client w/ idle timeout + DisableCompression
+	cfg              profiles.Profile
+	client           *http.Client // relay client w/ idle timeout + DisableCompression
+	classifierClient *http.Client // classifier client: DisableCompression, no deadline wrapper
 }
 
 // NewHandler builds a Handler for one profile. The relay transport sets
@@ -25,14 +27,27 @@ type Handler struct {
 // dial in an idle-deadline conn so a stalled upstream read trips the
 // connection, and pools aggressively (256 idle conns per host and total, the
 // scale the nightly cc-autodream fanout reaches).
-func NewHandler(cfg profiles.Profile, relayTimeout time.Duration) http.Handler {
+func NewHandler(cfg profiles.Profile, relayTimeout time.Duration) *Handler {
 	transport := &http.Transport{
 		DisableCompression:  true,
 		DialContext:         relay.DialContextWithIdleTimeout(relayTimeout),
 		MaxIdleConnsPerHost: 256,
 		MaxIdleConns:        256,
 	}
-	return &Handler{cfg: cfg, client: &http.Client{Transport: transport}}
+	// The classifier rides a separate transport with NO DialContext wrapper:
+	// Python's classifier urlopen has no timeout (proxy.py:950,987), and the
+	// per-dial idle deadline must not leak onto that no-timeout path. Shared
+	// MaxIdle settings mirror the relay transport.
+	classifierTransport := &http.Transport{
+		DisableCompression:  true,
+		MaxIdleConnsPerHost: 256,
+		MaxIdleConns:        256,
+	}
+	return &Handler{
+		cfg:              cfg,
+		client:           &http.Client{Transport: transport},
+		classifierClient: &http.Client{Transport: classifierTransport},
+	}
 }
 
 // ServeHTTP dispatches the request. Only POST is a relayed request: GET is

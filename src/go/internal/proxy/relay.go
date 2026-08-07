@@ -65,6 +65,22 @@ func modelFromJSON(body []byte) string {
 // tiers, records the outcome for the breaker BEFORE streaming, and streams the
 // response body back with flush.
 func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, upstreamURL string) {
+	// The classifier is the small ds4-high call that gates every tool call in
+	// auto mode. It is already an Anthropic-shaped request, so it is forwarded
+	// BEFORE the ds4 rewrite touches it (the sentinel/effort logic must not see
+	// it), mirroring proxy.py:821-846. Fail open to ds4 on any failure so auto
+	// mode never bricks. A request that demands ZDR (x-ds4-require-zdr header)
+	// is excluded: its ZDR provider block is injected by rewrite() on the ZDR
+	// route, and the classifier relay's whitelist cannot carry it — the marker
+	// is a routing demand, so the request stays on its ZDR route.
+	if !isZDRRequest(r) && h.isClassifier(body) {
+		if tok := classifierToken(); tok != "" {
+			if h.relayClassifier(body, classifierUpstream, tok, w) {
+				return
+			}
+		}
+	}
+
 	// The client-sent tier is captured before the rewrite remaps payload["model"]
 	// to the target's literal id, so a failed-over main-loop request does not
 	// look retryable.
