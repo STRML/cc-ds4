@@ -1,27 +1,130 @@
 // Command ds4-proxy is the Go reimplementation of src/proxy.py.
 //
-// Task 1: --ports output and the CLI shape. The server bootstrap (serve(),
-// rewrite, classifier, idle watch) lands in Task 4.
+// It serves one HTTP listener per installed profile, mirroring Python's
+// serve()/main() (proxy.py:1096-1160): --ports prints the served profiles for
+// install.sh, and the default mode binds each served profile on its port
+// (DS4_PORT_<NAME> override honored) with a proxy.Handler that rewrites and
+// relays to the profile's upstream (DS4_UPSTREAM_<NAME> override honored for
+// the differential harness).
 package main
 
 import (
 	"fmt"
+	"net"
+	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/strml/cc-ds4/src/go/internal/profiles"
+	"github.com/strml/cc-ds4/src/go/internal/proxy"
 )
 
 func main() {
+	served := profiles.Served()
+	if len(served) == 0 {
+		fmt.Fprintln(os.Stderr, "no profile directories found; nothing to serve")
+		os.Exit(1)
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "--ports" {
-		// Python's main() guards on empty served before the --ports branch,
-		// exiting 1 with this message on stderr. Mirror it for exit-code
-		// parity — an absent set of profile dirs means nothing to serve.
-		if len(profiles.Served()) == 0 {
-			fmt.Fprintln(os.Stderr, "no profile directories found; nothing to serve")
-			os.Exit(1)
+		// int() so a junk DS4_PORT_* override fails here rather than being
+		// interpolated into the plist install.sh builds from this output —
+		// mirrors proxy.py:1139-1145.
+		for _, p := range served {
+			port, err := strconv.Atoi(os.Getenv("DS4_PORT_" + up(p.Name)))
+			if err != nil {
+				port = p.Port
+			}
+			fmt.Printf("%s %d\n", p.Name, port)
 		}
-		fmt.Print(profiles.Ports())
+		os.Stdout.Sync()
 		return
 	}
-	// server bootstrap comes in Task 4
+
+	// Serve the profiles. When any DS4_UPSTREAM_* override is present (the
+	// differential-harness mode), serve ONLY the overridden profiles — the
+	// others' real ports may be owned by the host's live Python proxy, and
+	// binding them would both fail and pollute the harness. Otherwise serve
+	// every installed profile, like Python's main(). The harness and install.sh
+	// rely on the "name :port -> upstream" banner line (identical shape to
+	// Python's) to learn the bound port.
+	serveList := served
+	anyOverride := false
+	for _, p := range served {
+		if os.Getenv("DS4_UPSTREAM_"+up(p.Name)) != "" {
+			anyOverride = true
+			break
+		}
+	}
+	if anyOverride {
+		serveList = nil
+		for _, p := range served {
+			if os.Getenv("DS4_UPSTREAM_"+up(p.Name)) != "" {
+				serveList = append(serveList, p)
+			}
+		}
+	}
+	for _, p := range serveList {
+		if err := serve(p); err != nil {
+			fmt.Fprintf(os.Stderr, "  %s FAILED to bind: %v\n", p.Name, err)
+		}
+	}
+
+	select {} // run forever; the harness kills us
+}
+
+func up(s string) string {
+	b := []byte(s)
+	for i := range b {
+		if b[i] >= 'a' && b[i] <= 'z' {
+			b[i] -= 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
+func serve(p profiles.Profile) error {
+	// DS4_UPSTREAM_<NAME> overrides the upstream for the differential harness
+	// (proxy.py has no such knob; the harness points both sides at fakes).
+	upstream := p.Upstream
+	if o := os.Getenv("DS4_UPSTREAM_" + up(p.Name)); o != "" {
+		upstream = o
+	}
+
+	port, err := strconv.Atoi(os.Getenv("DS4_PORT_" + up(p.Name)))
+	if err != nil {
+		port = p.Port
+	}
+	// DS4_RELAY_TIMEOUT mirrors proxy.py's RELAY_TIMEOUT (idle socket timeout,
+	// default 60s; 0 disables).
+	relayTimeout := 60 * time.Second
+	if v := os.Getenv("DS4_RELAY_TIMEOUT"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil {
+			relayTimeout = time.Duration(secs) * time.Second
+		}
+	}
+
+	// Clone the profile with the (possibly overridden) upstream so the handler
+	// relays to the fake in harness runs.
+	pc := p
+	pc.Upstream = upstream
+
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return err
+	}
+	// The harness needs the ACTUAL bound port (a DS4_PORT_* of 0 means "pick
+	// one"); report it in Python's banner shape.
+	actual := ln.Addr().(*net.TCPAddr).Port
+	fmt.Printf("  %-11s :%d -> %s\n", p.Name, actual, upstream)
+	// The harness reads this banner line from a pipe. Go's stdout to a pipe is
+	// block-buffered — without an explicit flush the line sits in the buffer
+	// and the harness's readline() blocks forever. Sync forces it out.
+	os.Stdout.Sync()
+
+	h := proxy.NewHandler(pc, relayTimeout)
+	srv := &http.Server{Handler: h}
+	go srv.Serve(ln) //nolint:errcheck // per-profile listener; errors surface via the process
+	return nil
 }

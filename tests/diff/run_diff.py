@@ -430,19 +430,28 @@ def _fire(case, fakes, flags):
 # a prebuilt binary that ignores the fakes would otherwise exit 0 doing
 # nothing and read as a false GREEN.
 
-GO_ACCEPTS_FAKE_UPSTREAMS = False
+GO_ACCEPTS_FAKE_UPSTREAMS = True
 
 
 def _go_boot_error():
-    """A clear reason the Go side cannot be compared, or None (it can)."""
+    """A clear reason the Go side cannot be compared, or None (it can).
+
+    The harness execs a prebuilt binary (GO_BIN) rather than `go run` per case
+    — `go run`'s compile/link contending across repeated boots (and after a
+    cache clean) is what made the Go boot hang. Build it once here.
+    """
     if not GO_ACCEPTS_FAKE_UPSTREAMS:
         return "the Go proxy is not yet wired to accept fake upstreams (Task 9)"
     if not os.path.exists(GO_MAIN):
         return f"no Go cmd dir at {GO_MAIN}"
-    if not os.path.exists(GO_BIN):
-        return f"Go binary not built at {GO_BIN} — run go build first"
     if not shutil.which("go"):
-        return "no 'go' on PATH to run the binary"
+        return "no 'go' on PATH to build the binary"
+    if not os.path.exists(GO_BIN):
+        _log(f"  building Go binary: {GO_BIN}")
+        r = subprocess.run(["go", "build", "-o", GO_BIN, "."],
+                           cwd=GO_MAIN, capture_output=True)
+        if r.returncode != 0:
+            return f"go build failed: {r.stderr.decode(errors='replace')}"
     return None
 
 
@@ -451,32 +460,82 @@ def _run_go(fakes, flags):
 
     The Go side mirrors the Python oracle's serving shape: the fake upstreams
     ride in via per-profile DS4_UPSTREAM_* overrides, and the client presents
-    the profile key. Task 9 wires the actual flags/args; today this is
-    unreachable because GO_ACCEPTS_FAKE_UPSTREAMS is False.
+    the profile key. DS4_PORT_<NAME>=0 makes Go bind a free port per profile,
+    and the banner line reports the actual bound port so the harness can
+    discover it. The subprocess must be killed by the caller.
     """
     if not GO_ACCEPTS_FAKE_UPSTREAMS:              # pragma: no cover
         raise RuntimeError("Go not wired: GO_ACCEPTS_FAKE_UPSTREAMS is False")
-    args = ["go", "run", "."]
     go_env = _py_env()
     for name, fake in fakes.items():
         go_env[f"DS4_UPSTREAM_{name.upper()}"] = fake.url
-    return subprocess.Popen(args, cwd=GO_MAIN, env=go_env)
+        go_env[f"DS4_PORT_{name.upper()}"] = "0"
+        # The Go proxy's authOK reads DS4_KEY_<NAME> for the client's bearer;
+        # the harness presents CLIENT_TOKEN (or the failover target's key).
+        go_env[f"DS4_KEY_{name.upper()}"] = (
+            "ds4-direct-key" if name == FAILOVER_PROFILE else CLIENT_TOKEN)
+    return subprocess.Popen(
+        [GO_BIN], env=go_env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
-# ── comparison ───────────────────────────────────────────────────────────────
+def _go_reference_port(proc, label):
+    """Read the Go banner until the reference profile's port appears.
 
-def _fire_go(label, fakes, flags):
+    The Go main prints one line per served profile:
+        "  <name> :<port> -> <upstream>"
+    exactly like Python's serve(). The harness wants the REFERENCE_PROFILE's
+    bound port (the one the corpus is fired at). Returns (port, stdout_buf).
+    """
+    buf = b""
+    while True:
+        line = proc.stdout.readline()
+        if not line:
+            raise RuntimeError(f"Go process exited before advertising a port; "
+                               f"output so far:\n{buf.decode(errors='replace')}")
+        buf += line
+        text = line.decode(errors="replace")
+        # "  <name> :<port> -> ..." — the reference profile's line.
+        prefix = f"  {REFERENCE_PROFILE} :"
+        if text.startswith(prefix):
+            port = int(text[len(prefix):].split(" ", 1)[0])
+            return port, buf
+        if label != REFERENCE_PROFILE and text.startswith("  "):
+            # A non-reference profile booting first; keep reading.
+            continue
+
+
+def _fire_go(case, fakes, flags):
     """Run one corpus case against the Go proxy. Same result shape as _fire.
 
-    The Go binary is a subprocess: Task 9 defines how it advertises its port
-    and how the harness learns it. Until GO_ACCEPTS_FAKE_UPSTREAMS is flipped,
-    this raises so the diff loop reports a clear, per-case failure.
+    The Go binary is a subprocess booted at the same fake upstreams, its
+    reference port is read from the banner, and the corpus case (including the
+    failover warm-up) is fired against it. The fakes' recordings are folded the
+    same way _fire does.
     """
     if not GO_ACCEPTS_FAKE_UPSTREAMS:              # pragma: no cover
         raise RuntimeError("Go not wired to accept fake upstreams (Task 9)")
-    # task-9: boot _run_go, discover the listener port, fire the corpus at it,
-    # and fold the fakes' recordings via _outbound(fakes). Mirrors _fire.
-    raise NotImplementedError("Go comparison wired in Task 9")
+    label, method, path, headers, body = case
+    proc = _run_go(fakes, flags)
+    try:
+        port, _ = _go_reference_port(proc, label)
+        url = f"http://127.0.0.1:{port}"
+        if label == "failover":
+            for _ in range(3):
+                _http(url + path, method, headers, body)
+        status, raw, rbody = _http(url + path, method, headers, body)
+    finally:
+        proc.kill()
+        proc.wait()
+
+    mh = _managed_headers(raw, fakes)
+    if path == "/__spend":
+        compare = ("spend", _shape(rbody))
+    else:
+        compare = ("full", status, mh, rbody)
+
+    return {"label": label, "status": status, "headers": mh,
+            "body": rbody, "compare": compare, "outbound": _outbound(fakes)}
 
 
 def _compare_pair(py, go):
@@ -567,7 +626,7 @@ def run_diff():
         # the comparison below is the real one, not a placeholder.
         fakes, flags = _upstreams(label)
         try:
-            go = _fire_go(label, fakes, flags)
+            go = _fire_go(case, fakes, flags)
         except Exception as e:
             FAILURES.append(f"[{label}] Go boot/fire failed: {e}")
             _log(f"  go   {label}: FAILED ({e})")
