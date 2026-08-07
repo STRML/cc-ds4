@@ -17,9 +17,12 @@ import (
 // method check in ServeHTTP (GET /__spend is deliberately unauthenticated).
 func authOK(r *http.Request, cfg profiles.Profile) bool {
 	supplied := r.Header.Get("authorization")
-	expected := os.Getenv("DS4_KEY_" + strings.ToUpper(cfg.Name))
+	// Precedence parity with proxy.py's api_key(): settings.json first, then
+	// the DS4_KEY_<NAME> env override. Python reads the file first and falls
+	// back to env; Go previously had it backwards.
+	expected := readKeyFromDir(cfg.Dir)
 	if expected == "" {
-		expected = readKeyFromDir(cfg.Dir)
+		expected = os.Getenv("DS4_KEY_" + strings.ToUpper(cfg.Name))
 	}
 	if expected == "" {
 		return false

@@ -13,8 +13,8 @@ import (
 
 // TestRewriteSentinelToModel is the brief's primary parity test: a ds4-high
 // sentinel becomes the profile's real model plus reasoning_effort "high", and
-// the key lands immediately before "messages" (the byte output of the Python
-// implementation).
+// reasoning_effort appends at the end of the object — the byte output of
+// Python's json.dumps, verified against the real rewrite().
 func TestRewriteSentinelToModel(t *testing.T) {
 	cfg := profiles.Profile{Name: "nous", Model: "deepseek/deepseek-v4-flash-0731"}
 	body := []byte(`{"model": "ds4-high", "max_tokens": 32000, "thinking": {"type": "adaptive"}, "messages": []}`)
@@ -22,7 +22,41 @@ func TestRewriteSentinelToModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 32000, "thinking": {"type": "adaptive"}, "reasoning_effort": "high", "messages": []}`
+	want := `{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 32000, "thinking": {"type": "adaptive"}, "messages": [], "reasoning_effort": "high"}`
+	if string(got) != want {
+		t.Errorf("rewrite = %s\nwant %s", got, want)
+	}
+}
+
+// TestRewriteAnthropicLiteralModel pins proxy.py's third model branch: a
+// literal Anthropic id that bypassed the sentinel system (sonnet, opus,
+// claude-*) is remapped to the profile's model so nothing bills real Anthropic
+// rates, without adding reasoning_effort (Python adds none on this branch).
+func TestRewriteAnthropicLiteralModel(t *testing.T) {
+	cfg := profiles.Profile{Name: "nous", Model: "deepseek/deepseek-v4-flash-0731"}
+	body := []byte(`{"model": "claude-sonnet-5", "max_tokens": 32000, "messages": []}`)
+	got, err := rewrite(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 32000, "messages": []}`
+	if string(got) != want {
+		t.Errorf("rewrite = %s\nwant %s", got, want)
+	}
+}
+
+// TestRewriteDoesNotRemapProfileLiteral pins the negative side of the
+// Anthropic-literal branch: the profile's own upstream model id already names
+// the target, matches no Anthropic substring, and is left untouched (and no
+// reasoning_effort is invented).
+func TestRewriteDoesNotRemapProfileLiteral(t *testing.T) {
+	cfg := profiles.Profile{Name: "nous", Model: "deepseek/deepseek-v4-flash-0731"}
+	body := []byte(`{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 32000, "messages": []}`)
+	got, err := rewrite(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 32000, "messages": []}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
 	}
@@ -57,7 +91,7 @@ func TestRewriteMaxOutClamp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 65536, "reasoning_effort": "max", "messages": []}`
+	want := `{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 65536, "messages": [], "reasoning_effort": "max"}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
 	}
@@ -122,7 +156,7 @@ func TestRewriteZDR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 32000, "reasoning_effort": "low", "messages": [], "provider": {"zdr": true, "data_collection": "deny", "ignore": ["Io Net"]}}`
+	want := `{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 32000, "messages": [], "reasoning_effort": "low", "provider": {"zdr": true, "data_collection": "deny", "ignore": ["Io Net"]}}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
 	}

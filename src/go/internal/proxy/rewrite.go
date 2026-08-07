@@ -7,6 +7,8 @@
 package proxy
 
 import (
+	"strings"
+
 	"github.com/strml/cc-ds4/src/go/internal/jsonpy"
 	"github.com/strml/cc-ds4/src/go/internal/profiles"
 )
@@ -61,10 +63,17 @@ func rewrite(body []byte, cfg profiles.Profile) ([]byte, error) {
 				tier := model.String()
 				if effort, ok := effortMap[tier]; ok {
 					root.SetString("model", cfg.Model)
-					// Insert before "messages" so a freshly-set key does not
-					// land at the end of the object; that was the byte output
-					// of the Python implementation.
-					root.SetBefore("reasoning_effort", jsonpy.Val(effort), "messages")
+					// Set appends, matching Python's dict insertion order:
+					// json.dumps places reasoning_effort at the end of the
+					// object, after messages.
+					root.Set("reasoning_effort", jsonpy.Val(effort))
+				} else if isAnthropicModel(tier) {
+					// A literal Anthropic model (sonnet, claude-sonnet-4-5,
+					// opus, ...) bypassed the sentinel system and would bill
+					// real Anthropic rates on this profile's upstream. Remap it
+					// defensively, mirroring proxy.py's rewrite() third branch;
+					// no reasoning_effort is added here, exactly like Python.
+					root.SetString("model", cfg.Model)
 				}
 			}
 		}
@@ -150,6 +159,18 @@ func injectMissingThinking(root *jsonpy.OrderedValue) int {
 		}
 	}
 	return n
+}
+
+// isAnthropicModel mirrors proxy.py's _is_anthropic_model: True for a literal
+// Anthropic model id that the sentinel system missed. The ds4-* sentinels are
+// already handled by effortMap; the profiles' real upstream model ids
+// (deepseek/deepseek-v4-flash-0731, ...) must not match any of these substrings.
+func isAnthropicModel(name string) bool {
+	n := strings.ToLower(name)
+	return strings.Contains(n, "sonnet") ||
+		strings.Contains(n, "opus") ||
+		strings.Contains(n, "haiku") ||
+		strings.Contains(n, "claude-")
 }
 
 func containsStr(xs []string, s string) bool {
