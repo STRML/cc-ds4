@@ -19,6 +19,7 @@ type Handler struct {
 	cfg              profiles.Profile
 	client           *http.Client // relay client w/ idle timeout + DisableCompression
 	classifierClient *http.Client // classifier client: DisableCompression, no deadline wrapper
+	br               breaker      // failover circuit breaker (per profile)
 }
 
 // NewHandler builds a Handler for one profile. The relay transport sets

@@ -15,6 +15,17 @@ import (
 
 // effortMap maps the ds4-* sentinel Claude Code sends to the reasoning_effort
 // value the upstream accepts. This is proxy.py's EFFORT table.
+// failoverModel remaps ds4-* sentinels onto the direct target's flash model,
+// mirroring FAILOVER_MODEL in proxy.py. Flash only: the direct profile's own
+// config runs flash for every tier, and the cost difference is what makes
+// failover worth it.
+var failoverModel = map[string]string{
+	"ds4-max":   "deepseek-v4-flash[1m]",
+	"ds4-xhigh": "deepseek-v4-flash[1m]",
+	"ds4-high":  "deepseek-v4-flash[1m]",
+	"ds4-low":   "deepseek-v4-flash[1m]",
+}
+
 var effortMap = map[string]string{
 	"ds4-max":   "max",
 	"ds4-xhigh": "xhigh",
@@ -75,6 +86,16 @@ func rewrite(body []byte, cfg profiles.Profile) ([]byte, error) {
 					// no reasoning_effort is added here, exactly like Python.
 					root.SetString("model", cfg.Model)
 				}
+			}
+		} else if cfg.FailoverTarget && root.Get("model") != nil && root.Get("model").IsString() {
+			// A profile with an empty model being used as the FAILOVER TARGET
+			// (e.g. direct) takes real model names and ignores
+			// reasoning_effort. A ds4-* sentinel is remapped via FAILOVER_MODEL
+			// to flash (proxy.py:164-171); no reasoning_effort is added. A
+			// standalone direct-profile request (not a failover target) keeps
+			// the sentinel, matching Python.
+			if flash, ok := failoverModel[root.Get("model").String()]; ok {
+				root.SetString("model", flash)
 			}
 		}
 

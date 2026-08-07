@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/strml/cc-ds4/src/go/internal/jsonpy"
+	"github.com/strml/cc-ds4/src/go/internal/profiles"
 )
 
 // retryBackoff is the base sleep between retries, in seconds, scaled by
@@ -87,6 +88,42 @@ func modelFromJSON(body []byte) string {
 // to the profile's upstream, retries transient statuses for the retryable
 // tiers, records the outcome for the breaker BEFORE streaming, and streams the
 // response body back with flush.
+// effectiveUpstream returns the upstream + auth key to use, applying the
+// failover target when the breaker is open (mirroring failover_effective).
+// Returns the effective profile (own, or the target with the FAILOVER_MODEL
+// remap and the target's upstream/key overrides) plus the auth key.
+func (h *Handler) effectiveProfile() (profiles.Profile, string) {
+	eff := h.cfg
+	key := os.Getenv("DS4_KEY_" + strings.ToUpper(eff.Name))
+	if key == "" {
+		key = readKeyFromDir(eff.Dir)
+	}
+	if !h.breakerOpen() {
+		return eff, key
+	}
+	// Failover: route to the target profile's upstream, key, and config. The
+	// target's upstream honors the DS4_UPSTREAM_<NAME> override (the harness
+	// points both sides at fakes). The direct target takes real model names
+	// and ignores reasoning_effort — its cfg.Model is "" (None), so rewrite()
+	// leaves the sentinel and FAILOVER_MODEL remaps it to flash.
+	target := h.cfg.Failover
+	for _, p := range profiles.All() {
+		if p.Name == target {
+			eff = p
+			eff.FailoverTarget = true
+			if o := os.Getenv("DS4_UPSTREAM_" + strings.ToUpper(p.Name)); o != "" {
+				eff.Upstream = o
+			}
+			key = os.Getenv("DS4_KEY_" + strings.ToUpper(p.Name))
+			if key == "" {
+				key = readKeyFromDir(p.Dir)
+			}
+			return eff, key
+		}
+	}
+	return eff, key
+}
+
 func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, upstreamURL string) {
 	// The classifier is the small ds4-high call that gates every tool call in
 	// auto mode. It is already an Anthropic-shaped request, so it is forwarded
@@ -109,17 +146,24 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	// look retryable.
 	origTier := modelFromJSON(body)
 
-	rewritten, err := rewrite(body, h.cfg)
+	// Effective profile + key: the profile's own, or the failover target's
+	// when the breaker is open. The rewrite uses the EFFECTIVE config so a
+	// failed-over request is remapped for the target (FAILOVER_MODEL, no
+	// reasoning_effort), exactly like Python's failover routing.
+	effCfg, effKey := h.effectiveProfile()
+	effUpstream := effCfg.Upstream
+	rewritten, err := rewrite(body, effCfg)
 	if err == nil {
 		body = rewritten
 	}
+	effURL := strings.TrimRight(effUpstream, "/") + strings.TrimPrefix(upstreamURL, strings.TrimRight(h.cfg.Upstream, "/"))
 
 	attempts := retryAttempts(origTier)
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
 		// A fresh request per attempt with the retained body re-wound; the
 		// reader is re-created so a consumed body does not poison a retry.
-		req, err := http.NewRequest(http.MethodPost, upstreamURL, bytes.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, effURL, bytes.NewReader(body))
 		if err != nil {
 			lastErr = err
 			break
@@ -131,6 +175,9 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 		}
 		if req.Header.Get("user-agent") == "" {
 			req.Header.Set("user-agent", "curl/8.4.0")
+		}
+		if effKey != "" {
+			req.Header.Set("authorization", "Bearer "+effKey)
 		}
 		resp, err := h.client.Do(req)
 		if err != nil {
@@ -147,7 +194,7 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 		// is still being read. A mid-stream stall therefore counts the
 		// request as a HIT (the upstream served a response), not a strike.
 		h.recordOutcome(resp.StatusCode)
-		streamResponse(w, resp, h.cfg.Upstream)
+		streamResponse(w, resp, effUpstream)
 		return
 	}
 	// Pre-first-byte failure: 502 "proxy upstream failure".

@@ -24,6 +24,9 @@ type Profile struct {
 	Inject   bool
 	MaxOut   int
 	Failover string
+	// FailoverTarget marks a profile being used as a failover target (its
+	// requests get the FAILOVER_MODEL remap, not the profile's own rewrite).
+	FailoverTarget bool
 }
 
 // All returns every profile with a leading "~" in Dir expanded to the user's
