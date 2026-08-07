@@ -76,8 +76,25 @@ func Ports() string {
 	for _, p := range Served() {
 		sb.WriteString(p.Name)
 		sb.WriteByte(' ')
-		sb.WriteString(strconv.Itoa(p.Port))
+		sb.WriteString(strconv.Itoa(effectivePort(p)))
 		sb.WriteByte('\n')
 	}
 	return sb.String()
+}
+
+// effectivePort returns the port a profile serves on, honoring a
+// DS4_PORT_<NAME> environment override. src/proxy.py resolves it with
+// int(os.environ.get(f"DS4_PORT_{name.upper()}", cfg["port"])), so an override
+// is the name uppercased and the value must parse as an int. Python would
+// crash on a junk value; Go falls back to the table port instead. An empty
+// override also falls back, matching Python's default handling.
+func effectivePort(p Profile) int {
+	raw := os.Getenv("DS4_PORT_" + strings.ToUpper(p.Name))
+	if raw == "" {
+		return p.Port
+	}
+	if n, err := strconv.Atoi(raw); err == nil {
+		return n
+	}
+	return p.Port
 }
