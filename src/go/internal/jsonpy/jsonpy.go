@@ -206,6 +206,33 @@ func (o *OrderedValue) Has(key string) bool {
 	return ok
 }
 
+// Keys returns the object's keys in their original order. The slice is a copy,
+// so it stays valid across mutations — including deleting keys mid-iteration.
+func (o *OrderedValue) Keys() []string {
+	if o == nil || !o.obj {
+		return nil
+	}
+	return append([]string(nil), o.keys...)
+}
+
+// Delete removes key from the object, preserving the order of the remaining
+// keys. No-op when o is not an object or key is absent.
+func (o *OrderedValue) Delete(key string) {
+	if o == nil || !o.obj {
+		return
+	}
+	if _, ok := o.vals[key]; !ok {
+		return
+	}
+	for i, k := range o.keys {
+		if k == key {
+			o.keys = append(o.keys[:i], o.keys[i+1:]...)
+			break
+		}
+	}
+	delete(o.vals, key)
+}
+
 // IsString reports whether o holds a JSON string.
 func (o *OrderedValue) IsString() bool {
 	return o != nil && o.isStr

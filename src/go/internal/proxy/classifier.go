@@ -17,6 +17,53 @@ import (
 // it at a fake (Python tests patch the module constant the same way).
 var classifierUpstream = "https://api.anthropic.com/v1/messages"
 
+// classifierModel is the Anthropic model id the classifier body is pointed at.
+// ds4-high is not a valid Anthropic model, so a classifier routed to the
+// subscription must carry a real one. Mirrors classifier.py's default model
+// for the Anthropic route.
+const classifierModel = "claude-sonnet-5"
+
+// classifierUA is the User-Agent the classifier relay sends. api.anthropic.com
+// is Cloudflare-fronted and 403s default stdlib UAs; Python's _relay_anthropic
+// sends the same curl/8.4.0 identity (proxy.py:77-79,1045), and the main relay
+// path mirrors it at relay.go:109-111.
+const classifierUA = "curl/8.4.0"
+
+// anthropicKeys are the request keys that belong on an Anthropic Messages
+// call. Everything else in the ds4 payload — provider (zdr block), metadata,
+// reasoning_effort — is ds4-specific and must not leave the proxy.
+// Whitelisting keeps a misdetected request from carrying ds4 body shape to
+// Anthropic. Mirrors classifier.py's _ANTHROPIC_KEYS.
+var anthropicKeys = map[string]bool{
+	"model":       true,
+	"max_tokens":  true,
+	"thinking":    true,
+	"messages":    true,
+	"tools":       true,
+	"tool_choice": true,
+	"system":      true,
+	"stream":      true,
+	"temperature": true,
+}
+
+// classifierBody returns the classifier request pointed at Anthropic: only the
+// Anthropic-relevant keys are kept (order-preserving), with model set to a
+// real Anthropic id. The ds4-specific fields (provider, reasoning_effort,
+// metadata) are dropped — Anthropic does not accept them on the subscription,
+// and they must not carry ds4 body shape across. Mirrors classifier.py's
+// classifier_body(); the whitelist runs BEFORE the model swap, exactly as
+// Python builds the dict from the payload and then sets model.
+func classifierBody(data []byte, model string) ([]byte, error) {
+	return jsonpy.Marshal(data, func(root *jsonpy.OrderedValue) {
+		for _, k := range root.Keys() {
+			if !anthropicKeys[k] {
+				root.Delete(k)
+			}
+		}
+		root.SetString("model", model)
+	})
+}
+
 // anthropicVersion is the API version header the classifier relay sends,
 // matching classifier.py's ANTHROPIC_VERSION.
 const anthropicVersion = "2023-06-01"
@@ -61,7 +108,11 @@ func classifierToken() string {
 // is streamed as-is — the classifier's shape is Anthropic's own, so a 400
 // means Claude Code sent something unexpected and failing open would mask it.
 func (h *Handler) relayClassifier(body []byte, endpoint string, token string, w http.ResponseWriter) bool {
-	raw, err := jsonpy.Marshal(body, nil)
+	// Whitelist the body to Anthropic's keys and swap the model BEFORE it is
+	// sent: the raw ds4 body carries "model": "ds4-high" (not a valid Anthropic
+	// model, so Anthropic would 400 every call) plus ds4-specific fields that
+	// must not ride to api.anthropic.com.
+	raw, err := classifierBody(body, classifierModel)
 	if err != nil {
 		return false
 	}
@@ -73,6 +124,9 @@ func (h *Handler) relayClassifier(body []byte, endpoint string, token string, w 
 	req.Header.Set("anthropic-version", anthropicVersion)
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("content-length", fmt.Sprint(len(raw)))
+	// api.anthropic.com is Cloudflare-fronted and 403s default stdlib UAs;
+	// mirror the main relay path's curl identity (relay.go:109-111).
+	req.Header.Set("user-agent", classifierUA)
 	// deadline-free client
 	resp, err := h.classifierClient.Do(req)
 	if err != nil {

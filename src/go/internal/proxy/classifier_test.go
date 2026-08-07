@@ -47,19 +47,22 @@ func TestIsClassifierBoundary(t *testing.T) {
 
 // TestRelayClassifierRoutesToAnthropic pins the classifier path: a
 // classifier-shaped request is POSTed to the Anthropic endpoint with the
-// subscription token, and the 200 is streamed back as-is. The body is
-// re-emitted byte-preserving (no rewrite); the whitelist/model-swap body
-// transform is a parity concern the differential harness owns, not this
-// relay's contract.
+// subscription token, and the 200 is streamed back as-is. It also pins the
+// outbound body: the ds4 body is whitelisted to Anthropic's keys with the
+// model swapped to a real Anthropic id, so ds4-high and the ds4-specific
+// fields never reach api.anthropic.com, and the relay carries the curl
+// User-Agent that Cloudflare requires.
 func TestRelayClassifierRoutesToAnthropic(t *testing.T) {
 	var mu sync.Mutex
-	var gotAuth, gotVersion, gotCT string
+	var gotAuth, gotVersion, gotCT, gotUA, gotBody string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.Copy(io.Discard, r.Body)
+		b, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		gotAuth = r.Header.Get("authorization")
 		gotVersion = r.Header.Get("anthropic-version")
 		gotCT = r.Header.Get("content-type")
+		gotUA = r.Header.Get("user-agent")
+		gotBody = string(b)
 		mu.Unlock()
 		w.Header().Set("content-type", "application/json")
 		io_WriteString(w, `{"id": "msg_cls", "content": []}`)
@@ -70,7 +73,10 @@ func TestRelayClassifierRoutesToAnthropic(t *testing.T) {
 	h := NewHandler(cfg, time.Minute)
 	// Point the classifier at the fake Anthropic; the profile upstream is a
 	// dead host so a fail-open would hang, proving the classifier handled it.
-	if !h.relayClassifier([]byte(`{"model": "ds4-high", "max_tokens": 2048, "messages": []}`), up.URL, "sk-ant-oat01-test", httptest.NewRecorder()) {
+	// The payload deliberately carries ds4-specific fields (reasoning_effort,
+	// provider, metadata) that must be stripped before the body is sent.
+	body := `{"model": "ds4-high", "max_tokens": 2048, "reasoning_effort": 80, "provider": {"require": "zdr"}, "metadata": {"k": "v"}, "messages": [{"role": "user", "content": "hi"}]}`
+	if !h.relayClassifier([]byte(body), up.URL, "sk-ant-oat01-test", httptest.NewRecorder()) {
 		t.Fatal("relayClassifier returned false on a 200")
 	}
 	mu.Lock()
@@ -83,6 +89,25 @@ func TestRelayClassifierRoutesToAnthropic(t *testing.T) {
 	}
 	if !strings.Contains(gotCT, "application/json") {
 		t.Errorf("content-type = %q, want application/json", gotCT)
+	}
+	if gotUA != "curl/8.4.0" {
+		t.Errorf("user-agent = %q, want curl/8.4.0", gotUA)
+	}
+	// The body must be whitelisted: model swapped to a real Anthropic id, and
+	// no ds4-specific key riding across.
+	if !strings.Contains(gotBody, `"model": "claude-sonnet-5"`) {
+		t.Errorf("body = %s, want model swapped to claude-sonnet-5", gotBody)
+	}
+	for _, banned := range []string{"ds4-high", "reasoning_effort", "provider", "metadata"} {
+		if strings.Contains(gotBody, banned) {
+			t.Errorf("body = %s, must not contain %q", gotBody, banned)
+		}
+	}
+	// The Anthropic keys survive the whitelist.
+	for _, kept := range []string{`"max_tokens": 2048`, `"messages": [{"role": "user", "content": "hi"}]`} {
+		if !strings.Contains(gotBody, kept) {
+			t.Errorf("body = %s, want kept key %q", gotBody, kept)
+		}
 	}
 }
 
