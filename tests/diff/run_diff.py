@@ -50,17 +50,40 @@ REFERENCE_PROFILE = "nous"
 FAILOVER_PROFILE = "direct"
 CLIENT_TOKEN = "client-token"
 
-# Failover trips fast so the corpus's failover case actually exercises it:
-# window=3, rate=1.0 -> every transient error is a strike, three open it.
-PY_FAILOVER = {"FAILOVER_WINDOW": "3", "FAILOVER_RATE": "1.0",
-               "FAILOVER_RECHECK": "60", "FAILOVER_PROBES_TO_CLOSE": "1"}
-
-# Proxy module constants that are bound at import time from DS4_* env — a boot
-# that wants to change them must patch the module attribute, not the env.
-MODULE_KNOBS = {"FAILOVER_WINDOW": int, "FAILOVER_RATE": float,
-                "FAILOVER_RECHECK": int, "FAILOVER_PROBES_TO_CLOSE": int,
-                "RETRY_ATTEMPTS": int, "RETRY_BACKOFF": float,
-                "RELAY_TIMEOUT": int, "NOTHINK_BELOW": int}
+# Proxy module constants that are bound at import time from DS4_* env (or
+# hardcoded) — a boot that wants to change them must patch the module
+# attribute, not the env: env is read at import, so an EnvGuard at serve()
+# time is too late. HARNESS_DEFAULTS pins every such constant to a
+# deterministic value so a host running a real ds4 config in the ambient env
+# cannot leak it into the self-test; a scenario's __env__ overrides on top.
+MODULE_KNOBS = {
+    "FAILOVER_ENABLED": lambda s: s == "1",
+    "FAILOVER_WINDOW": int,
+    "FAILOVER_RATE": float,
+    "FAILOVER_RECHECK": int,
+    "FAILOVER_PROBE_TIMEOUT": int,
+    "FAILOVER_PROBES_TO_CLOSE": int,
+    "RETRY_ATTEMPTS": int,
+    "RETRY_BACKOFF": float,
+    "RELAY_TIMEOUT": int,
+    "NOTHINK_BELOW": int,
+    "IDLE_EXIT": int,
+    "REQUIRE_OWNED_SOCKET": lambda s: s == "1",
+}
+HARNESS_DEFAULTS = {
+    "FAILOVER_ENABLED": "1",
+    "FAILOVER_WINDOW": "12",
+    "FAILOVER_RATE": "0.25",
+    "FAILOVER_RECHECK": "60",
+    "FAILOVER_PROBE_TIMEOUT": "6",
+    "FAILOVER_PROBES_TO_CLOSE": "1",
+    "RETRY_ATTEMPTS": "3",
+    "RETRY_BACKOFF": "1.5",
+    "RELAY_TIMEOUT": "60",
+    "NOTHINK_BELOW": "8192",
+    "IDLE_EXIT": "900",
+    "REQUIRE_OWNED_SOCKET": "0",
+}
 
 FAILURES = []
 
@@ -124,7 +147,12 @@ def _upstreams(label):
         # otherwise be retried twice per request, which both muddies the
         # strike accounting and costs 1.5s+3s of backoff per warm-up.
         flags[REFERENCE_PROFILE] = {"failover": FAILOVER_PROFILE}
-        flags["__env__"] = {"RETRY_ATTEMPTS": "1", "RETRY_BACKOFF": "0"}
+        # window=3, rate=1.0 -> every transient error is a strike, three open
+        # it. These are import-time-bound, so they ride MODULE_KNOBS, not env.
+        flags["__env__"] = {"RETRY_ATTEMPTS": "1", "RETRY_BACKOFF": "0",
+                            "FAILOVER_WINDOW": "3", "FAILOVER_RATE": "1.0",
+                            "FAILOVER_RECHECK": "60",
+                            "FAILOVER_PROBES_TO_CLOSE": "1"}
         flaky = fake({("POST", "/v1/messages"): fake_upstream.messages_503})
         direct = fake({("POST", "/v1/messages"): fake_upstream.sse_ok})
         return {REFERENCE_PROFILE: flaky, FAILOVER_PROFILE: direct}, flags
@@ -168,12 +196,16 @@ def _profile_cfg(name, tmp_dir, upstream, flags):
 
 
 def _py_env():
-    """A clean env for the oracle: failover knobs, no stray DS4_PORT_* or
-    socket-activation requirements, classifier routed to the ds4 relay."""
+    """A clean env for the oracle.
+
+    DS4_PORT_* overrides would point a profile at a port that is not ours, and
+    the classifier route must be ds4 (the reference upstream). Everything else
+    that reads DS4_* at import time is pinned by HARNESS_DEFAULTS patched onto
+    the module in _boot_python — env here is only what the running proxy reads
+    at request time.
+    """
     env = dict(os.environ)
-    env.update(PY_FAILOVER)
     env["DS4_CLASSIFIER"] = "ds4"
-    env.pop("DS4_REQUIRE_OWNED_SOCKET", None)
     for k in list(env):
         if k.startswith("DS4_PORT_"):
             env.pop(k)
@@ -203,10 +235,14 @@ def _boot_python(fakes, flags):
 
     # Module constants are bound at import, so a scenario's env knob must be
     # applied to the module attribute itself — patching env at boot is too
-    # late for them. Every knob is restored on stop.
+    # late for them. Every knob is restored on stop. HARNESS_DEFAULTS pins the
+    # constants first so ambient DS4_* cannot leak into the self-test, then
+    # the case's __env__ overrides on top.
     knob_patches = []
+    knob_values = dict(HARNESS_DEFAULTS)
+    knob_values.update(flags.get("__env__", {}))
     for name, convert in MODULE_KNOBS.items():
-        raw = flags.get("__env__", {}).get(name)
+        raw = knob_values.get(name)
         if raw is not None:
             old = getattr(proxy, name)
             setattr(proxy, name, convert(raw))
@@ -449,6 +485,9 @@ def _compare_pair(py, go):
     diffs = []
 
     if py["compare"][0] == "spend":
+        if py["status"] != go["status"]:
+            diffs.append(f"[{label}] /__spend status: python={py['status']} "
+                         f"go={go['status']}")
         if py["compare"][1] != go["compare"][1]:
             diffs.append(f"[{label}] /__spend shape: python={py['compare'][1]} "
                          f"go={go['compare'][1]}")
