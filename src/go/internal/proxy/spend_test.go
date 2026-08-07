@@ -12,10 +12,10 @@ import (
 
 // TestSpendShape pins the Phase A contract for /__spend: status + JSON shape
 // only, not byte parity. The GET path must return 200 with a JSON body whose
-// shape includes the keys the statusline reads (remaining/usage/model/profile).
-// Real pricing/ledger is a separate, Go unit-tested implementation (later).
+// shape matches Python's spend() base (model/zdr). Real pricing/ledger is a
+// separate, Go unit-tested implementation (later).
 func TestSpendShape(t *testing.T) {
-	h := NewHandler(profiles.Profile{Name: "nous", Model: "deepseek/deepseek-v4-flash-0731", Spend: true}, time.Minute)
+	h := NewHandler(profiles.Profile{Name: "nous", Model: "deepseek/deepseek-v4-flash-0731", ZDR: true, Spend: true}, time.Minute)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/__spend", nil))
 	if rec.Code != http.StatusOK {
@@ -25,9 +25,9 @@ func TestSpendShape(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
 		t.Fatalf("invalid JSON: %v (%s)", err, rec.Body.String())
 	}
-	// shape: has keys like remaining/usage — assert a known one is present
-	if _, ok := m["remaining"]; !ok {
-		t.Errorf("missing 'remaining' in %s", rec.Body.String())
+	// shape: Python's spend() always emits model + zdr.
+	if _, ok := m["model"]; !ok {
+		t.Errorf("missing 'model' in %s", rec.Body.String())
 	}
 }
 

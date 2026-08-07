@@ -91,6 +91,22 @@ func serve(p profiles.Profile) error {
 	if o := os.Getenv("DS4_UPSTREAM_" + up(p.Name)); o != "" {
 		upstream = o
 	}
+	// Per-profile cfg overrides the harness passes for the corpus cases
+	// (inject/spend/failover), mirroring the flags the Python oracle applies
+	// via _profile_cfg. DS4_<KNOB>_<NAME>=1/0.
+	if v := os.Getenv("DS4_INJECT_" + up(p.Name)); v == "1" {
+		p.Inject = true
+	} else if v == "0" {
+		p.Inject = false
+	}
+	if v := os.Getenv("DS4_SPEND_" + up(p.Name)); v == "1" {
+		p.Spend = true
+	} else if v == "0" {
+		p.Spend = false
+	}
+	if v := os.Getenv("DS4_FAILOVER_" + up(p.Name)); v != "" {
+		p.Failover = v
+	}
 
 	port, err := strconv.Atoi(os.Getenv("DS4_PORT_" + up(p.Name)))
 	if err != nil {
@@ -118,10 +134,19 @@ func serve(p profiles.Profile) error {
 	// one"); report it in Python's banner shape.
 	actual := ln.Addr().(*net.TCPAddr).Port
 	fmt.Printf("  %-11s :%d -> %s\n", p.Name, actual, upstream)
-	// The harness reads this banner line from a pipe. Go's stdout to a pipe is
-	// block-buffered — without an explicit flush the line sits in the buffer
-	// and the harness's readline() blocks forever. Sync forces it out.
 	os.Stdout.Sync()
+
+	// The harness can also discover ports via a file instead of the pipe
+	// banner (pipe reads under the harness's subprocess select proved
+	// unreliable). When DS4_PORT_FILE is set, append "<name>:<port>" so the
+	// harness can poll the file.
+	if pf := os.Getenv("DS4_PORT_FILE"); pf != "" {
+		f, err := os.OpenFile(pf, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err == nil {
+			fmt.Fprintf(f, "%s:%d\n", p.Name, actual)
+			f.Close()
+		}
+	}
 
 	h := proxy.NewHandler(pc, relayTimeout)
 	srv := &http.Server{Handler: h}

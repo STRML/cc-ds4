@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +16,26 @@ import (
 // retryBackoff is the base sleep between retries, in seconds, scaled by
 // attempt number: 1.5s * (attempt+1), matching RETRY_BACKOFF in proxy.py. It
 // is a variable so tests can shrink the sleep; production always sees 1.5.
+// DS4_RETRY_BACKOFF overrides it (the differential harness pins it to 0).
 var retryBackoff = 1.5
+
+// retryAttemptsOverride mirrors RETRY_ATTEMPTS in proxy.py: an env override
+// the differential harness sets to 1 for the failover case so Python's
+// in-proxy retries don't muddy the breaker strike accounting.
+var retryAttemptsOverride = 0
+
+func init() {
+	if v := os.Getenv("DS4_RETRY_BACKOFF"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			retryBackoff = f
+		}
+	}
+	if v := os.Getenv("DS4_RETRY_ATTEMPTS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			retryAttemptsOverride = n
+		}
+	}
+}
 
 // skipRelayHeaders are hop-by-hop and proxy-owned headers dropped when the
 // client's request is forwarded upstream, matching the filter in proxy.py's
@@ -37,6 +57,9 @@ var skipRelayHeaders = map[string]bool{
 // request, or a raw Anthropic model) is treated as retryable by the same
 // rule.
 func retryAttempts(origTier string) int {
+	if retryAttemptsOverride > 0 {
+		return retryAttemptsOverride
+	}
 	if origTier != "ds4-xhigh" {
 		return 3
 	}

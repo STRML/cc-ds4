@@ -462,13 +462,19 @@ def _run_go(fakes, flags):
 
     The Go side mirrors the Python oracle's serving shape: the fake upstreams
     ride in via per-profile DS4_UPSTREAM_* overrides, and the client presents
-    the profile key. DS4_PORT_<NAME>=0 makes Go bind a free port per profile,
-    and the banner line reports the actual bound port so the harness can
-    discover it. The subprocess must be killed by the caller.
+    the profile key. DS4_PORT_<NAME>=0 makes Go bind a free port per profile.
+    The Go binary writes its bound ports to a file (DS4_PORT_FILE) so the
+    harness discovers them by polling the file — the pipe-banner handshake
+    proved unreliable under this session's subprocess select. The subprocess
+    must be killed by the caller.
     """
     if not GO_ACCEPTS_FAKE_UPSTREAMS:              # pragma: no cover
         raise RuntimeError("Go not wired: GO_ACCEPTS_FAKE_UPSTREAMS is False")
     go_env = _py_env()
+    port_file = tempfile.NamedTemporaryFile(
+        prefix="ds4-go-ports-", suffix=".txt", delete=False)
+    go_env["DS4_PORT_FILE"] = port_file.name
+    port_file.close()
     for name, fake in fakes.items():
         go_env[f"DS4_UPSTREAM_{name.upper()}"] = fake.url
         go_env[f"DS4_PORT_{name.upper()}"] = "0"
@@ -476,44 +482,48 @@ def _run_go(fakes, flags):
         # the harness presents CLIENT_TOKEN (or the failover target's key).
         go_env[f"DS4_KEY_{name.upper()}"] = (
             "ds4-direct-key" if name == FAILOVER_PROFILE else CLIENT_TOKEN)
-    return subprocess.Popen(
+        # Per-profile cfg overrides the Python oracle gets via flags; the Go
+        # binary reads the same ones from DS4_<KNOB>_<NAME> env.
+        for knob, val in flags.get(name, {}).items():
+            go_env[f"DS4_{knob.upper()}_{name.upper()}"] = (
+                "1" if val is True else "0" if val is False else str(val))
+    # The case's __env__ knobs (RETRY_ATTEMPTS, RETRY_BACKOFF, FAILOVER_*)
+    # ride to the Go binary as DS4_<KEY> so it mirrors Python's import-time
+    # constants for the same scenario.
+    for knob, val in flags.get("__env__", {}).items():
+        go_env[f"DS4_{knob.upper()}"] = str(val)
+    proc = subprocess.Popen(
         [GO_BIN], env=go_env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    proc.ds4_port_file = port_file.name
+    return proc
 
 
 def _go_reference_port(proc, label):
-    """Read the Go banner until the reference profile's port appears.
+    """Poll the Go port file until the reference profile's port appears.
 
-    The Go main prints one line per served profile:
-        "  <name> :<port> -> <upstream>"
-    exactly like Python's serve(). The harness wants the REFERENCE_PROFILE's
-    bound port (the one the corpus is fired at). Returns (port, stdout_buf).
-
-    Uses select + chunked reads, not readline(): the Go binary's banner to a
-    pipe under Popen can sit in a chunk that readline()'s buffered reader does
-    not surface reliably (it blocks waiting to fill its buffer even after the
-    newline), which showed up as an intermittent hang. Chunked accumulation
-    with a line-boundary scan is deterministic.
+    The Go binary writes "<name>:<port>" lines to DS4_PORT_FILE as it binds
+    each profile. Polling a file is deterministic — the pipe-banner handshake
+    (readline/select on the subprocess pipe) hung under this session despite
+    the data being readable via os.read. Returns (port, stdout_buf).
     """
     buf = b""
     deadline = time.time() + 30
+    port_file = getattr(proc, "ds4_port_file", None)
     while time.time() < deadline:
-        r, _, _ = select.select([proc.stdout.fileno()], [], [], 2)
-        if not r:
-            if proc.poll() is not None:
-                break
-            continue
-        chunk = proc.stdout.read(4096)
-        if not chunk:
+        if port_file and os.path.exists(port_file):
+            try:
+                content = open(port_file).read()
+            except OSError:
+                content = ""
+            if content:
+                for line in content.splitlines():
+                    name, _, port = line.partition(":")
+                    if name == REFERENCE_PROFILE and port:
+                        return int(port), content.encode()
+        if proc.poll() is not None and not (port_file and os.path.exists(port_file)):
             break
-        buf += chunk
-        # Find the reference profile's banner line in the accumulated output.
-        for line in buf.split(b"\n"):
-            text = line.decode(errors="replace")
-            prefix = f"  {REFERENCE_PROFILE} :"
-            if text.startswith(prefix):
-                port = int(text[len(prefix):].split(" ", 1)[0])
-                return port, buf
+        time.sleep(0.2)
     raise RuntimeError(f"Go process never advertised a port for "
                        f"{REFERENCE_PROFILE}; output so far:\n"
                        f"{buf.decode(errors='replace')}")

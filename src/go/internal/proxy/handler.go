@@ -68,7 +68,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !authOK(r, h.cfg) {
+		// Match Python's _json(401, ...) body + content-type (proxy.py:757).
+		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(401)
+		io.WriteString(w, `{"error": {"message": "invalid proxy client credential"}}`)
 		return
 	}
 	// A malformed or absent Content-Length must not panic or reach upstream;

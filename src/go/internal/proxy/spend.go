@@ -23,11 +23,12 @@ func (h *Handler) spend(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	// Shape-parity with Python's spend() (proxy.py): the base body is always
+	// {"model", "zdr"}; pricing/remaining are added only when the upstream
+	// credits/pricing calls resolve (which they 404 against the harness fake).
 	out := map[string]any{
-		"remaining": 0.0,
-		"usage":     0.0,
-		"model":     h.cfg.Model,
-		"profile":   h.cfg.Name,
+		"model": h.cfg.Model,
+		"zdr":   h.cfg.ZDR,
 	}
 	json.NewEncoder(w).Encode(out)
 }
