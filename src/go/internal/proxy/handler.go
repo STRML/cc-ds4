@@ -36,11 +36,16 @@ func NewHandler(cfg profiles.Profile, relayTimeout time.Duration) http.Handler {
 }
 
 // ServeHTTP dispatches the request. Only POST is a relayed request: GET is
-// the spend endpoint (Task 6), and everything else is 501 (mirroring Python's
-// do_GET/do_POST only having two methods).
+// the /__spend endpoint (Task 6), and everything else is 501 (mirroring
+// Python's do_GET/do_POST only having two methods). A GET to any other path
+// 404s, exactly as Python's do_GET does for a non-/__spend path.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		h.spend(w, r)
+		if r.URL.Path == "/__spend" {
+			h.spend(w, r)
+		} else {
+			h.notFound(w)
+		}
 		return
 	}
 	if r.Method != http.MethodPost {

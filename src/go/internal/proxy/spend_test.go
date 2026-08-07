@@ -49,3 +49,17 @@ func TestSpendDisabled404(t *testing.T) {
 		t.Errorf("missing 'error' in %s", rec.Body.String())
 	}
 }
+
+// TestSpendNonSpendPath404 pins the GET-routing parity: a GET to any path
+// other than /__spend 404s even on a Spend profile, exactly as Python's
+// do_GET does (`if self.path != "/__spend"`). This is the byte-parity edge
+// the statusline-only /__spend client never exercises but a misbehaving
+// client would.
+func TestSpendNonSpendPath404(t *testing.T) {
+	h := NewHandler(profiles.Profile{Name: "nous", Spend: true}, time.Minute)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/some/other/path", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for non-/__spend GET", rec.Code)
+	}
+}
