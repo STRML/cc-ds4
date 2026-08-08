@@ -3,9 +3,11 @@ package proxy
 import (
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/strml/cc-ds4/src/go/internal/jsonpy"
 	"github.com/strml/cc-ds4/src/go/internal/profiles"
 	"github.com/strml/cc-ds4/src/go/internal/relay"
 )
@@ -83,8 +85,36 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error": {"message": "cannot read request body"}}`, 400)
 		return
 	}
+	body, requiresZDR, err := requestRequiresZDR(body, r)
+	if err != nil {
+		http.Error(w, `{"error": {"message": "invalid JSON body"}}`, http.StatusBadRequest)
+		return
+	}
+	if requiresZDR && (!h.cfg.ZDR || os.Getenv("DS4_ZDR") == "0") {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		io.WriteString(w, `{"error": {"message": "request requires ZDR, but this route cannot enforce it"}}`)
+		return
+	}
 	upstreamURL := strings.TrimRight(h.cfg.Upstream, "/") + r.URL.RequestURI()
 	h.relay(w, r, body, upstreamURL)
+}
+
+func requestRequiresZDR(body []byte, r *http.Request) ([]byte, bool, error) {
+	header := strings.ToLower(strings.TrimSpace(r.Header.Get("x-ds4-require-zdr")))
+	required := header == "1" || header == "true" || header == "yes"
+	clean, err := jsonpy.Marshal(body, func(root *jsonpy.OrderedValue) {
+		if v := root.Get("ds4_require_zdr"); v != nil && v.Raw() == "true" {
+			required = true
+		}
+		root.Delete("ds4_require_zdr")
+	})
+	if err != nil {
+		// Python forwards malformed JSON unchanged; only the header signal can
+		// still trigger the ZDR gate in that case.
+		return body, required, nil
+	}
+	return clean, required, nil
 }
 
 func (h *Handler) notFound(w http.ResponseWriter) {

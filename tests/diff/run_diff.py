@@ -280,6 +280,7 @@ def _boot_python(fakes, flags):
         raise RuntimeError("could not locate python proxy listener")
 
     def stop():
+        srv.shutdown()
         srv.server_close()
         proxy._failover.clear()
         for name, old in knob_patches:

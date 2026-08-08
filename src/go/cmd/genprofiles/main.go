@@ -90,6 +90,11 @@ func boolValue(body, key string) bool {
 	return false
 }
 
+func hasKey(body, key string) bool {
+	re := regexp.MustCompile(`(?m)^\s*"` + regexp.QuoteMeta(key) + `"\s*:`)
+	return re.MatchString(body)
+}
+
 func main() {
 	root := findRepoRoot()
 	path := filepath.Join(root, "src", "proxy.py")
@@ -109,9 +114,18 @@ func main() {
 		"package profiles\n\n"+
 		"var generatedProfiles = []Profile{\n"...)
 
-	for _, m := range profileRE.FindAllSubmatch(block[1], -1) {
+	entries := profileRE.FindAllSubmatch(block[1], -1)
+	if len(entries) == 0 {
+		fatal(fmt.Errorf("PROFILES block contains no profile entries"))
+	}
+	for _, m := range entries {
 		name := string(m[1])
 		body := string(m[2])
+		for _, key := range []string{"port", "dir", "upstream", "model", "zdr", "spend", "inject", "max_out", "failover"} {
+			if !hasKey(body, key) {
+				fatal(fmt.Errorf("profile %q is missing key %q", name, key))
+			}
+		}
 
 		dir := homePrefixRE.ReplaceAllString(strValue(body, "dir"), "~/")
 

@@ -44,6 +44,8 @@ NON_ASCII = {"model": "ds4-xhigh", "max_tokens": 32000,
 # JSON decoders with int/float blindness would mangle it (9007199254740992
 # round-trips, 9007199254740993 does not).
 BIG_INT = {"model": "ds4-xhigh", "max_tokens": 32000, "temperature": 9007199254740993}
+EXPONENT_FLOAT = {"model": "ds4-xhigh", "max_tokens": 32000,
+                  "temperature": 1e100, "top_p": -2.5e-7}
 RETRY_503 = {"model": "ds4-high", "max_tokens": 32000,
              "messages": [{"role": "user", "content": "retry me"}]}
 FAILOVER = {"model": "ds4-high", "max_tokens": 32000,
@@ -75,6 +77,7 @@ def cases():
         ("thinking-inject", "POST", "/v1/messages", dict(post), _fmt(THINKING_INJECT)),
         ("non-ascii", "POST", "/v1/messages", dict(post), _fmt(NON_ASCII)),
         ("big-int", "POST", "/v1/messages", dict(post), _fmt(BIG_INT)),
+        ("exponent-float", "POST", "/v1/messages", dict(post), _fmt(EXPONENT_FLOAT)),
         ("retry-503", "POST", "/v1/messages", dict(post), _fmt(RETRY_503)),
         ("failover", "POST", "/v1/messages", dict(post), _fmt(FAILOVER)),
         ("auth-missing", "POST", "/v1/messages", {}, _fmt(AUTH_MISSING)),

@@ -21,7 +21,12 @@ var classifierUpstream = "https://api.anthropic.com/v1/messages"
 // ds4-high is not a valid Anthropic model, so a classifier routed to the
 // subscription must carry a real one. Mirrors classifier.py's default model
 // for the Anthropic route.
-const classifierModel = "claude-sonnet-5"
+func classifierModelName() string {
+	if model := strings.TrimSpace(os.Getenv("DS4_CLASSIFIER_MODEL")); model != "" {
+		return model
+	}
+	return "claude-sonnet-5"
+}
 
 // classifierUA is the User-Agent the classifier relay sends. api.anthropic.com
 // is Cloudflare-fronted and 403s default stdlib UAs; Python's _relay_anthropic
@@ -112,7 +117,7 @@ func (h *Handler) relayClassifier(body []byte, endpoint string, token string, w 
 	// sent: the raw ds4 body carries "model": "ds4-high" (not a valid Anthropic
 	// model, so Anthropic would 400 every call) plus ds4-specific fields that
 	// must not ride to api.anthropic.com.
-	raw, err := classifierBody(body, classifierModel)
+	raw, err := classifierBody(body, classifierModelName())
 	if err != nil {
 		return false
 	}
