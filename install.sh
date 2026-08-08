@@ -112,6 +112,11 @@ valid_port() {
 # DS4_PORT_<PROFILE> overrides the port and proxy.py is what honours it, so the
 # effective value comes from there instead of a second copy of the mapping. The
 # hardcoded PORT above is the fallback for a --dir that proxy.py cannot see.
+# Build the Go proxy BEFORE the --ports lookup and before any write: a
+# missing toolchain or a failed build leaves the profile files and plist
+# untouched, and the binary must exist for its --ports to be consulted.
+[ "$WANT_PROXY" = 1 ] && build_go
+
 # Without this the plist binds the override while settings.json still points at
 # the default, which leaves Claude talking to a port nothing listens on.
 if [ "$WANT_PROXY" = 1 ]; then
@@ -124,10 +129,6 @@ valid_port "$PORT" || {
   exit 1
 }
 [ -f "$SETTINGS" ] || { echo "no settings.json in $DIR" >&2; exit 1; }
-
-# Build the Go proxy BEFORE any write: a missing toolchain or a failed build
-# leaves the profile files and plist untouched.
-[ "$WANT_PROXY" = 1 ] && build_go
 
 command -v cship >/dev/null 2>&1 || echo "warning: cship not on PATH; edit CSHIP in $SCRIPT" >&2
 
@@ -144,7 +145,7 @@ echo "config:   $DIR/cship.toml  (from $(basename "$CONFIG"))"
 echo "memory:   $MEMLINK_DST -> $MEMLINK_SRC  (shares memory with ~/.claude)"
 echo "command:  $CMD_DST -> $CMD_SRC  (/ds4-effort sets effort mid-session)"
 if [ "$WANT_PROXY" = 1 ]; then
-  echo "proxy:    $GO_BIN  (this profile on :$PORT)"
+  echo "proxy:    $REPO/src/proxy.py  (this profile on :$PORT; Go binary built, cutover awaits socket activation)"
   echo "hook:     $HOOK_DST -> $HOOK_SRC  (SessionStart kickstart)"
   echo "base URL: http://127.0.0.1:$PORT"
   [ "$(uname)" = Darwin ] && echo "agent:    $PLIST"
@@ -374,10 +375,10 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
       <string>${sock_port}</string>
     </dict>
 "
-  done < <("$GO_BIN" --ports)
+  done < <(/usr/bin/python3 "$REPO/src/proxy.py" --ports)
 
   if [ -z "$PLIST_SOCKETS" ]; then
-    echo "agent:    ds4-proxy --ports listed no profiles; not writing plist" >&2
+    echo "agent:    proxy.py --ports listed no profiles; not writing plist" >&2
     exit 1
   fi
 
@@ -390,9 +391,16 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   <key>Label</key>
   <string>$LABEL</string>
 
+  <!-- The Go proxy is built and smoke-tested above, but the PRODUCTION agent
+       stays on Python until the Go binary implements socket activation
+       (launch_activate_socket fd collection). Under the launchd Sockets
+       contract launchd owns the ports; the Go binary's plain net.Listen would
+       fail to bind and the port would hang rather than refuse. Flip this array
+       to "$GO_BIN" once that lands. -->
   <key>ProgramArguments</key>
   <array>
-    <string>$GO_BIN</string>
+    <string>/usr/bin/python3</string>
+    <string>$REPO/src/proxy.py</string>
   </array>
 
   <!-- These are the DS4_* knobs present when install.sh ran, e.g.

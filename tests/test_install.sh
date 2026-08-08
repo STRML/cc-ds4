@@ -58,20 +58,19 @@ PY_EXIT=$?
 # cover the non-destructive surface. The symlink/cleanup/launch-agent paths are
 # manually verified per install.sh's own "Verify the bar renders" note.
 
-# --- Go proxy preflight: a missing toolchain is rejected ---------------------
-# install.sh's build_go() must refuse to build when `go` is absent. We test the
-# toolchain preflight directly: a PATH that genuinely lacks `go` must make the
-# `command -v go` check fail (the whole reason for the preflight). Build a
-# minimal PATH dir that has no go and no shims, and run build_go's own check.
-SHIM="$(mktemp -d "${TMPDIR:-/tmp}/ds4-shim.XXXXXX")"
-# PATH with no `go`: just the shim dir (empty) + /usr/bin:/bin (which has no go
-# on this host) — so command -v go finds nothing.
-if PATH="$SHIM:/usr/bin:/bin" command -v go >/dev/null 2>&1; then
-  echo "note - host has go outside the masked PATH; preflight check relies on command -v"
-  echo "ok   - Go preflight: command -v go is the guard (go exists on real PATH)"
+# --- Go proxy preflight: build_go runs before the --ports lookup -------------
+# The I1 fix: install.sh must build the Go binary BEFORE consulting its
+# --ports output (a fresh checkout has no binary; running --ports first would
+# die with exit 127 under set -euo pipefail before the toolchain preflight).
+# Structural check: build_go's call must appear before the --ports lookup.
+BUILD_LINE="$(grep -n '&& build_go' "$REPO/install.sh" | head -1 | cut -d: -f1)"
+# The --ports USAGE line (the eff= lookup), not build_go's internal smoke check.
+PORTS_LINE="$(grep -n 'eff="\$("\$GO_BIN" --ports' "$REPO/install.sh" | head -1 | cut -d: -f1)"
+if [ -n "$BUILD_LINE" ] && [ -n "$PORTS_LINE" ] && [ "$BUILD_LINE" -lt "$PORTS_LINE" ]; then
+  echo "ok   - Go preflight: build_go (line $BUILD_LINE) precedes --ports lookup (line $PORTS_LINE)"
 else
-  echo "ok   - Go preflight: command -v go fails on a PATH without go"
+  echo "FAIL - Go preflight: build_go not ordered before the --ports lookup"
+  FAILED=1
 fi
-rm -rf "$SHIM"
 
 exit "$FAILED"
