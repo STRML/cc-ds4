@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"os"
 	"strconv"
@@ -156,10 +157,23 @@ func (h *Handler) probeUpstream(cfg profiles.Profile) bool {
 	if err != nil {
 		return false
 	}
-	req.Header.Set("authorization", "Bearer "+os.Getenv("DS4_KEY_"+strings.ToUpper(cfg.Name)))
+	// The probe key must fall back to the profile dir's settings.json, not just
+	// DS4_KEY_<NAME> env — in production the keys live in the settings.json
+	// files (api_key reads the file first, proxy.py:484-498). A probe with an
+	// empty bearer gets a 401 and the circuit would never recover.
+	key := os.Getenv("DS4_KEY_" + strings.ToUpper(cfg.Name))
+	if key == "" {
+		key = readKeyFromDir(cfg.Dir)
+	}
+	req.Header.Set("authorization", "Bearer "+key)
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("user-agent", "curl/8.4.0")
-	resp, err := h.client.Do(req)
+	// The probe has its own absolute timeout (FAILOVER_PROBE_TIMEOUT), not the
+	// relay's idle deadline — a stalled probe must not hold the request long.
+	ctx, cancel := context.WithTimeout(context.Background(),
+		time.Duration(failoverProbeTimeout)*time.Second)
+	defer cancel()
+	resp, err := h.client.Do(req.WithContext(ctx))
 	if err != nil {
 		return false
 	}

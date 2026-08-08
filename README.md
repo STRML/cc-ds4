@@ -458,7 +458,7 @@ It installs five things and backs up `settings.json` first:
 | | where it lands | why |
 |---|---|---|
 | status line | `<profile>/ds4-statusline.py` → this checkout | `git pull` updates it |
-| proxy | one launch agent running `src/proxy.py` from this checkout, socket-activated | serves every profile, one port each. A Go rewrite (`src/go/`) is byte-compatible and differential-harness GREEN; it replaces Python once it implements launchd socket activation |
+| proxy | one launch agent running `src/proxy.py` from this checkout, socket-activated | serves every profile, one port each. A Go rewrite (`src/go/`) is byte-compatible and differential-harness GREEN; it replaces Python once the cutover checklist lands (socket activation, vision rewrite, effort override, real /__spend, classifier zdr/ds4 routes, ZDR 409 gate, sessions_live idle-exit) |
 | kickstart hook | `<profile>/ds4-proxy-kickstart.sh` → this checkout, registered as `SessionStart` | starts the proxy so a cold session doesn't hit connection-refused |
 | memory link | `<profile>/ds4-link-memory.sh` → this checkout, run at install and on every SessionStart | shares project memory with the real `~/.claude` |
 | `cship.toml` | copied into the profile directory | meant to be edited |

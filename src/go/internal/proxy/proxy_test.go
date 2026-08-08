@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/strml/cc-ds4/src/go/internal/profiles"
 )
@@ -225,6 +226,79 @@ func TestRewriteInjectDoesNotRunWhenThinkingDisabled(t *testing.T) {
 	want := `{"model": "ds4-high", "max_tokens": 1000, "messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}], "thinking": {"type": "disabled"}}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
+	}
+}
+
+// TestRelayPreFirstByteStall pins the pre-first-byte stall: an upstream that
+// accepts the connection but never sends a response must yield the 502
+// "proxy upstream failure" (mirroring Python's no-response path).
+func TestRelayPreFirstByteStall(t *testing.T) {
+	// An upstream that never writes a response: the client's idle-deadline
+	// wrapper fires on the upstream read and the relay 502s.
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Hold the connection open without responding; the relay's idle
+		// deadline (RELAY_TIMEOUT) bounds this. A short deadline keeps the
+		// test fast.
+		time.Sleep(2 * time.Second)
+	}))
+	defer up.Close()
+
+	t.Setenv("DS4_KEY_NOUS", "test")
+	cfg := profiles.Profile{Name: "nous", Upstream: up.URL, Model: "deepseek/deepseek-v4-flash-0731"}
+	h := NewHandler(cfg, 200*time.Millisecond) // short relay idle timeout
+
+	body := `{"model": "ds4-high", "max_tokens": 32000, "messages": []}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("authorization", "Bearer test")
+
+	rr := httptest.NewRecorder()
+	start := time.Now()
+	h.ServeHTTP(rr, req)
+	elapsed := time.Since(start)
+
+	if rr.Code != 502 {
+		t.Fatalf("status = %d, want 502 (body %s)", rr.Code, rr.Body.String())
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("502 took %v — the idle deadline should have fired, not the upstream sleep", elapsed)
+	}
+	if !strings.Contains(rr.Body.String(), "proxy upstream failure") {
+		t.Errorf("body = %q, want proxy-upstream-failure", rr.Body.String())
+	}
+}
+
+// TestRelayMidStreamStall pins the mid-stream stall: an upstream that sends
+// headers + one chunk then goes silent must NOT become a clean 502 — the
+// partial 200 already went out, so the connection just dies.
+func TestRelayMidStreamStall(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		io.WriteString(w, "event: message_start\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		time.Sleep(2 * time.Second) // hang after the partial body
+	}))
+	defer up.Close()
+
+	t.Setenv("DS4_KEY_NOUS", "test")
+	cfg := profiles.Profile{Name: "nous", Upstream: up.URL, Model: "deepseek/deepseek-v4-flash-0731"}
+	h := NewHandler(cfg, 200*time.Millisecond)
+
+	body := `{"model": "ds4-high", "max_tokens": 32000, "messages": []}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("authorization", "Bearer test")
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	// The header was already committed as a 200; the body has the partial SSE.
+	// It must NOT be a 502 (a clean 502 after headers would be a parity break).
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want 200 (partial, not 502; body %q)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "event: message_start") {
+		t.Errorf("body = %q, want the partial SSE frame", rr.Body.String())
 	}
 }
 
