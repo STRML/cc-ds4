@@ -44,6 +44,13 @@ NON_ASCII = {"model": "ds4-xhigh", "max_tokens": 32000,
 # JSON decoders with int/float blindness would mangle it (9007199254740992
 # round-trips, 9007199254740993 does not).
 BIG_INT = {"model": "ds4-xhigh", "max_tokens": 32000, "temperature": 9007199254740993}
+# Exponent floats. jsonpy formats float64 with strconv.FormatFloat(t, 'f', -1, 64)
+# and Python json.dumps uses repr(float) — both spell 1.5e-07 as "1.5e-07" and
+# 1e100 as "1e+100". A JSON round-trip that re-decodes to a float would mangle
+# the exponent spelling (e.g. 1e-07 -> 1e-8), so the harness pins both proxies
+# reproducing the original bytes.
+EXPONENT = {"model": "ds4-xhigh", "max_tokens": 32000,
+            "temperature": 1.5e-07, "top_p": 1e100}
 RETRY_503 = {"model": "ds4-high", "max_tokens": 32000,
              "messages": [{"role": "user", "content": "retry me"}]}
 FAILOVER = {"model": "ds4-high", "max_tokens": 32000,
@@ -75,6 +82,7 @@ def cases():
         ("thinking-inject", "POST", "/v1/messages", dict(post), _fmt(THINKING_INJECT)),
         ("non-ascii", "POST", "/v1/messages", dict(post), _fmt(NON_ASCII)),
         ("big-int", "POST", "/v1/messages", dict(post), _fmt(BIG_INT)),
+        ("exponent-float", "POST", "/v1/messages", dict(post), _fmt(EXPONENT)),
         ("retry-503", "POST", "/v1/messages", dict(post), _fmt(RETRY_503)),
         ("failover", "POST", "/v1/messages", dict(post), _fmt(FAILOVER)),
         ("auth-missing", "POST", "/v1/messages", {}, _fmt(AUTH_MISSING)),
