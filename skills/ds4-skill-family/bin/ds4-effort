@@ -13,7 +13,13 @@ case "$PROFILE" in
   openrouter|nous) ;;
   *) echo "error:unknown profile $PROFILE"; exit 1 ;;
 esac
-DIR="$HOME/.claude-$PROFILE"
+# The openrouter profile's config dir is ~/.claude-or-ds4, not the naive
+# ~/.claude-openrouter (src/proxy.py's PROFILES table is the source of truth
+# for these dirs).
+case "$PROFILE" in
+  openrouter) DIR="$HOME/.claude-or-ds4" ;;
+  *)          DIR="$HOME/.claude-$PROFILE" ;;
+esac
 FILE="$DIR/effort-override"
 LEVEL="${1:-}"
 if [ -z "$LEVEL" ]; then

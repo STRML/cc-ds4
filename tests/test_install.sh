@@ -58,4 +58,19 @@ PY_EXIT=$?
 # cover the non-destructive surface. The symlink/cleanup/launch-agent paths are
 # manually verified per install.sh's own "Verify the bar renders" note.
 
+# --- Go proxy preflight: build_go runs before the --ports lookup -------------
+# The I1 fix: install.sh must build the Go binary BEFORE consulting its
+# --ports output (a fresh checkout has no binary; running --ports first would
+# die with exit 127 under set -euo pipefail before the toolchain preflight).
+# Structural check: build_go's call must appear before the --ports lookup.
+BUILD_LINE="$(grep -n '&& build_go' "$REPO/install.sh" | head -1 | cut -d: -f1)"
+# The --ports USAGE line (the eff= lookup), not build_go's internal smoke check.
+PORTS_LINE="$(grep -n 'eff="\$("\$GO_BIN" --ports' "$REPO/install.sh" | head -1 | cut -d: -f1)"
+if [ -n "$BUILD_LINE" ] && [ -n "$PORTS_LINE" ] && [ "$BUILD_LINE" -lt "$PORTS_LINE" ]; then
+  echo "ok   - Go preflight: build_go (line $BUILD_LINE) precedes --ports lookup (line $PORTS_LINE)"
+else
+  echo "FAIL - Go preflight: build_go not ordered before the --ports lookup"
+  FAILED=1
+fi
+
 exit "$FAILED"

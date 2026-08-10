@@ -26,6 +26,40 @@ PROFILE="" DIR="" DRY=0 WANT_PROXY=1
 LABEL="com.strml.cc-ds4.proxy"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
+# The Go proxy binary, built from this checkout. install.sh builds it and the
+# plist ProgramArguments exec it. The Python proxy (src/proxy.py) is superseded
+# by the Go rewrite; the differential harness proved byte-compatibility.
+GO_DIR="$REPO/src/go"
+GO_BIN="$GO_DIR/cmd/ds4-proxy/ds4-proxy"
+
+# build_go: toolchain preflight + build. Runs BEFORE any write so a missing go
+# or a failed build leaves the profile files and plist untouched.
+build_go() {
+  if ! command -v go >/dev/null 2>&1; then
+    echo "go not found on PATH — cannot build the ds4-proxy binary" >&2
+    exit 1
+  fi
+  go_version="$(go version 2>/dev/null | sed -n 's/^go version go\([0-9.]*\).*/\1/p')"
+  if [ -z "$go_version" ]; then
+    echo "could not determine go version" >&2
+    exit 1
+  fi
+  # Go 1.26 is the floor (the module's go.mod pins it).
+  if ! awk -F. -v v="$go_version" 'BEGIN { exit !(v+0 >= 1.26) }'; then
+    echo "go $go_version is too old; need >= 1.26 (go.mod pins 1.26.5)" >&2
+    exit 1
+  fi
+  ( cd "$GO_DIR" && go build -o "$GO_BIN" ./cmd/ds4-proxy ) || {
+    echo "go build of the ds4-proxy binary failed" >&2
+    exit 1
+  }
+  # Verify the binary serves --ports before writing anything that depends on it.
+  if ! "$GO_BIN" --ports >/dev/null 2>&1; then
+    echo "built ds4-proxy binary failed its --ports smoke check" >&2
+    exit 1
+  fi
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile)  PROFILE="${2:-}"; shift 2 ;;
@@ -78,10 +112,15 @@ valid_port() {
 # DS4_PORT_<PROFILE> overrides the port and proxy.py is what honours it, so the
 # effective value comes from there instead of a second copy of the mapping. The
 # hardcoded PORT above is the fallback for a --dir that proxy.py cannot see.
+# Build the Go proxy BEFORE the --ports lookup and before any write: a
+# missing toolchain or a failed build leaves the profile files and plist
+# untouched, and the binary must exist for its --ports to be consulted.
+[ "$WANT_PROXY" = 1 ] && build_go
+
 # Without this the plist binds the override while settings.json still points at
 # the default, which leaves Claude talking to a port nothing listens on.
 if [ "$WANT_PROXY" = 1 ]; then
-  eff="$(/usr/bin/python3 "$REPO/src/proxy.py" --ports 2>/dev/null \
+  eff="$("$GO_BIN" --ports 2>/dev/null \
          | awk -v p="$PROFILE" '$1 == p {print $2}')"
   [ -n "$eff" ] && PORT="$eff"
 fi
@@ -106,7 +145,7 @@ echo "config:   $DIR/cship.toml  (from $(basename "$CONFIG"))"
 echo "memory:   $MEMLINK_DST -> $MEMLINK_SRC  (shares memory with ~/.claude)"
 echo "command:  $CMD_DST -> $CMD_SRC  (/ds4-effort sets effort mid-session)"
 if [ "$WANT_PROXY" = 1 ]; then
-  echo "proxy:    $REPO/src/proxy.py  (this profile on :$PORT)"
+  echo "proxy:    $REPO/src/proxy.py  (this profile on :$PORT; Go binary built, cutover awaits socket activation)"
   echo "hook:     $HOOK_DST -> $HOOK_SRC  (SessionStart kickstart)"
   echo "base URL: http://127.0.0.1:$PORT"
   [ "$(uname)" = Darwin ] && echo "agent:    $PLIST"
@@ -352,6 +391,12 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   <key>Label</key>
   <string>$LABEL</string>
 
+  <!-- The Go proxy is built and smoke-tested above, but the PRODUCTION agent
+       stays on Python until the Go binary implements socket activation
+       (launch_activate_socket fd collection). Under the launchd Sockets
+       contract launchd owns the ports; the Go binary's plain net.Listen would
+       fail to bind and the port would hang rather than refuse. Flip this array
+       to "$GO_BIN" once that lands. -->
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/python3</string>
@@ -438,7 +483,8 @@ PLISTEOF
       fi
       echo "agent:    loaded $LABEL"
     else
-      echo "agent:    plist written but launchctl bootstrap failed (exit $?); re-run install.sh or kickstart manually" >&2
+      echo "agent:    plist written but launchctl bootstrap failed; re-run install.sh or kickstart manually" >&2
+      exit 1
     fi
   fi
 

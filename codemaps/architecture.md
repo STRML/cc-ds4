@@ -32,6 +32,12 @@ install.sh      symlinks statusline/proxy/hooks into a profile
 One process serves all profiles, each on its own port. Reads `PROFILES` table;
 socket-activated by launchd on macOS.
 
+> A Go rewrite (`src/go/`, this repo) is byte-compatible with this proxy and
+> the differential harness (`tests/diff/run_diff.py`) is GREEN against it —
+> the Go proxy matches this Python proxy on the Phase A corpus. Production
+> stays on this Python proxy until the Go binary implements launchd socket
+> activation; the swap is gated on the harness staying green.
+
 - **Request rewrite** (`rewrite`): maps `ds4-*` sentinel model → real upstream
   model + `reasoning_effort`; disables thinking when `max_tokens <= NOTHINK_BELOW`;
   injects ZDR block; injects missing thinking blocks (direct only).
