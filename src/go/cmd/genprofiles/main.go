@@ -90,6 +90,43 @@ func boolValue(body, key string) bool {
 	return false
 }
 
+// hasValue reports whether any field regex matched the key in the body. A key
+// present but None ("model": None) matches none of the value regexps and
+// reports false — that is correct: None is a legitimate "absent" value.
+func hasValue(body, key string) bool {
+	for _, m := range strFieldRE.FindAllStringSubmatch(body, -1) {
+		if m[1] == key {
+			return true
+		}
+	}
+	for _, m := range intFieldRE.FindAllStringSubmatch(body, -1) {
+		if m[1] == key {
+			return true
+		}
+	}
+	for _, m := range boolFieldRE.FindAllStringSubmatch(body, -1) {
+		if m[1] == key {
+			return true
+		}
+	}
+	return false
+}
+
+// requireKeys is the generator's format-fragility guard. The regexes are
+// exact-format dependent; a key renamed or removed in proxy.py would otherwise
+// read as its zero value (0, "", false) and ship a silently wrong table — the
+// exact failure the old generator had no defense against. Every profile must
+// carry every key the emitted Profile struct needs. Keys whose value is None
+// (model/failover) are expected to be absent and are excluded via hasValue.
+func requireKeys(name, body string) error {
+	for _, k := range []string{"port", "dir", "upstream", "zdr", "spend", "inject", "max_out"} {
+		if !hasValue(body, k) {
+			return fmt.Errorf("%s: required key %q not found in profile body", name, k)
+		}
+	}
+	return nil
+}
+
 func main() {
 	root := findRepoRoot()
 	path := filepath.Join(root, "src", "proxy.py")
@@ -112,6 +149,9 @@ func main() {
 	for _, m := range profileRE.FindAllSubmatch(block[1], -1) {
 		name := string(m[1])
 		body := string(m[2])
+		if err := requireKeys(name, body); err != nil {
+			fatal(err)
+		}
 
 		dir := homePrefixRE.ReplaceAllString(strValue(body, "dir"), "~/")
 
