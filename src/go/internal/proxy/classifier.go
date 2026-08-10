@@ -17,11 +17,23 @@ import (
 // it at a fake (Python tests patch the module constant the same way).
 var classifierUpstream = "https://api.anthropic.com/v1/messages"
 
-// classifierModel is the Anthropic model id the classifier body is pointed at.
-// ds4-high is not a valid Anthropic model, so a classifier routed to the
-// subscription must carry a real one. Mirrors classifier.py's default model
-// for the Anthropic route.
+// classifierModel is the default Anthropic model id the classifier body is
+// pointed at. ds4-high is not a valid Anthropic model, so a classifier routed
+// to the subscription must carry a real one. Mirrors classifier.py's default
+// model for the Anthropic route. DS4_CLASSIFIER_MODEL overrides it (the ledger
+// noted Go hardcoded the default; the env knob is Python-parity).
 const classifierModel = "claude-sonnet-5"
+
+// classifierModelOverride returns DS4_CLASSIFIER_MODEL when set, else the
+// default. Mirrors classifier.py reading the same env key (DS4_CLASSIFIER_MODEL
+// never reaches the proxy in the harness's hermetic defaults, so the default
+// always wins there — tests cover the override explicitly).
+func classifierModelOverride() string {
+	if v := strings.TrimSpace(os.Getenv("DS4_CLASSIFIER_MODEL")); v != "" {
+		return v
+	}
+	return classifierModel
+}
 
 // classifierUA is the User-Agent the classifier relay sends. api.anthropic.com
 // is Cloudflare-fronted and 403s default stdlib UAs; Python's _relay_anthropic
@@ -112,7 +124,7 @@ func (h *Handler) relayClassifier(body []byte, endpoint string, token string, w 
 	// sent: the raw ds4 body carries "model": "ds4-high" (not a valid Anthropic
 	// model, so Anthropic would 400 every call) plus ds4-specific fields that
 	// must not ride to api.anthropic.com.
-	raw, err := classifierBody(body, classifierModel)
+	raw, err := classifierBody(body, classifierModelOverride())
 	if err != nil {
 		return false
 	}

@@ -45,6 +45,26 @@ func TestIsClassifierBoundary(t *testing.T) {
 	}
 }
 
+// TestClassifierModelOverride pins the DS4_CLASSIFIER_MODEL env knob: when
+// set, the classifier body carries it; when unset or blank, the default
+// claude-sonnet-5 is used. classifierBody is what the relay sends upstream,
+// so asserting the rewritten "model" is the override reaching the wire.
+func TestClassifierModelOverride(t *testing.T) {
+	t.Setenv("DS4_CLASSIFIER_MODEL", "claude-sonnet-5-20250929")
+	raw, err := classifierBody([]byte(`{"model": "ds4-high", "max_tokens": 2048}`), classifierModelOverride())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"model": "claude-sonnet-5-20250929"`) {
+		t.Fatalf("override model not in rewritten body: %s", raw)
+	}
+
+	t.Setenv("DS4_CLASSIFIER_MODEL", "")
+	if got := classifierModelOverride(); got != classifierModel {
+		t.Fatalf("empty env should fall back to default, got %q", got)
+	}
+}
+
 // TestRelayClassifierRoutesToAnthropic pins the classifier path: a
 // classifier-shaped request is POSTed to the Anthropic endpoint with the
 // subscription token, and the 200 is streamed back as-is. It also pins the
