@@ -124,13 +124,10 @@ def _upstreams(label):
       flags  — per-profile cfg overrides the oracle and (later) the Go side
                must share (inject / spend / failover declaration)
     """
-    fakes = []
     flags = {}
 
     def fake(routes):
-        f = helpers.FakeUpstream(routes)
-        fakes.append(f)
-        return f
+        return helpers.FakeUpstream(routes)
 
     if label == "retry-503":
         # One fake, 503-then-200: the proxy's own retry loop re-drives the

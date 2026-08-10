@@ -349,34 +349,6 @@ func (o *OrderedValue) AsInt(key string) (int, bool) {
 	return int(n), true
 }
 
-// SetBefore stores v under key, inserting key immediately before the existing
-// key before. When key already exists it is updated in place (position kept);
-// when before is absent the key is appended, like Set.
-func (o *OrderedValue) SetBefore(key string, v *OrderedValue, before string) {
-	if o == nil || !o.obj {
-		return
-	}
-	if _, ok := o.vals[key]; ok {
-		o.vals[key] = v
-		return
-	}
-	idx := -1
-	for i, k := range o.keys {
-		if k == before {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		o.Set(key, v)
-		return
-	}
-	o.keys = append(o.keys, "")
-	copy(o.keys[idx+1:], o.keys[idx:])
-	o.keys[idx] = key
-	o.vals[key] = v
-}
-
 // PeekModelMaxTokens reads the top-level "model" string and "max_tokens"
 // integer without re-emitting the body. The second return is whether
 // max_tokens was PRESENT as a JSON integer literal — mirroring Python's
