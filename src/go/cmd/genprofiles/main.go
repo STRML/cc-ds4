@@ -21,9 +21,10 @@ var (
 	// PROFILES block opens at column 0 and closes at the first column-0 "}".
 	profilesRE = regexp.MustCompile(`(?sm)^PROFILES = \{(.*?)^\}`)
 	// One profile entry: '"name": {' ... closing '    },' (4-space indent).
-	// The name class is [\w-]+ (not \w+) so hyphenated profile names parse —
-	// a valid Python key like "staging-profile" was silently dropped before.
-	profileRE = regexp.MustCompile(`(?sm)"([\w-]+)": \{(.*?)^    \}`)
+	// The name is matched as ANY quoted string (not a restricted \w/[\w-]
+	// class): a valid Python profile key can carry dots or spaces
+	// ("staging.profile"), and a restricted class would silently drop it.
+	profileRE = regexp.MustCompile(`(?sm)"([^"]+)": \{(.*?)^    \}`)
 
 	// Per-field parsers, applied within one profile's body. A key whose value
 	// is None ("model": None, "failover": None, "max_out": None) never matches

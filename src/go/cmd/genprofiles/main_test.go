@@ -123,12 +123,13 @@ func TestExpressionValuesRejected(t *testing.T) {
 	}
 }
 
-// TestProfileREHyphen pins that a hyphenated profile name parses — a valid
-// Python key like "staging-profile" must not be silently dropped by the
-// generator (the name class is [\w-]+, not \w+).
-func TestProfileREHyphen(t *testing.T) {
-	block := `PROFILES = {
-    "staging-profile": {
+// TestProfileRENames pins that any valid quoted profile name parses — hyphens,
+// dots, and spaces are all legal in a Python dict key, and a restricted name
+// class would silently drop a profile like "staging.profile".
+func TestProfileRENames(t *testing.T) {
+	for _, name := range []string{"staging-profile", "staging.profile", "staging profile"} {
+		block := `PROFILES = {
+    "` + name + `": {
         "port": 31600,
         "dir": f"{HOME}/.claude-staging",
         "upstream": "https://example.com",
@@ -140,9 +141,10 @@ func TestProfileREHyphen(t *testing.T) {
         "failover": None,
     },
 }`
-	matches := profileRE.FindAllSubmatch([]byte(block), -1)
-	if len(matches) != 1 || string(matches[0][1]) != "staging-profile" {
-		t.Fatalf("hyphenated profile not parsed: %d matches, want [staging-profile]", len(matches))
+		matches := profileRE.FindAllSubmatch([]byte(block), -1)
+		if len(matches) != 1 || string(matches[0][1]) != name {
+			t.Fatalf("profile %q not parsed: %d matches, want [%s]", name, len(matches), name)
+		}
 	}
 }
 
