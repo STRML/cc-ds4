@@ -7,10 +7,11 @@ import (
 
 // TestRequireKeys pins the generator's format-fragility guard: a profile body
 // missing a required key must fail loudly instead of emitting a zero value.
-// The generator's value regexes are exact-format dependent, so a key renamed
-// or removed in proxy.py would otherwise read as 0/""/false and ship a wrong
-// table. Keys whose value is None (model/failover/max_out) legitimately match
-// no value regexp and must NOT trip the guard.
+// Every key the emitted Profile struct needs must be PRESENT — Python reads
+// them with bare key access (cfg["max_out"] raises KeyError on absence) — and
+// a present-but-wrong-typed value must be caught, not silently zeroed. Keys
+// whose value is None (model/failover/max_out) are legal but must still be
+// present.
 func TestRequireKeys(t *testing.T) {
 	good := `        "port": 31500,
         "dir": f"{HOME}/.claude-ds4",
@@ -26,9 +27,8 @@ func TestRequireKeys(t *testing.T) {
 		t.Fatalf("well-formed body rejected: %v", err)
 	}
 
-	for _, missing := range []string{"port", "dir", "upstream", "zdr", "spend", "inject"} {
-		// Keys are quoted in the table, so rename the quoted key ("port" ->
-		// "portx"); an unquoted "port:" never occurs and would be a silent no-op.
+	// Every required key must be present, including the None-valued ones.
+	for _, missing := range []string{"port", "dir", "upstream", "zdr", "spend", "inject", "model", "failover", "max_out"} {
 		bad := strings.Replace(good, `"`+missing+`"`, `"`+missing+`x"`, 1)
 		if err := requireKeys("direct", bad); err == nil {
 			t.Errorf("body missing %q accepted", missing)
@@ -43,21 +43,14 @@ func TestRequireKeys(t *testing.T) {
 		{"zdr", `"zdr": "False"`},          // string where bool belongs
 		{"inject", `"inject": 1`},          // int where bool belongs
 		{"dir", `"dir": 123`},              // int where str belongs
-		{"max_out", `"max_out": "65536"`},  // string where int belongs (present-but-wrong)
+		{"max_out", `"max_out": "65536"`},  // string where int belongs
+		{"model", `"model": 123`},          // int where str-or-None belongs
+		{"failover", `"failover": 123`},    // int where str-or-None belongs
 	} {
-		// Replace the key's correct-typed line with the wrong-typed one.
 		bad := strings.Replace(good, `"`+typed.key+`":`, typed.wrong+`,`, 1)
 		if err := requireKeys("direct", bad); err == nil {
 			t.Errorf("type-mismatch for %q accepted (would emit zero value)", typed.key)
 		}
-	}
-
-	// max_out may legitimately be absent/None (Python's clamp is truthiness-
-	// gated, proxy.py:499), so a body WITHOUT max_out must still pass.
-	noMaxOut := strings.Replace(good, `        "max_out": 65536,
-`, "", 1)
-	if err := requireKeys("direct", noMaxOut); err != nil {
-		t.Fatalf("max_out absent/None should be accepted, got %v", err)
 	}
 
 	// A float max_out (e.g. 0.5) must be rejected: it matches intFieldRE's
@@ -75,24 +68,31 @@ func TestRequireKeys(t *testing.T) {
 			t.Errorf("non-int max_out %q accepted (would emit zero value)", bad)
 		}
 	}
-	// max_out: None remains valid.
+
+	// max_out: None remains valid (Python: cfg["max_out"] present but falsy).
 	if err := requireKeys("direct", strings.Replace(good, `        "max_out": 65536,
 `, `        "max_out": None,
 `, 1)); err != nil {
 		t.Fatalf("max_out: None should be accepted, got %v", err)
 	}
+	// model/failover: None remain valid too.
+	if err := requireKeys("direct", strings.Replace(good, `        "model": None,
+`, `        "model": None,
+`, 1)); err != nil {
+		t.Fatalf("model: None should be accepted, got %v", err)
+	}
 }
 
-// TestEnsureProfiles pins the coverage guard: the parse must yield EXACTLY the
-// expected profile set. A zero-match parse (indent reformat), a partial parse
-// (one profile's closing brace reformatted), or an unexpected extra profile are
-// all bugs that would silently ship a wrong generated table.
+// TestEnsureProfiles pins the coverage guard: the parse must contain every
+// required profile with no duplicates. A zero-match parse (indent reformat), a
+// partial parse (one required profile's closing brace reformatted), or a
+// duplicate name are bugs that would silently ship a wrong generated table. An
+// EXTRA profile is legitimate — the table is the source of truth and new
+// profiles must flow through.
 func TestEnsureProfiles(t *testing.T) {
-	// FindAllSubmatch returns [fullMatch, name] per match (capture group 1 is
-	// the profile name); mirror that shape so ensureProfiles reads m[1] as name.
 	full := func() [][][]byte {
-		out := make([][][]byte, 0, len(expectedProfiles))
-		for _, name := range expectedProfiles {
+		out := make([][][]byte, 0, len(requiredProfiles))
+		for _, name := range requiredProfiles {
 			out = append(out, [][]byte{[]byte("fullmatch"), []byte(name)})
 		}
 		return out
@@ -105,14 +105,15 @@ func TestEnsureProfiles(t *testing.T) {
 		t.Fatal("zero matches accepted — would silently write an empty table")
 	}
 	if err := ensureProfiles(full()[:len(full())-1]); err == nil {
-		t.Fatal("partial match (one profile dropped) accepted — would silently omit it")
+		t.Fatal("partial match (one required profile dropped) accepted — would silently omit it")
 	}
-	if err := ensureProfiles(append(full(), [][][]byte{{[]byte("fullmatch"), []byte("extra")}}...)); err == nil {
-		t.Fatal("unexpected profile accepted")
+	// Extra profile is fine (source of truth allows growth).
+	if err := ensureProfiles(append(full(), [][][]byte{{[]byte("fullmatch"), []byte("new-profile")}}...)); err != nil {
+		t.Fatalf("extra legitimate profile rejected: %v", err)
 	}
-	// Duplicate name: all expected names present but one appears twice — the
-	// coverage set can't see it, yet the generator would emit two rows with the
-	// same name and ds4-proxy would double-bind the port.
+	// Duplicate name: all required names present but one appears twice — the
+	// generator would emit two rows with the same name and ds4-proxy would
+	// double-bind the port.
 	dupe := full()
 	dupe[1] = dupe[0]
 	if err := ensureProfiles(dupe); err == nil {

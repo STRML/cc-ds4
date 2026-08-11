@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 )
 
@@ -105,41 +104,39 @@ func valuePresent(re *regexp.Regexp, body, key string) bool {
 	return false
 }
 
-// expectedProfiles is the exact set of profile names PROFILES must define. The
-// generated table is the single source the proxy serves from (profiles.go's
+// requiredProfiles is the MINIMUM set of profile names PROFILES must define.
+// The generated table is the single source the proxy serves from (profiles.go's
 // All()/Served()), so a profile dropped by a partial parse is silently lost —
 // worse than a total parse failure, because the table still looks populated.
-// (2026-08-10 review: ensureProfiles only rejected zero matches, letting a
-// single reformatted closing brace drop one profile.)
-var expectedProfiles = []string{"direct", "openrouter", "nous"}
+// (2026-08-10 review: the guard must not hardcode an EXACT set, or adding a
+// legitimately-formed fourth profile to proxy.py would reject regeneration.
+// This is the required floor, not the full universe — extra profiles are fine.)
+var requiredProfiles = []string{"direct", "openrouter", "nous"}
 
-// ensureProfiles validates the parse produced exactly the expected profiles.
-// The profileRE regex is exact-format dependent (4-space closing indent); if
-// proxy.py is reformatted and entries stop matching, the generator would
-// otherwise silently write an incomplete table. Any mismatch between the
-// parsed set and the expected set is a bug, never a valid state.
+// ensureProfiles validates the parse produced every required profile and no
+// duplicates. The profileRE regex is exact-format dependent (4-space closing
+// indent); if proxy.py is reformatted and entries stop matching, the generator
+// would otherwise silently write an incomplete table. A missing required
+// profile or a duplicate name is a bug; an EXTRA profile is legitimate (the
+// table is the source of truth, so new profiles must flow through).
 func ensureProfiles(matches [][][]byte) error {
 	if len(matches) == 0 {
 		return fmt.Errorf("PROFILES block parsed no profile entries — profileRE no longer matches the table's formatting")
 	}
 	// A duplicate profile entry would emit two rows with the same name, so
 	// All() returns both and ds4-proxy tries to bind the same port twice —
-	// one listener fails. Require the count to match the expected set exactly.
-	if len(matches) != len(expectedProfiles) {
-		return fmt.Errorf("PROFILES block parsed %d entries, expected %d — a duplicate or missing entry", len(matches), len(expectedProfiles))
-	}
-	got := make(map[string]bool, len(matches))
+	// one listener fails.
+	seen := make(map[string]bool, len(matches))
 	for _, m := range matches {
-		got[string(m[1])] = true
-	}
-	for _, want := range expectedProfiles {
-		if !got[want] {
-			return fmt.Errorf("PROFILES block missing profile %q — profileRE likely no longer matches its entry's formatting", want)
+		name := string(m[1])
+		if seen[name] {
+			return fmt.Errorf("PROFILES block has duplicate profile %q — would emit two rows with one port", name)
 		}
+		seen[name] = true
 	}
-	for name := range got {
-		if !slices.Contains(expectedProfiles, name) {
-			return fmt.Errorf("PROFILES block has unexpected profile %q — expected %v", name, expectedProfiles)
+	for _, want := range requiredProfiles {
+		if !seen[want] {
+			return fmt.Errorf("PROFILES block missing required profile %q — profileRE likely no longer matches its entry's formatting", want)
 		}
 	}
 	return nil
@@ -148,37 +145,42 @@ func ensureProfiles(matches [][][]byte) error {
 // requireKeys is the generator's format-fragility guard. The regexes are
 // exact-format dependent; a key renamed, retyped, or removed in proxy.py would
 // otherwise read as its zero value (0, "", false) and ship a silently wrong
-// table — the exact failure the old generator had no defense against. Each
-// required key is validated against its EXPECTED type's regex, so a string
-// where an int belongs is caught, not silently zeroed. Keys whose value is None
-// (model/failover) are expected to be absent and are not required. max_out is
-// optional-but-typed: Python's clamp is gated on truthiness (proxy.py:499
-// `if cfg["max_out"] and ...`), so a profile MAY set it to None (no clamp) —
-// but a present value must still be an int, never a string.
+// table — the exact failure the old generator had no defense against.
+//
+// Every key the emitted Profile struct needs must be PRESENT, because Python
+// reads them with bare key access (`cfg["max_out"]` at proxy.py:499 raises
+// KeyError on absence, not .get semantics). A key whose value is None is
+// legitimate (model/failover/max_out can all be None) and matches no value
+// regexp — so presence is checked against the union of all three regexes, and
+// TYPE is checked separately for each key. A present-but-wrong-typed value
+// must be caught, not silently zeroed.
 func requireKeys(name, body string) error {
-	// key -> expected field regex (type-scoped). max_out is intentionally NOT
-	// in the required list: absent/None is a valid "no clamp" per Python, while
-	// a PRESENT max_out is validated by the type check below.
-	for _, k := range []struct {
-		key string
-		re  *regexp.Regexp
-	}{
-		{"port", intFieldRE},
-		{"dir", strFieldRE},
-		{"upstream", strFieldRE},
-		{"zdr", boolFieldRE},
-		{"spend", boolFieldRE},
-		{"inject", boolFieldRE},
-	} {
-		if !valuePresent(k.re, body, k.key) {
-			return fmt.Errorf("%s: required key %q not found with expected type in profile body", name, k.key)
-		}
+	// strOrNone accepts a string literal OR None (None matches no value regexp
+	// but is a legal value for these keys).
+	strOrNone := func(b, key string) bool {
+		return valuePresent(strFieldRE, b, key) || valuePresent(noneFieldRE, b, key)
 	}
-	// If max_out IS present, it must be an integer literal or None. A float
-	// like 0.5 matches intFieldRE's \d+ prefix but is not a bare int, and
-	// would silently emit MaxOut: 0 while Python applies the float clamp.
-	if present, nonInt := hasNonIntMaxOut(body); present && nonInt {
-		return fmt.Errorf("%s: max_out must be an int or None, got a non-int value", name)
+	for _, k := range []struct {
+		key      string
+		check    func(body string) bool // returns true when the value is well-typed
+		validFor string
+	}{
+		{"port", func(b string) bool { return valuePresent(intFieldRE, b, "port") }, "int"},
+		{"dir", func(b string) bool { return valuePresent(strFieldRE, b, "dir") }, "str"},
+		{"upstream", func(b string) bool { return valuePresent(strFieldRE, b, "upstream") }, "str"},
+		{"zdr", func(b string) bool { return valuePresent(boolFieldRE, b, "zdr") }, "bool"},
+		{"spend", func(b string) bool { return valuePresent(boolFieldRE, b, "spend") }, "bool"},
+		{"inject", func(b string) bool { return valuePresent(boolFieldRE, b, "inject") }, "bool"},
+		{"model", func(b string) bool { return strOrNone(b, "model") }, "str-or-None"},
+		{"failover", func(b string) bool { return strOrNone(b, "failover") }, "str-or-None"},
+		{"max_out", func(b string) bool { p, nonInt := hasNonIntMaxOut(b); return p && !nonInt }, "int-or-None"},
+	} {
+		if !anyFieldPresent(body, k.key) {
+			return fmt.Errorf("%s: required key %q not found in profile body", name, k.key)
+		}
+		if !k.check(body) {
+			return fmt.Errorf("%s: key %q has an invalid value (expected %s)", name, k.key, k.validFor)
+		}
 	}
 	return nil
 }
@@ -212,6 +214,28 @@ func hasNonIntMaxOut(body string) (present, nonInt bool) {
 		return true, false
 	}
 	return true, true
+}
+
+// noneFieldRE matches a key set to None ("model": None). None is a legitimate
+// value (the direct profile's model/failover are None), but it matches none of
+// the typed value regexes — so a bare presence check would wrongly treat a
+// None-valued key as absent.
+var noneFieldRE = regexp.MustCompile(`(?m)^\s*"(\w+)":\s*None`)
+
+// anyFieldPresent reports whether the key appears in the body under any value
+// form — a typed literal OR None. Python reads every profile key with bare
+// access (cfg["max_out"] raises KeyError on absence), so a key must be present
+// even when its value is None. This is the presence check; type is checked
+// separately per key.
+func anyFieldPresent(body, key string) bool {
+	for _, re := range []*regexp.Regexp{strFieldRE, intFieldRE, boolFieldRE, noneFieldRE} {
+		for _, m := range re.FindAllStringSubmatch(body, -1) {
+			if m[1] == key {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func main() {
