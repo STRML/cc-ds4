@@ -59,6 +59,28 @@ func TestRequireKeys(t *testing.T) {
 	if err := requireKeys("direct", noMaxOut); err != nil {
 		t.Fatalf("max_out absent/None should be accepted, got %v", err)
 	}
+
+	// A float max_out (e.g. 0.5) must be rejected: it matches intFieldRE's
+	// \d+ prefix but is not a bare int, and would emit MaxOut: 0 while Python
+	// applies the float clamp.
+	for _, bad := range []string{
+		`"max_out": 0.5`,
+		`"max_out": 65536.0`,
+		`"max_out": -3`,
+		`"max_out": "65536"`,
+	} {
+		replaced := strings.Replace(good, `        "max_out": 65536,
+`, "        "+bad+",\n", 1)
+		if err := requireKeys("direct", replaced); err == nil {
+			t.Errorf("non-int max_out %q accepted (would emit zero value)", bad)
+		}
+	}
+	// max_out: None remains valid.
+	if err := requireKeys("direct", strings.Replace(good, `        "max_out": 65536,
+`, `        "max_out": None,
+`, 1)); err != nil {
+		t.Fatalf("max_out: None should be accepted, got %v", err)
+	}
 }
 
 // TestEnsureProfiles pins the coverage guard: the parse must yield EXACTLY the
@@ -87,5 +109,13 @@ func TestEnsureProfiles(t *testing.T) {
 	}
 	if err := ensureProfiles(append(full(), [][][]byte{{[]byte("fullmatch"), []byte("extra")}}...)); err == nil {
 		t.Fatal("unexpected profile accepted")
+	}
+	// Duplicate name: all expected names present but one appears twice — the
+	// coverage set can't see it, yet the generator would emit two rows with the
+	// same name and ds4-proxy would double-bind the port.
+	dupe := full()
+	dupe[1] = dupe[0]
+	if err := ensureProfiles(dupe); err == nil {
+		t.Fatal("duplicate profile accepted — would emit two rows with one port")
 	}
 }

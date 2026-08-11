@@ -122,6 +122,12 @@ func ensureProfiles(matches [][][]byte) error {
 	if len(matches) == 0 {
 		return fmt.Errorf("PROFILES block parsed no profile entries — profileRE no longer matches the table's formatting")
 	}
+	// A duplicate profile entry would emit two rows with the same name, so
+	// All() returns both and ds4-proxy tries to bind the same port twice —
+	// one listener fails. Require the count to match the expected set exactly.
+	if len(matches) != len(expectedProfiles) {
+		return fmt.Errorf("PROFILES block parsed %d entries, expected %d — a duplicate or missing entry", len(matches), len(expectedProfiles))
+	}
 	got := make(map[string]bool, len(matches))
 	for _, m := range matches {
 		got[string(m[1])] = true
@@ -168,11 +174,44 @@ func requireKeys(name, body string) error {
 			return fmt.Errorf("%s: required key %q not found with expected type in profile body", name, k.key)
 		}
 	}
-	// If max_out IS present, it must be an int (a string would silently emit 0).
-	if valuePresent(strFieldRE, body, "max_out") || valuePresent(boolFieldRE, body, "max_out") {
+	// If max_out IS present, it must be an integer literal or None. A float
+	// like 0.5 matches intFieldRE's \d+ prefix but is not a bare int, and
+	// would silently emit MaxOut: 0 while Python applies the float clamp.
+	if present, nonInt := hasNonIntMaxOut(body); present && nonInt {
 		return fmt.Errorf("%s: max_out must be an int or None, got a non-int value", name)
 	}
 	return nil
+}
+
+// maxOutRE matches a max_out RHS: an integer literal ("65536"), None, or
+// anything else (a float "0.5", a string, a bool, a negative). The second
+// group captures the value body so the guard can insist it is exactly a bare
+// non-negative integer. (Negative literals are never legitimate here — they
+// would clamp max_tokens to a nonsense value — and intValue would emit 0 for
+// them anyway, the same silent-zero bug class.)
+var maxOutRE = regexp.MustCompile(`(?m)^\s*"max_out":\s*(None|\d+|.*),?$`)
+
+// hasNonIntMaxOut reports whether max_out is present (first return) and, if so,
+// whether it is anything other than None or a bare integer literal (second
+// return). A float like 0.5 matches intFieldRE's \d+ PREFIX (the "0"), so a
+// plain intRegex check wrongly accepts it — and intValue would then emit
+// MaxOut: 0 while Python applies the float clamp. The complete RHS must be
+// an integer literal or None.
+func hasNonIntMaxOut(body string) (present, nonInt bool) {
+	m := maxOutRE.FindStringSubmatch(body)
+	if m == nil {
+		return false, false
+	}
+	if m[1] == "None" {
+		return true, false
+	}
+	if m[1] == "" {
+		return true, true
+	}
+	if _, err := strconv.Atoi(m[1]); err == nil {
+		return true, false
+	}
+	return true, true
 }
 
 func main() {
