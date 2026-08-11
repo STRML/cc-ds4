@@ -234,6 +234,17 @@ func TestDuplicateKeysRejected(t *testing.T) {
 	if err := requireKeys("direct", dupe); err == nil {
 		t.Fatal("duplicate max_out accepted — Go would clamp while Python would not")
 	}
+
+	// Mixed-validity duplicate: the second occurrence is invalid Python
+	// (0.5 matches no typed regex) but IS a syntactic key occurrence. Python
+	// keeps it; the typed-count would miss it. Must be rejected.
+	mixed := strings.Replace(good, `        "inject": True,
+`, `        "inject": True,
+        "max_out": 0.5,
+`, 1)
+	if err := requireKeys("direct", mixed); err == nil {
+		t.Fatal("mixed-validity duplicate max_out accepted — Python would keep the invalid final value")
+	}
 }
 
 // TestDirFString pins that the dir key's supported f-string form parses while

@@ -341,20 +341,16 @@ func anyFieldPresent(body, key string) bool {
 	return false
 }
 
-// countFieldOccurrences reports how many times the key appears under any value
-// form. Python dict construction keeps the LAST occurrence of a duplicate key,
-// while the emitter reads the FIRST — so a duplicate required key would make
-// Go emit a different value than Python. Rejecting duplicates is the safe fix.
+// countFieldOccurrences reports how many times the key appears as a key
+// definition in the body — matched at the anchored key position ("key":
+// at line start) REGARDLESS of whether the value parses. A duplicate whose
+// second occurrence is invalid Python ("max_out": 0.5) matches no typed value
+// regex but IS a syntactic key occurrence; Python keeps the last occurrence
+// while the emitter reads the first, so counting only typed matches would
+// let such a duplicate slip through (2026-08-11 review).
 func countFieldOccurrences(body, key string) int {
-	n := 0
-	for _, re := range []*regexp.Regexp{strFieldRE, intFieldRE, boolFieldRE, noneFieldRE, dirFStringRE} {
-		for _, m := range re.FindAllStringSubmatch(body, -1) {
-			if m[1] == key {
-				n++
-			}
-		}
-	}
-	return n
+	re := regexp.MustCompile(`(?m)^\s*["']` + regexp.QuoteMeta(key) + `["']\s*:`)
+	return len(re.FindAllStringIndex(body, -1))
 }
 
 func main() {
