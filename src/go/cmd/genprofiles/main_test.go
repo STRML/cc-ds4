@@ -171,6 +171,25 @@ func TestProfileRENames(t *testing.T) {
 	if err := rejectEscapedNames([]byte(escaped)); err == nil {
 		t.Fatal("escaped-quote name accepted — would silently emit the wrong profile name")
 	}
+
+	// Same, with an inline comment after the opening brace — the comment must
+	// not hide the escaped quote from the guard.
+	escapedComment := `PROFILES = {
+    "staging\"blue": {  # temporary
+        "port": 31600,
+        "dir": f"{HOME}/.claude-staging",
+        "upstream": "https://example.com",
+        "model": None,
+        "zdr": False,
+        "spend": False,
+        "max_out": None,
+        "inject": False,
+        "failover": None,
+    },
+}`
+	if err := rejectEscapedNames([]byte(escapedComment)); err == nil {
+		t.Fatal("escaped-quote name with inline comment accepted — would silently emit the wrong profile name")
+	}
 }
 
 // TestDirFString pins that the dir key's supported f-string form parses while

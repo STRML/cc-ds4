@@ -153,6 +153,11 @@ var requiredProfiles = []string{"direct", "openrouter", "nous"}
 func rejectEscapedNames(block []byte) error {
 	for _, line := range strings.Split(string(block), "\n") {
 		trimmed := strings.TrimSpace(line)
+		// A trailing inline comment ("staging\"blue": {  # temporary) would
+		// otherwise hide the escaped quote from the suffix check.
+		if i := strings.Index(trimmed, "#"); i >= 0 {
+			trimmed = strings.TrimSpace(trimmed[:i])
+		}
 		if !strings.HasPrefix(trimmed, `"`) && !strings.HasPrefix(trimmed, `'`) {
 			continue
 		}
