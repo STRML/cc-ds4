@@ -93,6 +93,34 @@ func TestIntValueUnderscores(t *testing.T) {
 	}
 }
 
+// TestExpressionValuesRejected pins that expression-valued fields fail
+// requireKeys: a Python expression like "upstream": "..." + "/api" or
+// "inject": False or True would pass a bare-prefix match yet emit only the
+// first fragment, routing to the wrong endpoint or dropping thinking injection.
+func TestExpressionValuesRejected(t *testing.T) {
+	good := `        "port": 31500,
+        "dir": f"{HOME}/.claude-ds4",
+        "upstream": "https://api.deepseek.com/anthropic",
+        "model": None,
+        "zdr": False,
+        "spend": False,
+        "max_out": 65536,
+        "inject": True,
+        "failover": None,
+`
+	for _, bad := range []string{
+		`"upstream": "https://api.deepseek.com" + "/anthropic"`, // str + concat
+		`"inject": False or True`,                              // bool expression
+		`"dir": f"{HOME}/.claude-ds4" + "/x"`,                  // f-string + concat
+	} {
+		key := strings.SplitN(bad, `"`, 3)[1]
+		replaced := strings.Replace(good, `"`+key+`":`, bad+`,`, 1)
+		if err := requireKeys("direct", replaced); err == nil {
+			t.Errorf("expression value for %q accepted (would emit wrong value)", key)
+		}
+	}
+}
+
 // TestProfileREHyphen pins that a hyphenated profile name parses — a valid
 // Python key like "staging-profile" must not be silently dropped by the
 // generator (the name class is [\w-]+, not \w+).

@@ -30,10 +30,14 @@ var (
 	// any of these, so it reads as the zero value — which is what we emit.
 	// intFieldRE is ANCHORED to the complete RHS and accepts Python's
 	// underscore literals (31_501 == 31501); a bare prefix match (31) would
-	// silently emit the wrong value.
-	strFieldRE  = regexp.MustCompile(`(?m)^\s*"([\w-]+)": f?"([^"]*)"`)
+	// silently emit the wrong value. str/bool are ANCHORED to the complete RHS
+	// for the same reason: a Python expression like "upstream": "..." + "/api"
+	// or "inject": False or True would pass a bare-prefix check yet emit only
+	// the first fragment, routing to the wrong endpoint or dropping thinking
+	// injection.
+	strFieldRE  = regexp.MustCompile(`(?m)^\s*"([\w-]+)": f?"([^"]*)"\s*(,)?$`)
 	intFieldRE  = regexp.MustCompile(`(?m)^\s*"([\w-]+)": (\d+(?:_\d+)*)\s*(,)?$`)
-	boolFieldRE = regexp.MustCompile(`(?m)^\s*"([\w-]+)": (True|False)`)
+	boolFieldRE = regexp.MustCompile(`(?m)^\s*"([\w-]+)": (True|False)\s*(,)?$`)
 	// dir values arrive as f"{HOME}/.claude-ds4"; keep them as "~/.claude-ds4"
 	// and expand the "~" at runtime in All().
 	homePrefixRE = regexp.MustCompile(`^\{HOME\}/`)
