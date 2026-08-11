@@ -14,20 +14,26 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 var (
 	// PROFILES block opens at column 0 and closes at the first column-0 "}".
 	profilesRE = regexp.MustCompile(`(?sm)^PROFILES = \{(.*?)^\}`)
 	// One profile entry: '"name": {' ... closing '    },' (4-space indent).
-	profileRE = regexp.MustCompile(`(?sm)"(\w+)": \{(.*?)^    \}`)
+	// The name class is [\w-]+ (not \w+) so hyphenated profile names parse —
+	// a valid Python key like "staging-profile" was silently dropped before.
+	profileRE = regexp.MustCompile(`(?sm)"([\w-]+)": \{(.*?)^    \}`)
 
 	// Per-field parsers, applied within one profile's body. A key whose value
 	// is None ("model": None, "failover": None, "max_out": None) never matches
 	// any of these, so it reads as the zero value — which is what we emit.
-	strFieldRE  = regexp.MustCompile(`(?m)^\s*"(\w+)": f?"([^"]*)"`)
-	intFieldRE  = regexp.MustCompile(`(?m)^\s*"(\w+)": (\d+)`)
-	boolFieldRE = regexp.MustCompile(`(?m)^\s*"(\w+)": (True|False)`)
+	// intFieldRE is ANCHORED to the complete RHS and accepts Python's
+	// underscore literals (31_501 == 31501); a bare prefix match (31) would
+	// silently emit the wrong value.
+	strFieldRE  = regexp.MustCompile(`(?m)^\s*"([\w-]+)": f?"([^"]*)"`)
+	intFieldRE  = regexp.MustCompile(`(?m)^\s*"([\w-]+)": (\d+(?:_\d+)*)\s*(,)?$`)
+	boolFieldRE = regexp.MustCompile(`(?m)^\s*"([\w-]+)": (True|False)`)
 	// dir values arrive as f"{HOME}/.claude-ds4"; keep them as "~/.claude-ds4"
 	// and expand the "~" at runtime in All().
 	homePrefixRE = regexp.MustCompile(`^\{HOME\}/`)
@@ -69,11 +75,13 @@ func strValue(body, key string) string {
 	return ""
 }
 
-// intValue returns the int value of one key, or 0 when absent/None.
+// intValue returns the int value of one key, or 0 when absent/None. Python
+// integer literals may carry underscores (31_501 == 31501); strip them before
+// Atoi so the emitted value matches Python's int().
 func intValue(body, key string) int {
 	for _, m := range intFieldRE.FindAllStringSubmatch(body, -1) {
 		if m[1] == key {
-			v, _ := strconv.Atoi(m[2])
+			v, _ := strconv.Atoi(strings.ReplaceAll(m[2], "_", ""))
 			return v
 		}
 	}
@@ -185,13 +193,13 @@ func requireKeys(name, body string) error {
 	return nil
 }
 
-// maxOutRE matches a max_out RHS: an integer literal ("65536"), None, or
-// anything else (a float "0.5", a string, a bool, a negative). The second
-// group captures the value body so the guard can insist it is exactly a bare
-// non-negative integer. (Negative literals are never legitimate here — they
-// would clamp max_tokens to a nonsense value — and intValue would emit 0 for
-// them anyway, the same silent-zero bug class.)
-var maxOutRE = regexp.MustCompile(`(?m)^\s*"max_out":\s*(None|\d+|.*),?$`)
+// maxOutRE matches a max_out RHS: an integer literal ("65536", underscores
+// allowed to match Python), None, or anything else (a float "0.5", a string,
+// a bool, a negative). The second group captures the value body so the guard
+// can insist it is exactly a bare non-negative integer. (Negative literals are
+// never legitimate here — they would clamp max_tokens to a nonsense value —
+// and intValue would emit 0 for them anyway, the same silent-zero bug class.)
+var maxOutRE = regexp.MustCompile(`(?m)^\s*"max_out":\s*(None|\d+(?:_\d+)*|.*),?$`)
 
 // hasNonIntMaxOut reports whether max_out is present (first return) and, if so,
 // whether it is anything other than None or a bare integer literal (second
@@ -210,7 +218,7 @@ func hasNonIntMaxOut(body string) (present, nonInt bool) {
 	if m[1] == "" {
 		return true, true
 	}
-	if _, err := strconv.Atoi(m[1]); err == nil {
+	if _, err := strconv.Atoi(strings.ReplaceAll(m[1], "_", "")); err == nil {
 		return true, false
 	}
 	return true, true

@@ -83,6 +83,39 @@ func TestRequireKeys(t *testing.T) {
 	}
 }
 
+// TestIntValueUnderscores pins that Python underscore integer literals parse
+// correctly: 31_501 == 31501, and the value is not truncated at the prefix.
+func TestIntValueUnderscores(t *testing.T) {
+	body := `        "port": 31_501,
+`
+	if got := intValue(body, "port"); got != 31501 {
+		t.Fatalf("intValue(31_501) = %d, want 31501 (underscore literal must match Python)", got)
+	}
+}
+
+// TestProfileREHyphen pins that a hyphenated profile name parses — a valid
+// Python key like "staging-profile" must not be silently dropped by the
+// generator (the name class is [\w-]+, not \w+).
+func TestProfileREHyphen(t *testing.T) {
+	block := `PROFILES = {
+    "staging-profile": {
+        "port": 31600,
+        "dir": f"{HOME}/.claude-staging",
+        "upstream": "https://example.com",
+        "model": None,
+        "zdr": False,
+        "spend": False,
+        "max_out": None,
+        "inject": False,
+        "failover": None,
+    },
+}`
+	matches := profileRE.FindAllSubmatch([]byte(block), -1)
+	if len(matches) != 1 || string(matches[0][1]) != "staging-profile" {
+		t.Fatalf("hyphenated profile not parsed: %d matches, want [staging-profile]", len(matches))
+	}
+}
+
 // TestEnsureProfiles pins the coverage guard: the parse must contain every
 // required profile with no duplicates. A zero-match parse (indent reformat), a
 // partial parse (one required profile's closing brace reformatted), or a
