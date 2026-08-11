@@ -24,8 +24,10 @@ var (
 	// The name is matched as ANY quoted string, single- or double-quoted (both
 	// are legal Python dict keys), and may carry dots or spaces
 	// ("staging.profile", 'staging'). A restricted class or quote style would
-	// silently drop a valid entry.
-	profileRE = regexp.MustCompile(`(?sm)["']([^"']+)["']: \{(.*?)^    \}`)
+	// silently drop a valid entry. Escaped quotes in a name (e.g.
+	// "staging\"blue") are rejected by a separate guard before parsing — RE2
+	// has no lookbehind, so the regex itself cannot exclude them.
+	profileRE = regexp.MustCompile(`(?sm)["']([^"'\\]+)["']: \{(.*?)^    \}`)
 
 	// Per-field parsers, applied within one profile's body. A key whose value
 	// is None ("model": None, "failover": None, "max_out": None) never matches
@@ -140,6 +142,29 @@ func valuePresent(re *regexp.Regexp, body, key string) bool {
 // legitimately-formed fourth profile to proxy.py would reject regeneration.
 // This is the required floor, not the full universe — extra profiles are fine.)
 var requiredProfiles = []string{"direct", "openrouter", "nous"}
+
+// rejectEscapedNames fails when any profile-name key contains a backslash
+// escape. A Python dict key like "staging\"blue" is valid Python but the
+// profileRE regex cannot represent it (RE2 has no lookbehind), so the parse
+// would silently emit a wrong partial name ("blue"). Better to fail loudly.
+// The scan is line-based: a profile key sits on a line ending in ": {" and
+// starts with a quote; a backslash anywhere in that key text is the reject
+// signal. (A regex key matcher stops at the escaped quote and misses it.)
+func rejectEscapedNames(block []byte) error {
+	for _, line := range strings.Split(string(block), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, `"`) && !strings.HasPrefix(trimmed, `'`) {
+			continue
+		}
+		if !strings.HasSuffix(trimmed, ": {") {
+			continue
+		}
+		if strings.Contains(trimmed, `\`) {
+			return fmt.Errorf("PROFILES key %q contains a backslash escape, which genprofiles cannot represent — rename it to a plain identifier", trimmed)
+		}
+	}
+	return nil
+}
 
 // ensureProfiles validates the parse produced every required profile and no
 // duplicates. The profileRE regex is exact-format dependent (4-space closing
@@ -293,6 +318,9 @@ func main() {
 
 	matches := profileRE.FindAllSubmatch(block[1], -1)
 	if err := ensureProfiles(matches); err != nil {
+		fatal(err)
+	}
+	if err := rejectEscapedNames(block[1]); err != nil {
 		fatal(err)
 	}
 	for _, m := range matches {

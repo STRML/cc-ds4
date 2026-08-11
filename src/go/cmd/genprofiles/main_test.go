@@ -152,6 +152,25 @@ func TestProfileRENames(t *testing.T) {
 			t.Fatalf("profile %q not parsed: %d matches, want [%s]", name, len(matches), strings.Trim(name, `'"`))
 		}
 	}
+
+	// An escaped quote in a name must be REJECTED by rejectEscapedNames, so the
+	// generator fails loudly rather than silently emitting a wrong partial name.
+	escaped := `PROFILES = {
+    "staging\"blue": {
+        "port": 31600,
+        "dir": f"{HOME}/.claude-staging",
+        "upstream": "https://example.com",
+        "model": None,
+        "zdr": False,
+        "spend": False,
+        "max_out": None,
+        "inject": False,
+        "failover": None,
+    },
+}`
+	if err := rejectEscapedNames([]byte(escaped)); err == nil {
+		t.Fatal("escaped-quote name accepted — would silently emit the wrong profile name")
+	}
 }
 
 // TestDirFString pins that the dir key's supported f-string form parses while
