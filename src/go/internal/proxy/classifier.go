@@ -24,12 +24,14 @@ var classifierUpstream = "https://api.anthropic.com/v1/messages"
 // noted Go hardcoded the default; the env knob is Python-parity).
 const classifierModel = "claude-sonnet-5"
 
-// classifierModelOverride returns DS4_CLASSIFIER_MODEL when set, else the
-// default. Mirrors classifier.py reading the same env key (DS4_CLASSIFIER_MODEL
-// never reaches the proxy in the harness's hermetic defaults, so the default
-// always wins there — tests cover the override explicitly).
+// classifierModelOverride returns DS4_CLASSIFIER_MODEL when the key is present,
+// else the default. Mirrors proxy.py's os.environ.get("DS4_CLASSIFIER_MODEL",
+// "claude-sonnet-5"): an ABSENT key falls back, but an explicitly-set value —
+// including an empty string — is used verbatim. LookupEnv distinguishes the two
+// (os.Getenv cannot); TrimSpace is deliberately NOT applied, because Python
+// sends the env value exactly as-is (review finding, 2026-08-10).
 func classifierModelOverride() string {
-	if v := strings.TrimSpace(os.Getenv("DS4_CLASSIFIER_MODEL")); v != "" {
+	if v, ok := os.LookupEnv("DS4_CLASSIFIER_MODEL"); ok {
 		return v
 	}
 	return classifierModel
@@ -124,7 +126,7 @@ func (h *Handler) relayClassifier(body []byte, endpoint string, token string, w 
 	// sent: the raw ds4 body carries "model": "ds4-high" (not a valid Anthropic
 	// model, so Anthropic would 400 every call) plus ds4-specific fields that
 	// must not ride to api.anthropic.com.
-	raw, err := classifierBody(body, classifierModelOverride())
+	raw, err := classifierBody(body, h.classifierModel)
 	if err != nil {
 		return false
 	}

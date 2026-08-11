@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -45,10 +46,10 @@ func TestIsClassifierBoundary(t *testing.T) {
 	}
 }
 
-// TestClassifierModelOverride pins the DS4_CLASSIFIER_MODEL env knob: when
-// set, the classifier body carries it; when unset or blank, the default
-// claude-sonnet-5 is used. classifierBody is what the relay sends upstream,
-// so asserting the rewritten "model" is the override reaching the wire.
+// TestClassifierModelOverride pins the DS4_CLASSIFIER_MODEL env knob to
+// proxy.py's verbatim semantics (os.environ.get(key, default)): an ABSENT key
+// falls back to claude-sonnet-5, but a present key — including an explicitly
+// empty value — is used exactly as set, with no trimming.
 func TestClassifierModelOverride(t *testing.T) {
 	t.Setenv("DS4_CLASSIFIER_MODEL", "claude-sonnet-5-20250929")
 	raw, err := classifierBody([]byte(`{"model": "ds4-high", "max_tokens": 2048}`), classifierModelOverride())
@@ -59,9 +60,35 @@ func TestClassifierModelOverride(t *testing.T) {
 		t.Fatalf("override model not in rewritten body: %s", raw)
 	}
 
+	// Absent key -> default. t.Setenv cannot unset; unset explicitly.
 	t.Setenv("DS4_CLASSIFIER_MODEL", "")
+	os.Unsetenv("DS4_CLASSIFIER_MODEL")
 	if got := classifierModelOverride(); got != classifierModel {
-		t.Fatalf("empty env should fall back to default, got %q", got)
+		t.Fatalf("absent env should fall back to default, got %q", got)
+	}
+
+	// Present-but-empty -> empty verbatim (Python sends it as-is, no fallback).
+	t.Setenv("DS4_CLASSIFIER_MODEL", "")
+	if got := classifierModelOverride(); got != "" {
+		t.Fatalf("explicitly-empty env should be sent verbatim, got %q", got)
+	}
+
+	// Present with surrounding whitespace -> verbatim (no TrimSpace).
+	t.Setenv("DS4_CLASSIFIER_MODEL", " claude-sonnet-5-20250929 ")
+	if got := classifierModelOverride(); got != " claude-sonnet-5-20250929 " {
+		t.Fatalf("env value should be used verbatim (no trim), got %q", got)
+	}
+}
+
+// TestClassifierModelCachedAtBuild pins that the model is resolved ONCE when the
+// Handler is built (matching proxy.py's module-load read), not re-read from env
+// per request — a later env change does not affect an already-built Handler.
+func TestClassifierModelCachedAtBuild(t *testing.T) {
+	t.Setenv("DS4_CLASSIFIER_MODEL", "claude-sonnet-5-20250929")
+	h := NewHandler(profiles.Profile{Name: "nous"}, time.Minute)
+	t.Setenv("DS4_CLASSIFIER_MODEL", "changed-after-build")
+	if h.classifierModel != "claude-sonnet-5-20250929" {
+		t.Fatalf("model should be frozen at build, got %q", h.classifierModel)
 	}
 }
 
