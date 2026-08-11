@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 )
 
@@ -104,14 +105,36 @@ func valuePresent(re *regexp.Regexp, body, key string) bool {
 	return false
 }
 
-// ensureProfiles fails when the PROFILES block parsed no profile entries. The
-// profileRE regex is exact-format dependent (4-space closing indent); if
-// proxy.py is reformatted and the regex stops matching, the generator would
-// otherwise silently write an empty generatedProfiles table with no guard
-// firing. A zero-match parse is always a bug, never a valid empty table.
+// expectedProfiles is the exact set of profile names PROFILES must define. The
+// generated table is the single source the proxy serves from (profiles.go's
+// All()/Served()), so a profile dropped by a partial parse is silently lost —
+// worse than a total parse failure, because the table still looks populated.
+// (2026-08-10 review: ensureProfiles only rejected zero matches, letting a
+// single reformatted closing brace drop one profile.)
+var expectedProfiles = []string{"direct", "openrouter", "nous"}
+
+// ensureProfiles validates the parse produced exactly the expected profiles.
+// The profileRE regex is exact-format dependent (4-space closing indent); if
+// proxy.py is reformatted and entries stop matching, the generator would
+// otherwise silently write an incomplete table. Any mismatch between the
+// parsed set and the expected set is a bug, never a valid state.
 func ensureProfiles(matches [][][]byte) error {
 	if len(matches) == 0 {
 		return fmt.Errorf("PROFILES block parsed no profile entries — profileRE no longer matches the table's formatting")
+	}
+	got := make(map[string]bool, len(matches))
+	for _, m := range matches {
+		got[string(m[1])] = true
+	}
+	for _, want := range expectedProfiles {
+		if !got[want] {
+			return fmt.Errorf("PROFILES block missing profile %q — profileRE likely no longer matches its entry's formatting", want)
+		}
+	}
+	for name := range got {
+		if !slices.Contains(expectedProfiles, name) {
+			return fmt.Errorf("PROFILES block has unexpected profile %q — expected %v", name, expectedProfiles)
+		}
 	}
 	return nil
 }
@@ -122,15 +145,19 @@ func ensureProfiles(matches [][][]byte) error {
 // table — the exact failure the old generator had no defense against. Each
 // required key is validated against its EXPECTED type's regex, so a string
 // where an int belongs is caught, not silently zeroed. Keys whose value is None
-// (model/failover) are expected to be absent and are not required.
+// (model/failover) are expected to be absent and are not required. max_out is
+// optional-but-typed: Python's clamp is gated on truthiness (proxy.py:499
+// `if cfg["max_out"] and ...`), so a profile MAY set it to None (no clamp) —
+// but a present value must still be an int, never a string.
 func requireKeys(name, body string) error {
-	// key -> expected field regex (type-scoped)
+	// key -> expected field regex (type-scoped). max_out is intentionally NOT
+	// in the required list: absent/None is a valid "no clamp" per Python, while
+	// a PRESENT max_out is validated by the type check below.
 	for _, k := range []struct {
 		key string
 		re  *regexp.Regexp
 	}{
 		{"port", intFieldRE},
-		{"max_out", intFieldRE},
 		{"dir", strFieldRE},
 		{"upstream", strFieldRE},
 		{"zdr", boolFieldRE},
@@ -140,6 +167,10 @@ func requireKeys(name, body string) error {
 		if !valuePresent(k.re, body, k.key) {
 			return fmt.Errorf("%s: required key %q not found with expected type in profile body", name, k.key)
 		}
+	}
+	// If max_out IS present, it must be an int (a string would silently emit 0).
+	if valuePresent(strFieldRE, body, "max_out") || valuePresent(boolFieldRE, body, "max_out") {
+		return fmt.Errorf("%s: max_out must be an int or None, got a non-int value", name)
 	}
 	return nil
 }
