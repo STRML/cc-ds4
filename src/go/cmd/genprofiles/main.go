@@ -21,10 +21,11 @@ var (
 	// PROFILES block opens at column 0 and closes at the first column-0 "}".
 	profilesRE = regexp.MustCompile(`(?sm)^PROFILES = \{(.*?)^\}`)
 	// One profile entry: '"name": {' ... closing '    },' (4-space indent).
-	// The name is matched as ANY quoted string (not a restricted \w/[\w-]
-	// class): a valid Python profile key can carry dots or spaces
-	// ("staging.profile"), and a restricted class would silently drop it.
-	profileRE = regexp.MustCompile(`(?sm)"([^"]+)": \{(.*?)^    \}`)
+	// The name is matched as ANY quoted string, single- or double-quoted (both
+	// are legal Python dict keys), and may carry dots or spaces
+	// ("staging.profile", 'staging'). A restricted class or quote style would
+	// silently drop a valid entry.
+	profileRE = regexp.MustCompile(`(?sm)["']([^"']+)["']: \{(.*?)^    \}`)
 
 	// Per-field parsers, applied within one profile's body. A key whose value
 	// is None ("model": None, "failover": None, "max_out": None) never matches
@@ -35,12 +36,18 @@ var (
 	// for the same reason: a Python expression like "upstream": "..." + "/api"
 	// or "inject": False or True would pass a bare-prefix check yet emit only
 	// the first fragment, routing to the wrong endpoint or dropping thinking
-	// injection.
-	strFieldRE  = regexp.MustCompile(`(?m)^\s*"([\w-]+)": f?"([^"]*)"\s*(,)?$`)
+	// injection. strFieldRE matches PLAIN literals only (no f-string): an
+	// arbitrary f-string like f"https://{HOST}/anthropic" cannot be evaluated
+	// by the generator and would emit literal {HOST} text.
+	strFieldRE  = regexp.MustCompile(`(?m)^\s*"([\w-]+)": "([^"]*)"\s*(,)?$`)
 	intFieldRE  = regexp.MustCompile(`(?m)^\s*"([\w-]+)": (\d+(?:_\d+)*)\s*(,)?$`)
 	boolFieldRE = regexp.MustCompile(`(?m)^\s*"([\w-]+)": (True|False)\s*(,)?$`)
-	// dir values arrive as f"{HOME}/.claude-ds4"; keep them as "~/.claude-ds4"
-	// and expand the "~" at runtime in All().
+	// dirFStringRE matches the ONE supported f-string form: dir values arrive
+	// as f"{HOME}/.claude-ds4" (proxy.py). Any other f-string is rejected by
+	// strValue below, because the generator cannot evaluate arbitrary {expr}.
+	// The key is captured (group 1) so valuePresent/anyFieldPresent work.
+	dirFStringRE = regexp.MustCompile(`(?m)^\s*"([\w-]+)": f"(\{HOME\}/[^"]*)"\s*(,)?$`)
+	// dir values keep "{HOME}/..." and expand the "~" at runtime in All().
 	homePrefixRE = regexp.MustCompile(`^\{HOME\}/`)
 )
 
@@ -70,8 +77,16 @@ func findRepoRoot() string {
 }
 
 // strValue returns the string value of one key in a profile body, or "" when
-// the key is absent or None (None matches none of the value regexps).
+// the key is absent or None (None matches none of the value regexps). The dir
+// key's supported f-string form (f"{HOME}/...") is handled separately.
 func strValue(body, key string) string {
+	if key == "dir" {
+		for _, m := range dirFStringRE.FindAllStringSubmatch(body, -1) {
+			if m[2] != "" {
+				return m[2]
+			}
+		}
+	}
 	for _, m := range strFieldRE.FindAllStringSubmatch(body, -1) {
 		if m[1] == key {
 			return m[2]
@@ -173,13 +188,17 @@ func requireKeys(name, body string) error {
 	strOrNone := func(b, key string) bool {
 		return valuePresent(strFieldRE, b, key) || valuePresent(noneFieldRE, b, key)
 	}
+	// dirOrFString accepts a plain string OR the supported f"{HOME}/..." form.
+	dirOrFString := func(b string) bool {
+		return valuePresent(strFieldRE, b, "dir") || valuePresent(dirFStringRE, b, "dir")
+	}
 	for _, k := range []struct {
 		key      string
 		check    func(body string) bool // returns true when the value is well-typed
 		validFor string
 	}{
 		{"port", func(b string) bool { return valuePresent(intFieldRE, b, "port") }, "int"},
-		{"dir", func(b string) bool { return valuePresent(strFieldRE, b, "dir") }, "str"},
+		{"dir", dirOrFString, "str-or-f{HOME}string"},
 		{"upstream", func(b string) bool { return valuePresent(strFieldRE, b, "upstream") }, "str"},
 		{"zdr", func(b string) bool { return valuePresent(boolFieldRE, b, "zdr") }, "bool"},
 		{"spend", func(b string) bool { return valuePresent(boolFieldRE, b, "spend") }, "bool"},
@@ -243,7 +262,7 @@ var noneFieldRE = regexp.MustCompile(`(?m)^\s*"([\w-]+)":\s*None\s*(,)?$`)
 // even when its value is None. This is the presence check; type is checked
 // separately per key.
 func anyFieldPresent(body, key string) bool {
-	for _, re := range []*regexp.Regexp{strFieldRE, intFieldRE, boolFieldRE, noneFieldRE} {
+	for _, re := range []*regexp.Regexp{strFieldRE, intFieldRE, boolFieldRE, noneFieldRE, dirFStringRE} {
 		for _, m := range re.FindAllStringSubmatch(body, -1) {
 			if m[1] == key {
 				return true

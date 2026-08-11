@@ -127,9 +127,15 @@ func TestExpressionValuesRejected(t *testing.T) {
 // dots, and spaces are all legal in a Python dict key, and a restricted name
 // class would silently drop a profile like "staging.profile".
 func TestProfileRENames(t *testing.T) {
-	for _, name := range []string{"staging-profile", "staging.profile", "staging profile"} {
+	for _, name := range []string{"staging-profile", "staging.profile", "staging profile", "'staging'"} {
+		key := name
+		if strings.HasPrefix(name, "'") {
+			key = name // already single-quoted
+		} else {
+			key = `"` + name + `"`
+		}
 		block := `PROFILES = {
-    "` + name + `": {
+    ` + key + `: {
         "port": 31600,
         "dir": f"{HOME}/.claude-staging",
         "upstream": "https://example.com",
@@ -142,9 +148,28 @@ func TestProfileRENames(t *testing.T) {
     },
 }`
 		matches := profileRE.FindAllSubmatch([]byte(block), -1)
-		if len(matches) != 1 || string(matches[0][1]) != name {
-			t.Fatalf("profile %q not parsed: %d matches, want [%s]", name, len(matches), name)
+		if len(matches) != 1 || string(matches[0][1]) != strings.Trim(name, `'"`) {
+			t.Fatalf("profile %q not parsed: %d matches, want [%s]", name, len(matches), strings.Trim(name, `'"`))
 		}
+	}
+}
+
+// TestDirFString pins that the dir key's supported f-string form parses while
+// an arbitrary f-string (non-{HOME}) is rejected — the generator cannot
+// evaluate {HOST} and must not emit literal braces.
+func TestDirFString(t *testing.T) {
+	good := `        "dir": f"{HOME}/.claude-ds4",
+`
+	if got := strValue(good, "dir"); got != "{HOME}/.claude-ds4" {
+		t.Fatalf("dir f-string = %q, want {HOME}/.claude-ds4", got)
+	}
+	if !anyFieldPresent(good, "dir") {
+		t.Fatal("dir f-string not seen as present")
+	}
+	bad := `        "dir": f"{HOST}/x",
+`
+	if got := strValue(bad, "dir"); got != "" {
+		t.Fatalf("arbitrary dir f-string = %q, want empty (must be rejected)", got)
 	}
 }
 
