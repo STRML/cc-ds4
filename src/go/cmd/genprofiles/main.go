@@ -231,8 +231,10 @@ func hasNonIntMaxOut(body string) (present, nonInt bool) {
 // noneFieldRE matches a key set to None ("model": None). None is a legitimate
 // value (the direct profile's model/failover are None), but it matches none of
 // the typed value regexes — so a bare presence check would wrongly treat a
-// None-valued key as absent.
-var noneFieldRE = regexp.MustCompile(`(?m)^\s*"(\w+)":\s*None`)
+// None-valued key as absent. Anchored to the full RHS (trailing whitespace or
+// comma only): an expression like `"model": None or "..."` must NOT pass as a
+// None value — Python would evaluate the expression while the emitter writes "".
+var noneFieldRE = regexp.MustCompile(`(?m)^\s*"([\w-]+)":\s*None\s*(,)?$`)
 
 // anyFieldPresent reports whether the key appears in the body under any value
 // form — a typed literal OR None. Python reads every profile key with bare

@@ -112,6 +112,8 @@ func TestExpressionValuesRejected(t *testing.T) {
 		`"upstream": "https://api.deepseek.com" + "/anthropic"`, // str + concat
 		`"inject": False or True`,                              // bool expression
 		`"dir": f"{HOME}/.claude-ds4" + "/x"`,                  // f-string + concat
+		`"model": None or "deepseek/deepseek-v4-flash-0731"`,   // None + expression
+		`"failover": None or "direct"`,                         // None + expression
 	} {
 		key := strings.SplitN(bad, `"`, 3)[1]
 		replaced := strings.Replace(good, `"`+key+`":`, bad+`,`, 1)
