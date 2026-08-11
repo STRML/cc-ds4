@@ -190,6 +190,50 @@ func TestProfileRENames(t *testing.T) {
 	if err := rejectEscapedNames([]byte(escapedComment)); err == nil {
 		t.Fatal("escaped-quote name with inline comment accepted — would silently emit the wrong profile name")
 	}
+
+	// A '#' INSIDE the quoted key is part of the name, not a comment; it must
+	// not hide the escaped quote from the guard.
+	escapedHash := `PROFILES = {
+    "staging#x\"blue": {
+        "port": 31600,
+        "dir": f"{HOME}/.claude-staging",
+        "upstream": "https://example.com",
+        "model": None,
+        "zdr": False,
+        "spend": False,
+        "max_out": None,
+        "inject": False,
+        "failover": None,
+    },
+}`
+	if err := rejectEscapedNames([]byte(escapedHash)); err == nil {
+		t.Fatal("escaped-quote name with # in key accepted — would silently emit the wrong profile name")
+	}
+}
+
+// TestDuplicateKeysRejected pins that a duplicate required key fails loudly:
+// Python dict construction keeps the LAST occurrence while the emitter reads
+// the FIRST, so a duplicate would make Go emit a different value than Python.
+func TestDuplicateKeysRejected(t *testing.T) {
+	good := `        "port": 31500,
+        "dir": f"{HOME}/.claude-ds4",
+        "upstream": "https://api.deepseek.com/anthropic",
+        "model": None,
+        "zdr": False,
+        "spend": False,
+        "max_out": 65536,
+        "inject": True,
+        "failover": None,
+`
+	// Add a second max_out: None — Python keeps None (no clamp), the emitter
+	// reads the first 65536. Must be rejected.
+	dupe := strings.Replace(good, `        "inject": True,
+`, `        "inject": True,
+        "max_out": None,
+`, 1)
+	if err := requireKeys("direct", dupe); err == nil {
+		t.Fatal("duplicate max_out accepted — Go would clamp while Python would not")
+	}
 }
 
 // TestDirFString pins that the dir key's supported f-string form parses while

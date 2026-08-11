@@ -154,8 +154,10 @@ func rejectEscapedNames(block []byte) error {
 	for _, line := range strings.Split(string(block), "\n") {
 		trimmed := strings.TrimSpace(line)
 		// A trailing inline comment ("staging\"blue": {  # temporary) would
-		// otherwise hide the escaped quote from the suffix check.
-		if i := strings.Index(trimmed, "#"); i >= 0 {
+		// otherwise hide the escaped quote from the suffix check. Strip a '#'
+		// only when it is OUTSIDE the opening quoted key — a '#' inside the
+		// key (e.g. "staging#x\"blue") is part of the name, not a comment.
+		if i := commentIndex(trimmed); i >= 0 {
 			trimmed = strings.TrimSpace(trimmed[:i])
 		}
 		if !strings.HasPrefix(trimmed, `"`) && !strings.HasPrefix(trimmed, `'`) {
@@ -169,6 +171,35 @@ func rejectEscapedNames(block []byte) error {
 		}
 	}
 	return nil
+}
+
+// commentIndex returns the index of the first '#' that starts a comment on the
+// line — i.e. the first '#' that is not inside the opening quoted key. A key
+// like "staging#x\"blue": {  # comment has two '#'s; the first is part of the
+// name and must not be treated as a comment.
+func commentIndex(line string) int {
+	quote := byte(0) // 0 = outside a string, else '"' or '\''
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if quote != 0 {
+			if c == '\\' {
+				i++ // skip escaped char inside the string
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		if c == '"' || c == '\'' {
+			quote = c
+			continue
+		}
+		if c == '#' {
+			return i
+		}
+	}
+	return -1
 }
 
 // ensureProfiles validates the parse produced every required profile and no
@@ -221,6 +252,14 @@ func requireKeys(name, body string) error {
 	// dirOrFString accepts a plain string OR the supported f"{HOME}/..." form.
 	dirOrFString := func(b string) bool {
 		return valuePresent(strFieldRE, b, "dir") || valuePresent(dirFStringRE, b, "dir")
+	}
+	// Reject duplicate required keys: Python dict construction keeps the LAST
+	// occurrence, but the emitter reads the FIRST, so a duplicate would make
+	// Go emit a different value than Python (e.g. max_out 65536 then None).
+	for _, k := range []string{"port", "dir", "upstream", "zdr", "spend", "inject", "model", "failover", "max_out"} {
+		if countFieldOccurrences(body, k) > 1 {
+			return fmt.Errorf("%s: key %q appears more than once in profile body (Python keeps the last, the emitter reads the first)", name, k)
+		}
 	}
 	for _, k := range []struct {
 		key      string
@@ -300,6 +339,22 @@ func anyFieldPresent(body, key string) bool {
 		}
 	}
 	return false
+}
+
+// countFieldOccurrences reports how many times the key appears under any value
+// form. Python dict construction keeps the LAST occurrence of a duplicate key,
+// while the emitter reads the FIRST — so a duplicate required key would make
+// Go emit a different value than Python. Rejecting duplicates is the safe fix.
+func countFieldOccurrences(body, key string) int {
+	n := 0
+	for _, re := range []*regexp.Regexp{strFieldRE, intFieldRE, boolFieldRE, noneFieldRE, dirFStringRE} {
+		for _, m := range re.FindAllStringSubmatch(body, -1) {
+			if m[1] == key {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 func main() {
