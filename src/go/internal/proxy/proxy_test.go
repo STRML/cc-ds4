@@ -50,6 +50,23 @@ func TestRewriteAnthropicLiteralModel(t *testing.T) {
 // Anthropic-literal branch: the profile's own upstream model id already names
 // the target, matches no Anthropic substring, and is left untouched (and no
 // reasoning_effort is invented).
+// TestRewriteFailoverTargetStripsNitro pins that a :nitro variant suffix is
+// not a failoverModel key: a request failing over to the direct target strips
+// the variant before the flash remap, so the direct API never receives
+// "...:nitro", which 400s there. Mirrors proxy.py's failover remap.
+func TestRewriteFailoverTargetStripsNitro(t *testing.T) {
+	cfg := profiles.Profile{Name: "direct", FailoverTarget: true, Model: ""}
+	body := []byte(`{"model": "deepseek/deepseek-v4-flash-0731:nitro", "max_tokens": 32000, "messages": []}`)
+	got, err := rewrite(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"model": "deepseek-v4-flash[1m]", "max_tokens": 32000, "messages": []}`
+	if string(got) != want {
+		t.Errorf("rewrite = %s\nwant %s", got, want)
+	}
+}
+
 func TestRewriteDoesNotRemapProfileLiteral(t *testing.T) {
 	cfg := profiles.Profile{Name: "nous", Model: "deepseek/deepseek-v4-flash-0731"}
 	body := []byte(`{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 32000, "messages": []}`)
