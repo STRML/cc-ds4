@@ -492,6 +492,16 @@ def rewrite(payload, cfg):
         prov["data_collection"] = "deny"
         ignore = [p for p in prov.get("ignore", []) if p not in LOW_CONTEXT]
         prov["ignore"] = ignore + LOW_CONTEXT
+        # Routing mode picks the OR host sort. balanced (default) is OR's
+        # price+uptime load balancing — no sort, current behavior. nitro is
+        # OR's documented shortcut for provider.sort="throughput" (fastest).
+        # DS4_ZDR=0 kills the whole block, so a mode only rides a ZDR route.
+        mode = os.environ.get("DS4_ROUTING_MODE", "").strip().lower()
+        if mode == "nitro":
+            prov["sort"] = "throughput"
+            notes.append("routing mode nitro -> sort=throughput")
+        elif mode and mode != "balanced":
+            notes.append(f"routing mode {mode!r} unknown; using balanced")
         payload["provider"] = prov
 
     want = payload.get("max_tokens")

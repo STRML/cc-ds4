@@ -307,6 +307,37 @@ class ZdrSwitch(EnvVarMixin, unittest.TestCase):
         self.assertNotIn("provider", p)
 
 
+class RoutingMode(EnvVarMixin, unittest.TestCase):
+    """DS4_ROUTING_MODE picks the OR host sort: balanced (default, price+uptime
+    load balancing) or nitro (provider.sort="throughput", fastest)."""
+
+    def test_default_is_balanced_with_no_sort(self):
+        p = call(max_tokens=32000)
+        proxy.rewrite(p, OPENROUTER)
+        self.assertNotIn("sort", p["provider"])
+
+    def test_nitro_sets_sort_throughput_and_keeps_zdr(self):
+        self.setenv("DS4_ROUTING_MODE", "nitro")
+        p = call(max_tokens=32000)
+        proxy.rewrite(p, OPENROUTER)
+        self.assertEqual(p["provider"]["sort"], "throughput")
+        self.assertEqual(p["provider"]["zdr"], True)
+        self.assertEqual(p["provider"]["data_collection"], "deny")
+
+    def test_nitro_does_not_add_a_provider_block_to_nous(self):
+        self.setenv("DS4_ROUTING_MODE", "nitro")
+        p = call(max_tokens=32000)
+        proxy.rewrite(p, NOUS)
+        self.assertNotIn("provider", p)
+
+    def test_unknown_mode_ignored_keeps_balanced(self):
+        self.setenv("DS4_ROUTING_MODE", "bogus")
+        p = call(max_tokens=32000)
+        proxy.rewrite(p, OPENROUTER)
+        self.assertNotIn("sort", p["provider"])
+        self.assertEqual(p["provider"]["zdr"], True)
+
+
 class ThinkingInjection(unittest.TestCase):
     """DeepSeek 400s an assistant tool_use carrying no thinking block."""
 
