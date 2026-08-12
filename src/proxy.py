@@ -158,7 +158,11 @@ FAILOVER_PROBES_TO_CLOSE = int(os.environ.get("DS4_FAILOVER_PROBES_TO_CLOSE", "3
 
 # The failover target (direct) takes real model names and ignores
 # reasoning_effort, so the ds4-* sentinel rewrite leaves behind must map onto
-# one. Flash only: the direct profile's own config runs flash for every tier,
+# one. The profiles' own qualified id (nous/openrouter both use
+# deepseek/deepseek-v4-flash-0731) is included too: a request that already
+# carries it — a /model-picker literal or a direct probe — would otherwise
+# reach the target unchanged and 400 there, which only serves its own names.
+# Flash only: the direct profile's own config runs flash for every tier,
 # and the cost difference between flash and pro is what makes failover worth
 # it — a pro main-loop request on the target would bill more than the nous
 # trip it is trying to ride out (observed: 121 trips in 25h).
@@ -167,6 +171,7 @@ FAILOVER_MODEL = {
     "ds4-xhigh": "deepseek-v4-flash[1m]",
     "ds4-high": "deepseek-v4-flash[1m]",
     "ds4-low": "deepseek-v4-flash[1m]",
+    "deepseek/deepseek-v4-flash-0731": "deepseek-v4-flash[1m]",
 }
 
 # name -> {"outcomes": deque(bool, maxlen=window), "open": bool,
