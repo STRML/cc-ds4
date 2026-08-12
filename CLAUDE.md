@@ -64,6 +64,16 @@ and the data flow diagram are load-bearing for correctness.
   routine for review-type runs. Budget accordingly.
 - **`total_cost_usd` is wrong.** The statusline has the correct per-session cost.
   Never trust the JSON `total_cost_usd` field on a ds4 profile.
+- **A 400 at the context limit names the serving profile in its numbers.**
+  DeepSeek counts input + completion against one 1M cap while Claude Code
+  budgets 131072 output. If the error shows `N input + 131072 completion`, the
+  request was served by the uncapped direct profile (failover), not nous —
+  nous/or-ds4 clamp to 65536 and the numbers wouldn't sum past the cap. Fixed
+  in PR #32, but the arithmetic is the tell.
+- **The proxy log is `~/.claude-ds4-proxy.log` (launchd), not**
+  `~/.claude-nous/proxy.log` — the latter is a stale `ds4-effort-proxy.py`
+  install path. Grep `rg "nous->direct" ~/.claude-ds4-proxy.log` to see how
+  much traffic the failover breaker is shunting.
 
 ## Testing
 
