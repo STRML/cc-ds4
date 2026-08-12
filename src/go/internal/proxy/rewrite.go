@@ -24,6 +24,11 @@ var failoverModel = map[string]string{
 	"ds4-xhigh": "deepseek-v4-flash[1m]",
 	"ds4-high":  "deepseek-v4-flash[1m]",
 	"ds4-low":   "deepseek-v4-flash[1m]",
+	// The qualified id of the or-ds4/nous profiles is here too (proxy.py's
+	// FAILOVER_MODEL has it): a :nitro variant strips to this base id, and
+	// without the key it would ride the variant onto the direct target, which
+	// 400s on it.
+	"deepseek/deepseek-v4-flash-0731": "deepseek-v4-flash[1m]",
 }
 
 var effortMap = map[string]string{
@@ -94,7 +99,13 @@ func rewrite(body []byte, cfg profiles.Profile) ([]byte, error) {
 			// to flash (proxy.py:164-171); no reasoning_effort is added. A
 			// standalone direct-profile request (not a failover target) keeps
 			// the sentinel, matching Python.
-			if flash, ok := failoverModel[root.Get("model").String()]; ok {
+			// A :nitro variant suffix is not a failoverModel key; the direct
+			// target 400s on it. Match on the base id (mirrors proxy.py).
+			key := root.Get("model").String()
+			if i := strings.IndexByte(key, ':'); i >= 0 {
+				key = key[:i]
+			}
+			if flash, ok := failoverModel[key]; ok {
 				root.SetString("model", flash)
 			}
 		}

@@ -307,35 +307,39 @@ class ZdrSwitch(EnvVarMixin, unittest.TestCase):
         self.assertNotIn("provider", p)
 
 
-class RoutingMode(EnvVarMixin, unittest.TestCase):
-    """DS4_ROUTING_MODE picks the OR host sort: balanced (default, price+uptime
-    load balancing) or nitro (provider.sort="throughput", fastest)."""
+class NitroVariant(unittest.TestCase):
+    """or-ds4 rides OR's :nitro variant (sort=throughput) on the model id.
 
-    def test_default_is_balanced_with_no_sort(self):
-        p = call(max_tokens=32000)
-        proxy.rewrite(p, OPENROUTER)
-        self.assertNotIn("sort", p["provider"])
+    The suffix goes on cfg['model']; exact-id consumers (pricing, the
+    failover remap) must strip it back to the base id.
+    """
 
-    def test_nitro_sets_sort_throughput_and_keeps_zdr(self):
-        self.setenv("DS4_ROUTING_MODE", "nitro")
-        p = call(max_tokens=32000)
+    NITRO = "deepseek/deepseek-v4-flash-0731:nitro"
+    BASE = "deepseek/deepseek-v4-flash-0731"
+
+    def test_or_ds4_model_carries_nitro(self):
+        self.assertEqual(OPENROUTER["model"], self.NITRO)
+
+    def test_sentinel_tier_rewrites_to_nitro_model(self):
+        p = call(model="ds4-high", max_tokens=32000)
         proxy.rewrite(p, OPENROUTER)
-        self.assertEqual(p["provider"]["sort"], "throughput")
+        self.assertEqual(p["model"], self.NITRO)
+
+    def test_base_model_strips_nitro_and_keeps_zdr(self):
+        self.assertEqual(proxy.base_model(OPENROUTER), self.BASE)
+        p = call(model="ds4-high", max_tokens=32000)
+        proxy.rewrite(p, OPENROUTER)
         self.assertEqual(p["provider"]["zdr"], True)
         self.assertEqual(p["provider"]["data_collection"], "deny")
 
-    def test_nitro_does_not_add_a_provider_block_to_nous(self):
-        self.setenv("DS4_ROUTING_MODE", "nitro")
-        p = call(max_tokens=32000)
-        proxy.rewrite(p, NOUS)
-        self.assertNotIn("provider", p)
+    def test_base_model_is_identity_without_suffix(self):
+        self.assertEqual(proxy.base_model(DIRECT), DIRECT["model"] or "")
 
-    def test_unknown_mode_ignored_keeps_balanced(self):
-        self.setenv("DS4_ROUTING_MODE", "bogus")
-        p = call(max_tokens=32000)
-        proxy.rewrite(p, OPENROUTER)
-        self.assertNotIn("sort", p["provider"])
-        self.assertEqual(p["provider"]["zdr"], True)
+    def test_nous_model_untouched_still_plain(self):
+        p = call(model="ds4-high", max_tokens=32000)
+        proxy.rewrite(p, NOUS)
+        self.assertEqual(p["model"], NOUS["model"])
+        self.assertNotIn("provider", p)
 
 
 class ThinkingInjection(unittest.TestCase):

@@ -375,7 +375,10 @@ PROFILES = {
         "port": 31501,
         "dir": f"{HOME}/.claude-or-ds4",
         "upstream": "https://openrouter.ai/api",
-        "model": "deepseek/deepseek-v4-flash-0731",
+        # :nitro is OR's sort=throughput variant — the fastest providers. The
+        # suffix rides the model id into every request; exact-id consumers
+        # (pricing, failover remap) strip it back to the base id first.
+        "model": "deepseek/deepseek-v4-flash-0731:nitro",
         "zdr": True,
         "spend": True,
         # Smallest max_completion_tokens in the ZDR pool (DeepInfra, Io Net).
@@ -497,16 +500,6 @@ def rewrite(payload, cfg):
         prov["data_collection"] = "deny"
         ignore = [p for p in prov.get("ignore", []) if p not in LOW_CONTEXT]
         prov["ignore"] = ignore + LOW_CONTEXT
-        # Routing mode picks the OR host sort. balanced (default) is OR's
-        # price+uptime load balancing — no sort, current behavior. nitro is
-        # OR's documented shortcut for provider.sort="throughput" (fastest).
-        # DS4_ZDR=0 kills the whole block, so a mode only rides a ZDR route.
-        mode = os.environ.get("DS4_ROUTING_MODE", "").strip().lower()
-        if mode == "nitro":
-            prov["sort"] = "throughput"
-            notes.append("routing mode nitro -> sort=throughput")
-        elif mode and mode != "balanced":
-            notes.append(f"routing mode {mode!r} unknown; using balanced")
         payload["provider"] = prov
 
     want = payload.get("max_tokens")
@@ -581,6 +574,15 @@ def get_json(name, cfg, path, timeout=6):
         return json.load(r)
 
 
+def base_model(cfg):
+    """A profile's published model id, with any OR variant suffix (:nitro)
+    stripped. Variable-alias pricing, failover remap, and any other consumer
+    that matches on the exact upstream id must use this, not cfg['model'].
+    """
+    m = cfg["model"] or ""
+    return m.split(":")[0] if ":" in m else m
+
+
 def pricing(name, cfg):
     """Per-token rates, cached forever.
 
@@ -588,17 +590,19 @@ def pricing(name, cfg):
     the cheapest endpoint is where ZDR routing mostly lands, so it is the right
     estimate there. Nous has no such sub-resource and publishes the price on the
     model itself in /v1/models, already discounted. Same key names either way.
+    The variant suffix (":nitro") is not a published id — look up the base.
     """
+    model = base_model(cfg)
     with _lock:
         if _cache.get((name, "pricing")):
             return _cache[(name, "pricing")]
     try:
-        d = get_json(name, cfg, f"/v1/models/{cfg['model']}/endpoints")["data"]
+        d = get_json(name, cfg, f"/v1/models/{model}/endpoints")["data"]
         p = min(d["endpoints"], key=lambda e: float(e["pricing"]["prompt"]))["pricing"]
     except Exception:
         try:
             d = get_json(name, cfg, "/v1/models")["data"]
-            p = next(m["pricing"] for m in d if m.get("id") == cfg["model"])
+            p = next(m["pricing"] for m in d if m.get("id") == model)
         except Exception:
             return None
     out = {k: float(p[k]) for k in ("prompt", "completion", "input_cache_read") if k in p}
@@ -873,8 +877,10 @@ def make_handler(name, cfg):
                 # ignores reasoning_effort, so a ds4-* sentinel the rewrite left
                 # untouched maps onto one of its models.
                 if eff_cfg is not cfg and isinstance(payload.get("model"), str):
-                    payload["model"] = FAILOVER_MODEL.get(payload["model"],
-                                                          payload["model"])
+                    # A :nitro variant suffix is not a FAILOVER_MODEL key; the
+                    # direct target 400s on it. Match on the base id.
+                    base = payload["model"].split(":")[0]
+                    payload["model"] = FAILOVER_MODEL.get(base, payload["model"])
 
                 # vision: replace image blocks with text descriptions before
                 # the body is serialized, so the upstream never receives an
