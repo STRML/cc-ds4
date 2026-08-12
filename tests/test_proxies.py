@@ -986,6 +986,16 @@ class FailoverDripTuning(unittest.TestCase):
         for tier in ("ds4-max", "ds4-xhigh", "ds4-high", "ds4-low"):
             self.assertEqual(proxy.FAILOVER_MODEL[tier], "deepseek-v4-flash[1m]")
 
+    def test_failover_model_maps_the_profiles_own_qualified_id(self):
+        # A request that already carries the profile's own id (nous/openrouter:
+        # deepseek/deepseek-v4-flash-0731) reaches the direct target unchanged
+        # and 400s there. It must remap onto the same flash literal, exactly
+        # like a sentinel. The bare direct id stays put so real direct traffic
+        # is untouched.
+        self.assertEqual(proxy.FAILOVER_MODEL["deepseek/deepseek-v4-flash-0731"],
+                         "deepseek-v4-flash[1m]")
+        self.assertNotIn("deepseek-v4-flash[1m]", proxy.FAILOVER_MODEL)
+
 
 if __name__ == "__main__":
     unittest.main()
