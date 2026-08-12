@@ -105,6 +105,10 @@ class FakeUpstream:
     def close(self):
         self._server.shutdown()
         self._server.server_close()
+        # Join the serve_forever thread so it does not linger past the fixture's
+        # life (a leaked non-joined thread keeps the interpreter from exiting
+        # cleanly in the harness, which boots many fakes per run).
+        self._thread.join()
 
     def __enter__(self):
         return self

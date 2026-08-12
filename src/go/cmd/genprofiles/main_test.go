@@ -1,0 +1,305 @@
+package main
+
+import (
+	"strings"
+	"testing"
+)
+
+// TestRequireKeys pins the generator's format-fragility guard: a profile body
+// missing a required key must fail loudly instead of emitting a zero value.
+// Every key the emitted Profile struct needs must be PRESENT — Python reads
+// them with bare key access (cfg["max_out"] raises KeyError on absence) — and
+// a present-but-wrong-typed value must be caught, not silently zeroed. Keys
+// whose value is None (model/failover/max_out) are legal but must still be
+// present.
+func TestRequireKeys(t *testing.T) {
+	good := `        "port": 31500,
+        "dir": f"{HOME}/.claude-ds4",
+        "upstream": "https://api.deepseek.com/anthropic",
+        "model": None,
+        "zdr": False,
+        "spend": False,
+        "max_out": 65536,
+        "inject": True,
+        "failover": None,
+`
+	if err := requireKeys("direct", good); err != nil {
+		t.Fatalf("well-formed body rejected: %v", err)
+	}
+
+	// Every required key must be present, including the None-valued ones.
+	for _, missing := range []string{"port", "dir", "upstream", "zdr", "spend", "inject", "model", "failover", "max_out"} {
+		bad := strings.Replace(good, `"`+missing+`"`, `"`+missing+`x"`, 1)
+		if err := requireKeys("direct", bad); err == nil {
+			t.Errorf("body missing %q accepted", missing)
+		}
+	}
+
+	// Type mismatches: a key present but with the WRONG type must be caught, or
+	// it would emit a silent zero value (e.g. "port": "31500" as a string ->
+	// intValue returns 0 -> the direct profile loses its max_tokens clamp).
+	for _, typed := range []struct{ key, wrong string }{
+		{"port", `"port": "31500"`},       // string where int belongs
+		{"zdr", `"zdr": "False"`},          // string where bool belongs
+		{"inject", `"inject": 1`},          // int where bool belongs
+		{"dir", `"dir": 123`},              // int where str belongs
+		{"max_out", `"max_out": "65536"`},  // string where int belongs
+		{"model", `"model": 123`},          // int where str-or-None belongs
+		{"failover", `"failover": 123`},    // int where str-or-None belongs
+	} {
+		bad := strings.Replace(good, `"`+typed.key+`":`, typed.wrong+`,`, 1)
+		if err := requireKeys("direct", bad); err == nil {
+			t.Errorf("type-mismatch for %q accepted (would emit zero value)", typed.key)
+		}
+	}
+
+	// A float max_out (e.g. 0.5) must be rejected: it matches intFieldRE's
+	// \d+ prefix but is not a bare int, and would emit MaxOut: 0 while Python
+	// applies the float clamp.
+	for _, bad := range []string{
+		`"max_out": 0.5`,
+		`"max_out": 65536.0`,
+		`"max_out": -3`,
+		`"max_out": "65536"`,
+	} {
+		replaced := strings.Replace(good, `        "max_out": 65536,
+`, "        "+bad+",\n", 1)
+		if err := requireKeys("direct", replaced); err == nil {
+			t.Errorf("non-int max_out %q accepted (would emit zero value)", bad)
+		}
+	}
+
+	// max_out: None remains valid (Python: cfg["max_out"] present but falsy).
+	if err := requireKeys("direct", strings.Replace(good, `        "max_out": 65536,
+`, `        "max_out": None,
+`, 1)); err != nil {
+		t.Fatalf("max_out: None should be accepted, got %v", err)
+	}
+	// model/failover: None remain valid too.
+	if err := requireKeys("direct", strings.Replace(good, `        "model": None,
+`, `        "model": None,
+`, 1)); err != nil {
+		t.Fatalf("model: None should be accepted, got %v", err)
+	}
+}
+
+// TestIntValueUnderscores pins that Python underscore integer literals parse
+// correctly: 31_501 == 31501, and the value is not truncated at the prefix.
+func TestIntValueUnderscores(t *testing.T) {
+	body := `        "port": 31_501,
+`
+	if got := intValue(body, "port"); got != 31501 {
+		t.Fatalf("intValue(31_501) = %d, want 31501 (underscore literal must match Python)", got)
+	}
+}
+
+// TestExpressionValuesRejected pins that expression-valued fields fail
+// requireKeys: a Python expression like "upstream": "..." + "/api" or
+// "inject": False or True would pass a bare-prefix match yet emit only the
+// first fragment, routing to the wrong endpoint or dropping thinking injection.
+func TestExpressionValuesRejected(t *testing.T) {
+	good := `        "port": 31500,
+        "dir": f"{HOME}/.claude-ds4",
+        "upstream": "https://api.deepseek.com/anthropic",
+        "model": None,
+        "zdr": False,
+        "spend": False,
+        "max_out": 65536,
+        "inject": True,
+        "failover": None,
+`
+	for _, bad := range []string{
+		`"upstream": "https://api.deepseek.com" + "/anthropic"`, // str + concat
+		`"inject": False or True`,                              // bool expression
+		`"dir": f"{HOME}/.claude-ds4" + "/x"`,                  // f-string + concat
+		`"model": None or "deepseek/deepseek-v4-flash-0731"`,   // None + expression
+		`"failover": None or "direct"`,                         // None + expression
+	} {
+		key := strings.SplitN(bad, `"`, 3)[1]
+		replaced := strings.Replace(good, `"`+key+`":`, bad+`,`, 1)
+		if err := requireKeys("direct", replaced); err == nil {
+			t.Errorf("expression value for %q accepted (would emit wrong value)", key)
+		}
+	}
+}
+
+// TestProfileRENames pins that any valid quoted profile name parses — hyphens,
+// dots, and spaces are all legal in a Python dict key, and a restricted name
+// class would silently drop a profile like "staging.profile".
+func TestProfileRENames(t *testing.T) {
+	for _, name := range []string{"staging-profile", "staging.profile", "staging profile", "'staging'"} {
+		key := name
+		if strings.HasPrefix(name, "'") {
+			key = name // already single-quoted
+		} else {
+			key = `"` + name + `"`
+		}
+		block := `PROFILES = {
+    ` + key + `: {
+        "port": 31600,
+        "dir": f"{HOME}/.claude-staging",
+        "upstream": "https://example.com",
+        "model": None,
+        "zdr": False,
+        "spend": False,
+        "max_out": None,
+        "inject": False,
+        "failover": None,
+    },
+}`
+		matches := profileRE.FindAllSubmatch([]byte(block), -1)
+		if len(matches) != 1 || string(matches[0][1]) != strings.Trim(name, `'"`) {
+			t.Fatalf("profile %q not parsed: %d matches, want [%s]", name, len(matches), strings.Trim(name, `'"`))
+		}
+	}
+
+	// An escaped quote in a name must be REJECTED by rejectEscapedNames, so the
+	// generator fails loudly rather than silently emitting a wrong partial name.
+	escaped := `PROFILES = {
+    "staging\"blue": {
+        "port": 31600,
+        "dir": f"{HOME}/.claude-staging",
+        "upstream": "https://example.com",
+        "model": None,
+        "zdr": False,
+        "spend": False,
+        "max_out": None,
+        "inject": False,
+        "failover": None,
+    },
+}`
+	if err := rejectEscapedNames([]byte(escaped)); err == nil {
+		t.Fatal("escaped-quote name accepted — would silently emit the wrong profile name")
+	}
+
+	// Same, with an inline comment after the opening brace — the comment must
+	// not hide the escaped quote from the guard.
+	escapedComment := `PROFILES = {
+    "staging\"blue": {  # temporary
+        "port": 31600,
+        "dir": f"{HOME}/.claude-staging",
+        "upstream": "https://example.com",
+        "model": None,
+        "zdr": False,
+        "spend": False,
+        "max_out": None,
+        "inject": False,
+        "failover": None,
+    },
+}`
+	if err := rejectEscapedNames([]byte(escapedComment)); err == nil {
+		t.Fatal("escaped-quote name with inline comment accepted — would silently emit the wrong profile name")
+	}
+
+	// A '#' INSIDE the quoted key is part of the name, not a comment; it must
+	// not hide the escaped quote from the guard.
+	escapedHash := `PROFILES = {
+    "staging#x\"blue": {
+        "port": 31600,
+        "dir": f"{HOME}/.claude-staging",
+        "upstream": "https://example.com",
+        "model": None,
+        "zdr": False,
+        "spend": False,
+        "max_out": None,
+        "inject": False,
+        "failover": None,
+    },
+}`
+	if err := rejectEscapedNames([]byte(escapedHash)); err == nil {
+		t.Fatal("escaped-quote name with # in key accepted — would silently emit the wrong profile name")
+	}
+}
+
+// TestDuplicateKeysRejected pins that a duplicate required key fails loudly:
+// Python dict construction keeps the LAST occurrence while the emitter reads
+// the FIRST, so a duplicate would make Go emit a different value than Python.
+func TestDuplicateKeysRejected(t *testing.T) {
+	good := `        "port": 31500,
+        "dir": f"{HOME}/.claude-ds4",
+        "upstream": "https://api.deepseek.com/anthropic",
+        "model": None,
+        "zdr": False,
+        "spend": False,
+        "max_out": 65536,
+        "inject": True,
+        "failover": None,
+`
+	// Add a second max_out: None — Python keeps None (no clamp), the emitter
+	// reads the first 65536. Must be rejected.
+	dupe := strings.Replace(good, `        "inject": True,
+`, `        "inject": True,
+        "max_out": None,
+`, 1)
+	if err := requireKeys("direct", dupe); err == nil {
+		t.Fatal("duplicate max_out accepted — Go would clamp while Python would not")
+	}
+
+	// Mixed-validity duplicate: the second occurrence is invalid Python
+	// (0.5 matches no typed regex) but IS a syntactic key occurrence. Python
+	// keeps it; the typed-count would miss it. Must be rejected.
+	mixed := strings.Replace(good, `        "inject": True,
+`, `        "inject": True,
+        "max_out": 0.5,
+`, 1)
+	if err := requireKeys("direct", mixed); err == nil {
+		t.Fatal("mixed-validity duplicate max_out accepted — Python would keep the invalid final value")
+	}
+}
+
+// TestDirFString pins that the dir key's supported f-string form parses while
+// an arbitrary f-string (non-{HOME}) is rejected — the generator cannot
+// evaluate {HOST} and must not emit literal braces.
+func TestDirFString(t *testing.T) {
+	good := `        "dir": f"{HOME}/.claude-ds4",
+`
+	if got := strValue(good, "dir"); got != "{HOME}/.claude-ds4" {
+		t.Fatalf("dir f-string = %q, want {HOME}/.claude-ds4", got)
+	}
+	if !anyFieldPresent(good, "dir") {
+		t.Fatal("dir f-string not seen as present")
+	}
+	bad := `        "dir": f"{HOST}/x",
+`
+	if got := strValue(bad, "dir"); got != "" {
+		t.Fatalf("arbitrary dir f-string = %q, want empty (must be rejected)", got)
+	}
+}
+
+// TestEnsureProfiles pins the coverage guard: the parse must contain every
+// required profile with no duplicates. A zero-match parse (indent reformat), a
+// partial parse (one required profile's closing brace reformatted), or a
+// duplicate name are bugs that would silently ship a wrong generated table. An
+// EXTRA profile is legitimate — the table is the source of truth and new
+// profiles must flow through.
+func TestEnsureProfiles(t *testing.T) {
+	full := func() [][][]byte {
+		out := make([][][]byte, 0, len(requiredProfiles))
+		for _, name := range requiredProfiles {
+			out = append(out, [][]byte{[]byte("fullmatch"), []byte(name)})
+		}
+		return out
+	}
+
+	if err := ensureProfiles(full()); err != nil {
+		t.Fatalf("complete set rejected: %v", err)
+	}
+	if err := ensureProfiles(nil); err == nil {
+		t.Fatal("zero matches accepted — would silently write an empty table")
+	}
+	if err := ensureProfiles(full()[:len(full())-1]); err == nil {
+		t.Fatal("partial match (one required profile dropped) accepted — would silently omit it")
+	}
+	// Extra profile is fine (source of truth allows growth).
+	if err := ensureProfiles(append(full(), [][][]byte{{[]byte("fullmatch"), []byte("new-profile")}}...)); err != nil {
+		t.Fatalf("extra legitimate profile rejected: %v", err)
+	}
+	// Duplicate name: all required names present but one appears twice — the
+	// generator would emit two rows with the same name and ds4-proxy would
+	// double-bind the port.
+	dupe := full()
+	dupe[1] = dupe[0]
+	if err := ensureProfiles(dupe); err == nil {
+		t.Fatal("duplicate profile accepted — would emit two rows with one port")
+	}
+}

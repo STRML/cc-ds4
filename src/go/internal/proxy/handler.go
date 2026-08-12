@@ -19,6 +19,7 @@ type Handler struct {
 	cfg              profiles.Profile
 	client           *http.Client // relay client w/ idle timeout + DisableCompression
 	classifierClient *http.Client // classifier client: DisableCompression, no deadline wrapper
+	classifierModel  string       // resolved once at build (Python reads it at module load, proxy.py:65)
 	br               breaker      // failover circuit breaker (per profile)
 }
 
@@ -48,6 +49,7 @@ func NewHandler(cfg profiles.Profile, relayTimeout time.Duration) *Handler {
 		cfg:              cfg,
 		client:           &http.Client{Transport: transport},
 		classifierClient: &http.Client{Transport: classifierTransport},
+		classifierModel:  classifierModelOverride(),
 	}
 }
 
