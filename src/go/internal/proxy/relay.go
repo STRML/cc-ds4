@@ -52,6 +52,11 @@ var skipRelayHeaders = map[string]bool{
 }
 
 // retryAttempts returns how many upstream attempts a request gets. It mirrors
+// errPeekLimit is how much of a non-2xx body is read so the failover decision
+// can inspect it. Big enough for any provider's JSON error envelope, small
+// enough that a huge error page is not buffered.
+const errPeekLimit = 8192
+
 // mainLoopTier is what ANTHROPIC_MODEL is set to out of the box.
 const mainLoopTier = "ds4-pro-xhigh"
 
@@ -206,6 +211,11 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	effUpstream := effCfg.Upstream
 
 	if requires && (!effCfg.ZDR || !zdrEnabled()) {
+		// This request is answered here and never reaches an upstream, so it
+		// cannot be the trial. Hand it back for the next one.
+		if trial {
+			h.releaseTrial()
+		}
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(409)
 		io.WriteString(w, `{"error": {"message": "request requires ZDR, but this route cannot enforce it"}}`)
@@ -222,11 +232,16 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	// A request that demands ZDR is excluded: the classifier relay rebuilds the
 	// body from a whitelist that cannot carry the provider block, and the
 	// marker is a routing demand, so it stays on its ZDR route.
+	// A classifier answered off-profile also never reaches this upstream, so it
+	// releases the trial on the way out for the same reason the ZDR gate does.
 	if !requires && h.isClassifier(body) {
 		switch classifierRoute() {
 		case "zdr":
 			if body2, url, key := h.orDS4Endpoint(body); url != "" {
 				if h.sendClassifier(body2, url, key, w) {
+					if trial {
+						h.releaseTrial()
+					}
 					return
 				}
 			}
@@ -235,6 +250,9 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 		case "anthropic":
 			if tok := classifierToken(); tok != "" {
 				if h.relayClassifier(body, classifierUpstream, tok, w) {
+					if trial {
+						h.releaseTrial()
+					}
 					return
 				}
 			}
@@ -310,10 +328,24 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 		// A non-2xx small enough to be an error body is read so the failover
 		// decision can look at it: some refusals carry the reason in the body
 		// rather than the status (a drained balance arrives as a 404).
+		//
+		// The peek is taken without consulting ContentLength. A chunked error
+		// response declares -1, and gating on a declared length meant Nous's
+		// drained-balance 404 went unread whenever it arrived chunked — the
+		// body never reached creditExhausted, no failover was attempted, and
+		// the caller got back the bare 404 that reads as a missing model. That
+		// is the exact bug this path exists to prevent, so nothing about
+		// detecting it may depend on the upstream's choice of framing.
+		//
+		// What is read is pushed back in front of the body rather than
+		// replacing it, so a response larger than the peek still streams whole.
 		var errBody []byte
-		if resp.StatusCode >= 400 && resp.ContentLength >= 0 && resp.ContentLength < 8192 {
-			errBody, _ = io.ReadAll(io.LimitReader(resp.Body, 8192))
-			resp.Body = io.NopCloser(bytes.NewReader(errBody))
+		if resp.StatusCode >= 400 {
+			errBody, _ = io.ReadAll(io.LimitReader(resp.Body, errPeekLimit))
+			resp.Body = struct {
+				io.Reader
+				io.Closer
+			}{io.MultiReader(bytes.NewReader(errBody), resp.Body), resp.Body}
 		}
 		drained := creditExhausted(resp.StatusCode, errBody)
 		if drained {

@@ -91,15 +91,17 @@ type breaker struct {
 	open      bool
 	probes    int
 	lastProbe time.Time
-	// trial is armed once the probe streak is long enough to believe the
-	// upstream is back, and cleared the moment one request claims it. Exactly
-	// one request goes to the profile's own upstream; its outcome, not the
-	// probe's, decides whether the circuit closes. See trialClose.
+	// trial holds an unclaimed trial: the probe streak was long enough to
+	// believe the upstream is back, but no request has taken it to that
+	// upstream yet. It is set by releaseTrial when a request claimed the trial
+	// and then returned without ever reaching the upstream, so the next request
+	// inherits it instead of the streak's work being thrown away.
 	trial bool
-	// trialActive is set while that claimed request is in flight. Without the
-	// split, every request arriving during the arm window would take the trial
-	// together, and a burst would all hit an upstream that is still down —
-	// each failing hard instead of being served by the target.
+	// trialActive is set while a claimed trial request is in flight. The split
+	// is what makes the claim exclusive: exactly one request goes to the
+	// profile's own upstream, and its outcome — not the probe's — decides
+	// whether the circuit closes. Without it a burst arriving together would
+	// all take the trial and all hit an upstream that may still be down.
 	trialActive bool
 }
 
@@ -237,6 +239,25 @@ func (h *Handler) trialClose(clean bool) bool {
 	fmt.Printf("  [%s] failover: a real request was served cleanly, back on its own upstream\n",
 		h.cfg.Name)
 	return true
+}
+
+// releaseTrial hands a claimed trial back unclaimed, for a request that took it
+// and then answered without ever contacting the upstream.
+//
+// Routing is decided at the top of the relay, but several paths return before
+// the upstream is dialed: the ZDR 409 refusal, and the permission classifier,
+// which in auto mode is the most frequent small request there is. Those learn
+// nothing about whether the upstream recovered. Without this the streak's work
+// is spent on a request that never tested anything, probes reset to zero, and
+// the profile stays on its failover target for another full recheck interval
+// before it can even try to come home.
+func (h *Handler) releaseTrial() {
+	h.br.mu.Lock()
+	defer h.br.mu.Unlock()
+	if h.br.trialActive {
+		h.br.trialActive = false
+		h.br.trial = true
+	}
 }
 
 // probeUpstream sends a minimal POST /v1/messages to the profile's own

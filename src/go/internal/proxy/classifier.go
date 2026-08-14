@@ -104,8 +104,23 @@ var classifierTiers = map[string]bool{
 // the log to say so. TestClassifierTiersAreFlashSentinels pins the names.
 func (h *Handler) isClassifier(body []byte) bool {
 	model, mt, ok := jsonpy.PeekModelMaxTokens(body)
-	return ok && classifierTiers[model] && mt <= nothinkBelow
+	return ok && classifierTiers[model] && mt <= classifierMaxTokens
 }
+
+// classifierMaxTokens is the size ceiling that separates the permission gate
+// from a subagent riding the same sentinel.
+//
+// It deliberately does NOT reuse nothinkBelow, even though both default to
+// 8192. nothinkBelow is a documented user knob (DS4_NOTHINK_BELOW, in the
+// README and every profile doc) for how big a request may be before thinking
+// is disabled, and install.sh persists the whole DS4_* namespace into the
+// launch agent. Sharing the value would mean widening the no-think window also
+// widened what counts as the classifier — so DS4_NOTHINK_BELOW=32768, set for
+// an unrelated reason, would start routing every flash subagent request under
+// 32K to api.anthropic.com on the subscription token, rebuilt through a
+// whitelist that drops fields. A trust boundary does not move as a side effect
+// of a thinking-budget preference; it gets its own knob.
+var classifierMaxTokens = envInt("DS4_CLASSIFIER_MAX_TOKENS", 8192)
 
 // requiresZDR reports the proxy-local per-request ZDR demand and strips it from
 // the body.
@@ -120,6 +135,14 @@ func (h *Handler) isClassifier(body []byte) bool {
 func requiresZDR(r *http.Request, body []byte) (bool, []byte) {
 	hdr := strings.ToLower(strings.TrimSpace(r.Header.Get("x-ds4-require-zdr")))
 	required := hdr == "1" || hdr == "true" || hdr == "yes"
+
+	// The re-serialize is skipped unless the field is actually there. Every
+	// request pays this call, the field is absent on virtually all of them, and
+	// on a 1M-context profile a needless parse-and-re-emit of a multi-megabyte
+	// body is pure waste on the hot path.
+	if !bytes.Contains(body, []byte(zdrRequireField)) {
+		return required, body
+	}
 
 	var sawField bool
 	stripped, err := jsonpy.Marshal(body, func(root *jsonpy.OrderedValue) {
@@ -139,12 +162,6 @@ func requiresZDR(r *http.Request, body []byte) (bool, []byte) {
 
 // zdrRequireField is the body-field spelling of the per-request ZDR demand.
 const zdrRequireField = "ds4_require_zdr"
-
-// isZDRRequest is the header-only check, used where the body is not in hand.
-func isZDRRequest(r *http.Request) bool {
-	hdr := strings.ToLower(strings.TrimSpace(r.Header.Get("x-ds4-require-zdr")))
-	return hdr == "1" || hdr == "true" || hdr == "yes"
-}
 
 // classifierToken mirrors classifier_token() in classifier.py: the
 // subscription token from DS4_CLASSIFIER_TOKEN, or empty (fail open to ds4).

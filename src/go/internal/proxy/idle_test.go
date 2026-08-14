@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -122,6 +123,50 @@ func TestSessionsLive_IgnoresNonPIDEntries(t *testing.T) {
 
 // ---- claudeRunning ----------------------------------------------------------
 
+// claudeRunningPoll is how long the liveness tests wait for ps to report a
+// process they just spawned.
+//
+// These tests call scanClaudeRunning, not claudeRunning, and skip when the
+// scan reports an error. `ps -E -ax` dumps every process's environment, so its
+// cost scales with the rest of the machine and on a loaded box it blows
+// claudeRunningTimeout — which is a fact about the box, not a defect in the
+// matching this test exists to check. Asserting through the fail-safe wrapper
+// instead would be worse than flaky: claudeRunning answers true on a failed
+// scan, so the positive cases would pass without the match ever being tested.
+const claudeRunningPoll = 5 * time.Second
+
+// pollScan waits for the scan to report dir as running. It returns false only
+// if the deadline passed with the scan working and never matching; a scan that
+// cannot run skips the test.
+func pollScan(t *testing.T, dir string) bool {
+	t.Helper()
+	deadline := time.Now().Add(claudeRunningPoll)
+	for {
+		running, err := scanClaudeRunning(dir)
+		if err != nil {
+			t.Skipf("process scan unavailable on this machine: %v", err)
+		}
+		if running {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond) // avoid hammering ps in a busy spin
+	}
+}
+
+// requireScan skips when the process scan cannot run at all. claudeRunning
+// fails safe to "in use" in that case, so any test asserting that a quiet
+// profile reads as NOT in use is really asserting the scan works — and would
+// otherwise report a sandbox that forbids exec'ing ps as a product defect.
+func requireScan(t *testing.T) {
+	t.Helper()
+	if _, err := scanClaudeRunning(filepath.Join(t.TempDir(), "nobody")); err != nil {
+		t.Skipf("process scan unavailable on this machine: %v", err)
+	}
+}
+
 func TestClaudeRunning_MatchesLiveProcessEnv(t *testing.T) {
 	dir := t.TempDir()
 	cmd := spawnHelperProcess(t, dir)
@@ -134,21 +179,39 @@ func TestClaudeRunning_MatchesLiveProcessEnv(t *testing.T) {
 	}()
 	// ps needs a moment to see the new process; poll rather than sleep a
 	// fixed guess.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if claudeRunning(dir) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("claudeRunning never saw the CLAUDE_CONFIG_DIR of a live process")
-		}
-		time.Sleep(20 * time.Millisecond) // avoid hammering ps in a busy spin
+	if !pollScan(t, dir) {
+		t.Fatal("the scan never saw the CLAUDE_CONFIG_DIR of a live process")
 	}
 }
 
 func TestClaudeRunning_NoMatch(t *testing.T) {
-	if claudeRunning(filepath.Join(t.TempDir(), "nobody-uses-this-dir")) {
+	running, err := scanClaudeRunning(filepath.Join(t.TempDir(), "nobody-uses-this-dir"))
+	if err != nil {
+		t.Skipf("process scan unavailable on this machine: %v", err)
+	}
+	if running {
 		t.Fatal("a dir no process was launched with should not read as running")
+	}
+}
+
+// TestClaudeRunningFailsSafe pins the direction of the unknown case. A scan
+// that cannot run must read as "in use": answering false would let the idle
+// watcher shut the proxy down while a session is live, and the session's next
+// request would fail for a reason the user cannot see.
+func TestClaudeRunningFailsSafe(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("the /proc scan does not shell out, so it has no unavailable case")
+	}
+	// An empty PATH makes the ps lookup fail immediately, which is the same
+	// error class as the timeout on a loaded machine.
+	t.Setenv("PATH", "")
+	dir := filepath.Join(t.TempDir(), "nobody-uses-this-dir")
+
+	if _, err := scanClaudeRunning(dir); err == nil {
+		t.Fatal("setup: the scan was expected to fail with no ps on PATH")
+	}
+	if !claudeRunning(dir) {
+		t.Fatal("a scan that cannot run must read as in use, not as idle")
 	}
 }
 
@@ -163,19 +226,16 @@ func TestClaudeRunning_PrefixDoesNotMatchAsSubstring(t *testing.T) {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if claudeRunning(backupDir) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("setup: claudeRunning never saw the backup dir process")
-		}
-		time.Sleep(20 * time.Millisecond) // avoid hammering ps in a busy spin
+	if !pollScan(t, backupDir) {
+		t.Fatal("setup: the scan never saw the backup dir process")
 	}
 	// dir is a strict prefix of backupDir's CLAUDE_CONFIG_DIR value; it must
 	// not match, or a live "-backup" profile would pin the plain one up too.
-	if claudeRunning(dir) {
+	running, err := scanClaudeRunning(dir)
+	if err != nil {
+		t.Skipf("process scan unavailable on this machine: %v", err)
+	}
+	if running {
 		t.Fatal("a dir that is only a prefix of the real CLAUDE_CONFIG_DIR must not match")
 	}
 }
@@ -199,6 +259,7 @@ func TestAnythingInUse_TrueIfAnyProfileHasLiveSession(t *testing.T) {
 }
 
 func TestAnythingInUse_FalseWhenAllQuiet(t *testing.T) {
+	requireScan(t)
 	cfgs := []profiles.Profile{
 		{Name: "a", Dir: t.TempDir()},
 		{Name: "b", Dir: t.TempDir()},
@@ -222,6 +283,7 @@ func TestShouldExit_RecentActivityPreventsExit(t *testing.T) {
 }
 
 func TestShouldExit_PastTimeoutWithNothingInUseExits(t *testing.T) {
+	requireScan(t)
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	lastSeen := now.Add(-2 * time.Minute)
 	clock := func() time.Time { return now }

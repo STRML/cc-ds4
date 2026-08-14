@@ -185,26 +185,52 @@ const claudeRunningTimeout = 10 * time.Second
 // implementations below compare the whole value, so a backup directory that has
 // this one as a path prefix does not pin the proxy up.
 func claudeRunning(dir string) bool {
+	running, err := scanClaudeRunning(dir)
+	if err != nil {
+		// The scan could not answer. Treating that as "nothing is running" is
+		// the unsafe reading: it lets the watcher exit the proxy out from
+		// under a live session, and the session then fails its next request
+		// for no reason the user can see. A missed idle exit costs an idle
+		// process until the next tick; assume in use.
+		//
+		// This is not hypothetical. `ps -E -ax` dumps every process's
+		// environment, so its cost scales with what else is on the machine,
+		// and on a loaded box it exceeds claudeRunningTimeout and comes back
+		// as an error — exactly when the user is most likely to have work in
+		// flight.
+		return true
+	}
+	return running
+}
+
+// scanClaudeRunning is claudeRunning without the fail-safe: it reports what the
+// scan actually found, and an error when it could not look. Kept separate so
+// the tests can tell "no process matched" apart from "the scan did not run",
+// which the bool alone cannot express.
+func scanClaudeRunning(dir string) (bool, error) {
 	// ps -E is BSD syntax for "show the environment". Linux ps spells that
 	// differently and silently means something else, so the ps path there
 	// would never match and the watch would exit out from under a live
 	// session. Read /proc instead, which is the same question asked natively.
 	if runtime.GOOS == "linux" {
-		return claudeRunningProc(dir)
+		return claudeRunningProc(dir), nil
 	}
 	return claudeRunningPS(dir)
 }
 
-func claudeRunningPS(dir string) bool {
+func claudeRunningPS(dir string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), claudeRunningTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "ps", "-E", "-ax", "-o", "command=").Output()
 	if err != nil {
-		return false
+		return false, err
 	}
 	pattern := regexp.QuoteMeta("CLAUDE_CONFIG_DIR="+dir) + `(\s|$)`
 	matched, err := regexp.Match(pattern, out)
-	return err == nil && matched
+	if err != nil {
+		return false, err
+	}
+	return matched, nil
 }
 
 // claudeRunningProc scans /proc/<pid>/environ for the config dir.

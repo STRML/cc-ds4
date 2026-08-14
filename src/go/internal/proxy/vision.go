@@ -66,6 +66,13 @@ func applyVision(body []byte, cfg profiles.Profile) ([]byte, error) {
 	if !visionEnabled() {
 		return body, nil
 	}
+	// Nothing image-shaped means nothing to do, and the walk cannot find a
+	// block whose type is "image" if that literal is absent from the bytes. The
+	// check saves a full parse-and-re-emit on every text-only request, which on
+	// a 1M-context profile is most of them and megabytes each.
+	if !bytes.Contains(body, []byte(`"image"`)) {
+		return body, nil
+	}
 	cacheDir := filepath.Join(cfg.Dir, "vision-cache")
 	return jsonpy.Marshal(body, func(root *jsonpy.OrderedValue) {
 		// Every OS-touching failure inside the walk (missing binary, timeout,
@@ -146,13 +153,17 @@ func rewriteBlocks(content *jsonpy.OrderedValue, cacheDir string, budget *int) {
 				items[i] = placeholderBlock()
 				continue
 			}
-			replacement, fresh := swapImage(block, cacheDir)
+			replacement, spent := swapImage(block, cacheDir)
 			items[i] = replacement
-			// Only a real child spawn spends budget. A cache hit does no
-			// describe work, and charging it would permanently placeholder
-			// every image past position N once a cached prefix filled the
-			// budget on every turn.
-			if fresh == 1 {
+			// Budget is charged for time spent, not for descriptions
+			// obtained. A cache hit costs nothing and is exempt — charging it
+			// would permanently placeholder every image past position N once a
+			// cached prefix filled the budget on every turn. But a child that
+			// times out, exits nonzero, or returns junk has already burned up
+			// to childTimeout, and charging only successes let exactly that
+			// case run unbounded: the cap fails open in the one situation it
+			// exists to bound.
+			if spent {
 				*budget--
 			}
 		case "tool_result":
@@ -161,8 +172,9 @@ func rewriteBlocks(content *jsonpy.OrderedValue, cacheDir string, budget *int) {
 	}
 }
 
-// swapImage returns the replacement block for one image block, and whether a
-// child actually ran (1) versus a cache hit or any failure (0). Never panics;
+// swapImage returns the replacement block for one image block, and whether the
+// lookup spent real time (ran a child, or blocked waiting on one) as opposed to
+// being served from cache or rejected before any work started. Never panics;
 // every failure mode — wrong source shape, missing/invalid metadata, bad
 // base64 — becomes the placeholder so nothing image-shaped survives.
 //
@@ -170,19 +182,19 @@ func rewriteBlocks(content *jsonpy.OrderedValue, cacheDir string, budget *int) {
 // reference is not followed: the proxy must never open a path from the
 // request body, which would be a local arbitrary-file-read primitive on an
 // unauthenticated loopback listener. Such blocks become the placeholder.
-func swapImage(block *jsonpy.OrderedValue, cacheDir string) (*jsonpy.OrderedValue, int) {
+func swapImage(block *jsonpy.OrderedValue, cacheDir string) (*jsonpy.OrderedValue, bool) {
 	src := block.Get("source")
 	if !src.IsObject() || src.Get("type").String() != "base64" {
-		return placeholderBlock(), 0
+		return placeholderBlock(), false
 	}
 	data := src.Get("data")
 	mediaType := src.Get("media_type")
 	if !data.IsString() || data.String() == "" || !mediaType.IsString() || mediaType.String() == "" {
-		return placeholderBlock(), 0
+		return placeholderBlock(), false
 	}
 	imageBytes, err := base64.StdEncoding.DecodeString(data.String())
 	if err != nil || len(imageBytes) == 0 {
-		return placeholderBlock(), 0
+		return placeholderBlock(), false
 	}
 	return transcribeBytes(imageBytes, mediaType.String(), cacheDir)
 }
@@ -191,15 +203,16 @@ func swapImage(block *jsonpy.OrderedValue, cacheDir string) (*jsonpy.OrderedValu
 // back to the placeholder. The "[image transcribed by ...]" prefix appears
 // ONLY on a real description, so nothing claims a transcription that never
 // happened.
-func transcribeBytes(imageBytes []byte, mediaType, cacheDir string) (*jsonpy.OrderedValue, int) {
-	text, fresh := transcribe(imageBytes, mediaType, cacheDir)
+func transcribeBytes(imageBytes []byte, mediaType, cacheDir string) (*jsonpy.OrderedValue, bool) {
+	text, spent := transcribe(imageBytes, mediaType, cacheDir)
 	if text == "" {
 		// transcribe never returns a real description as "": _parse_result
 		// requires the trimmed result to be non-empty, so an empty string
-		// unambiguously means "no description" (Python's None).
-		return placeholderBlock(), 0
+		// unambiguously means "no description" (Python's None). The call may
+		// still have spent real time getting there, so pass that through.
+		return placeholderBlock(), spent
 	}
-	return textBlock(fmt.Sprintf("[image transcribed by %s]\n%s", visionModel, text)), fresh
+	return textBlock(fmt.Sprintf("[image transcribed by %s]\n%s", visionModel, text)), spent
 }
 
 // placeholderRemaining replaces any image block still present with the
@@ -255,15 +268,16 @@ var (
 	inflight   = map[flightKey]chan struct{}{}
 )
 
-// transcribe describes one image. Returns ("", 0) for "no usable
-// description" (the caller substitutes the placeholder) or (text, fresh)
-// where fresh is 1 when a child ran, 0 on a cache hit. Never spawns two
+// transcribe describes one image. text is "" for "no usable description" (the
+// caller substitutes the placeholder). spent reports whether the call cost
+// wall-clock: true once a child has been started or a single-flight wait
+// entered, false for a cache hit or a reject that ran nothing. Never spawns two
 // billed children for the same (cacheDir, key): concurrent callers that miss
 // the same key wait on the winner instead of a stampede.
-func transcribe(imageBytes []byte, mediaType, cacheDir string) (text string, fresh int) {
+func transcribe(imageBytes []byte, mediaType, cacheDir string) (text string, spent bool) {
 	key := hashKey(imageBytes, mediaType)
 	if hit, ok := cacheGet(cacheDir, key); ok {
-		return hit, 0
+		return hit, false
 	}
 	// Resolved after the cache check (Python resolves it once at import and
 	// checks it first; that only differs in the case where the binary has
@@ -273,7 +287,7 @@ func transcribe(imageBytes []byte, mediaType, cacheDir string) (text string, fre
 	// lookup.
 	bin := resolveClaudeBin()
 	if bin == "" {
-		return "", 0
+		return "", false
 	}
 
 	fk := flightKey{cacheDir, key}
@@ -290,10 +304,12 @@ func transcribe(imageBytes []byte, mediaType, cacheDir string) (text string, fre
 		case <-ch:
 		case <-time.After(singleFlightWait):
 		}
+		// Blocking on another request's child costs up to singleFlightWait
+		// whether or not it produced anything, so both outcomes are charged.
 		if hit, ok := cacheGet(cacheDir, key); ok {
-			return hit, 0
+			return hit, true
 		}
-		return "", 0
+		return "", true
 	}
 
 	defer func() {
@@ -303,12 +319,14 @@ func transcribe(imageBytes []byte, mediaType, cacheDir string) (text string, fre
 		close(ch)
 	}()
 
+	// From here a child has run. Whatever it returned, the wall-clock is
+	// already spent, so every path below charges the budget.
 	result := runChild(bin, imageBytes, mediaType)
 	if result == "" {
-		return "", 0
+		return "", true
 	}
 	cachePut(cacheDir, key, result)
-	return result, 1
+	return result, true
 }
 
 // runChild spawns one describer child in a fresh temp dir holding only the

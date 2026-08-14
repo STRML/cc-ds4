@@ -306,6 +306,12 @@ restarts the proxy).
   can be large in a long auto-mode session, and a 200K-window model (haiku) overflows
   it. Still the trusted Anthropic boundary. The or-ds4 route uses the or-ds4 profile's
   model (`DS4_ORDS4_CLASSIFIER_MODEL` overrides).
+- **Detection** is a flash-family sentinel with `max_tokens` at or below 8192
+  (`DS4_CLASSIFIER_MAX_TOKENS` moves the line). Subagents ride the same sentinel at a
+  much larger `max_tokens`, so the size is what separates them. This is deliberately
+  its own knob and not `DS4_NOTHINK_BELOW`, which happens to share the default:
+  widening the no-think window is a thinking-budget preference and must not quietly
+  widen what gets sent to the classifier's route.
 - Only the classifier moves. The main loop and subagents keep the DeepSeek routing.
 
 ## Things that cost real time to discover
