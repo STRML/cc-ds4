@@ -18,16 +18,30 @@ Shells out via Bash. Read-only; no `dangerouslyDisableSandbox` needed.
   --profile {nous|openrouter} \
   --tier {pro-xhigh|pro-medium} \
   --role review \
-  --timeout 300 \
+  --timeout 900 \
   --prompt-text '<diff or review prompt>'
 ```
 
 - Profile: prefer `openrouter` when the diff/context carries private code (ZDR).
   `nous` for scratch; `direct` for quick turnaround where privacy is unconstrained.
-- Tier: `xhigh` (default) or `max` for load-bearing merges. or-ds4 runs are
-  slow enough that a `--timeout 300`+ is routinely needed.
-- The child can Read the repo from the spawn cwd. Pass the diff via the prompt
-  if it's small, or point the child at a branch/commit range.
+  Never silently fall back to `nous` for private code when `openrouter` fails.
+- Tier: `xhigh` (default) or `max` for load-bearing merges. or-ds4 runs are slow;
+  300 is too tight for a real review, use 900+.
+- The child Reads the repo **from the spawn cwd** — so `cd` into the worktree that
+  holds the commit under review, in the same command. Launching from the session's
+  default directory silently reviews whatever branch happens to be checked out
+  there. Echo `pwd && git rev-parse --abbrev-ref HEAD` ahead of the run to prove it.
+- Auth fails fast and cheap (`401 User not found` when a profile has no credentials
+  file). Before a long run, burn ten seconds on a `--tier pro-medium` probe that
+  just asks it to reply `AUTH OK`.
+
+## What it is good at
+
+Ask for adversarial work explicitly and it delivers: "try to construct an input
+that defeats this loop" produced a real defeating input rather than a description
+of one. It will also check a claim against a real artifact if you name the artifact
+("verify this against `<capture file>`, not against the fixture") — which is how you
+catch a test suite whose fixture and parser share the same wrong assumption.
 
 ## Output
 
