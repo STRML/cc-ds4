@@ -27,7 +27,7 @@ func TestEffectiveProfileClosedBreakerStaysHome(t *testing.T) {
 	cfg.Dir = t.TempDir()
 	h := NewHandler(cfg, time.Minute)
 
-	eff, _, _ := h.effectiveProfile()
+	eff, _, _ := h.effectiveProfile(false)
 	if eff.Name != "nous" {
 		t.Fatalf("closed breaker routed to %q, want nous", eff.Name)
 	}
@@ -48,7 +48,7 @@ func TestEffectiveProfileOpenBreakerRoutesToTarget(t *testing.T) {
 	h := NewHandler(cfg, time.Minute)
 	tripBreaker(h)
 
-	eff, _, _ := h.effectiveProfile()
+	eff, _, _ := h.effectiveProfile(false)
 	if eff.Name != "openrouter" {
 		t.Fatalf("open breaker routed to %q, want openrouter", eff.Name)
 	}
@@ -79,7 +79,7 @@ func TestEffectiveProfileUnknownTargetStaysHome(t *testing.T) {
 	h := NewHandler(cfg, time.Minute)
 	tripBreaker(h)
 
-	eff, _, _ := h.effectiveProfile()
+	eff, _, _ := h.effectiveProfile(false)
 	if eff.Name != "nous" {
 		t.Fatalf("unknown target routed to %q, want to stay on nous", eff.Name)
 	}
@@ -98,7 +98,7 @@ func TestEffectiveProfileNoTargetStaysHome(t *testing.T) {
 	h := NewHandler(cfg, time.Minute)
 	tripBreaker(h)
 
-	eff, _, _ := h.effectiveProfile()
+	eff, _, _ := h.effectiveProfile(false)
 	if eff.Name != "openrouter" {
 		t.Fatalf("routed to %q with no failover target configured", eff.Name)
 	}
@@ -118,11 +118,11 @@ func TestFailoverUsesTargetKeyNotOwn(t *testing.T) {
 	cfg.Failover = "openrouter"
 	h := NewHandler(cfg, time.Minute)
 
-	if _, key, _ := h.effectiveProfile(); key != "key-for-nous" {
+	if _, key, _ := h.effectiveProfile(false); key != "key-for-nous" {
 		t.Errorf("closed breaker used key %q, want nous's own", key)
 	}
 	tripBreaker(h)
-	if _, key, _ := h.effectiveProfile(); key != "key-for-openrouter" {
+	if _, key, _ := h.effectiveProfile(false); key != "key-for-openrouter" {
 		t.Errorf("failed over with key %q, want the target's", key)
 	}
 }
@@ -256,7 +256,7 @@ func TestTrialRoutesToOwnUpstream(t *testing.T) {
 	h := NewHandler(cfg, time.Minute)
 	armTrial(h)
 
-	eff, _, trial := h.effectiveProfile()
+	eff, _, trial := h.effectiveProfile(false)
 	if !trial {
 		t.Fatal("armed trial not reported to the caller")
 	}
@@ -491,7 +491,7 @@ func TestTrialIsHandedOutToExactlyOneRequest(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, _, trial := h.effectiveProfile(); trial {
+			if _, _, trial := h.effectiveProfile(false); trial {
 				mu.Lock()
 				trials++
 				mu.Unlock()

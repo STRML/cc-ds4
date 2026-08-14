@@ -175,13 +175,28 @@ func modelFromJSON(body []byte) string {
 // A trial routes to the profile's OWN upstream even though the circuit is
 // open: the whole point is to find out whether that upstream can carry a real
 // request again. The caller reports the outcome back through trialClose.
-func (h *Handler) effectiveProfile() (profiles.Profile, string, bool) {
+// requiresZDR is passed in because the armed trial routes a request to the
+// profile's OWN upstream, and that is the wrong answer for a request the own
+// profile cannot serve. On nous — no ZDR, failing over to ZDR-capable
+// openrouter — an ordinary request was served while the one that happened to
+// claim the trial 409'd instead. Worse, that 409 releases the trial, so the
+// next request claimed it and 409'd too: a workload of ZDR-demanding requests
+// ping-ponged the trial and never got served at all while the circuit was open.
+// A trial is for learning whether the upstream recovered; a request that cannot
+// go there is not a probe of anything.
+func (h *Handler) effectiveProfile(requiresZDR bool) (profiles.Profile, string, bool) {
 	eff := h.cfg
 	key := os.Getenv("DS4_KEY_" + strings.ToUpper(eff.Name))
 	if key == "" {
 		key = readKeyFromDir(eff.Dir)
 	}
 	open, trial := h.breakerOpen()
+	if trial && requiresZDR && (!eff.ZDR || !zdrEnabled()) {
+		// Hand it straight back: this request was never going to reach the
+		// profile's own upstream, so it cannot serve as the trial.
+		h.releaseTrial()
+		trial = false
+	}
 	if !open || trial {
 		return eff, key, trial
 	}
@@ -216,7 +231,7 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	// profile that will actually serve the request. A ZDR-capable profile with
 	// a failover target could otherwise pass the gate and then be relayed to a
 	// target that enforces nothing.
-	effCfg, effKey, trial := h.effectiveProfile()
+	effCfg, effKey, trial := h.effectiveProfile(requires)
 	failedOver := effCfg.Name != h.cfg.Name
 	effUpstream := effCfg.Upstream
 

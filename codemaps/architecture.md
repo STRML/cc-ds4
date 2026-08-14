@@ -90,7 +90,9 @@ both point the pro family at their flash id.
 ### Sentinels (src/go/internal/proxy/rewrite.go)
 
 `ds4-<family>-<effort>`. Family picks the model, effort picks the default
-reasoning effort. A client-sent `reasoning_effort` wins over the default.
+reasoning effort. Precedence, weakest first: the sentinel's default, then a
+client-sent `reasoning_effort`, then the `/ds4-effort` pin — the pin is on top
+because the status line renders it as active.
 
 | sentinel | family | default effort | slot |
 |---|---|---|---|
@@ -107,7 +109,7 @@ reasoning effort. A client-sent `reasoning_effort` wins over the default.
 | `transientStatus` | {429,500,502,503,524,529} | statuses treated as transient |
 | `DS4_FAILOVER_WINDOW` / `_RATE` | 12 / 0.25 | breaker window and trip threshold |
 | `DS4_FAILOVER_RECHECK` | 60s | min gap between probes |
-| `DS4_FAILOVER_PROBES_TO_CLOSE` | 3 | consecutive clean probes to close circuit |
+| `DS4_FAILOVER_PROBES_TO_CLOSE` | 3 | consecutive clean probes to ARM a trial; a real request served cleanly is what closes the circuit |
 | `DS4_IDLE_EXIT` | 900s | idle before exit; 0 disables |
 | `DS4_CLASSIFIER` / `DS4_CLASSIFIER_MODEL` | anthropic / claude-sonnet-5 | classifier relay target; `zdr` routes to or-ds4 (OpenRouter ZDR) |
 

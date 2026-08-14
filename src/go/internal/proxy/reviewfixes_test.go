@@ -959,3 +959,50 @@ func TestVisionDeadlineBoundsTheChild(t *testing.T) {
 		t.Errorf("applyVision took %v; the deadline did not bound the child", elapsed)
 	}
 }
+
+// TestZDRRequestsDoNotPingPongTheTrial pins the livelock.
+//
+// The armed trial routes a request to the profile's OWN upstream. On nous — no
+// ZDR, failing over to ZDR-capable openrouter — an ordinary request was served
+// by the target while the one that happened to claim the trial 409'd instead.
+// And because that 409 releases the trial, the next request claimed it and
+// 409'd too: a workload of ZDR-demanding requests never got served at all while
+// the circuit was open, for as long as it stayed open.
+func TestZDRRequestsDoNotPingPongTheTrial(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
+	var served int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		served++
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"served"}`))
+	}))
+	defer target.Close()
+
+	t.Setenv("DS4_KEY_NOUS", "k")
+	t.Setenv("DS4_KEY_OPENROUTER", "ok")
+	t.Setenv("DS4_UPSTREAM_OPENROUTER", target.URL)
+
+	cfg := testNous() // ZDR: false
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "openrouter"
+	h := NewHandler(cfg, time.Minute)
+	armTrial(h)
+
+	// Three ZDR-demanding requests in a row, the first of which finds the
+	// trial armed.
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+			strings.NewReader(`{"model":"ds4-flash-medium","max_tokens":32000,"messages":[]}`))
+		req.Header.Set("authorization", "Bearer k")
+		req.Header.Set("x-ds4-require-zdr", "1")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != 200 {
+			t.Fatalf("request %d: status = %d, want the ZDR-capable target to serve it (%s)",
+				i, rr.Code, rr.Body.String())
+		}
+	}
+	if served != 3 {
+		t.Errorf("target served %d of 3 requests; the rest died on the trial", served)
+	}
+}

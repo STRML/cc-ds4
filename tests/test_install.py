@@ -268,6 +268,29 @@ class InstallTest(unittest.TestCase):
             got = json.load(fh)
         self.assertEqual(got["model"], {"id": "something-structured"}, got)
 
+    def test_migration_survives_a_malformed_env_block(self):
+        # settings.setdefault("env", {}) returns the EXISTING value when the key
+        # is present, so an "env" that is not an object raises AttributeError.
+        # Unguarded, that aborted the run after the symlinks were re-pointed and
+        # before settings.json was written.
+        named = os.path.join(self.home, PROFILE_DIRS["direct"])
+        os.makedirs(named, exist_ok=True)
+        with open(os.path.join(named, "settings.json"), "w") as fh:
+            json.dump({"env": "not-an-object", "model": "ds4-xhigh"}, fh)
+
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env["PATH"] = self.bindir + os.pathsep + env["PATH"]
+        proc = subprocess.run(
+            ["bash", INSTALL, "--profile", "direct"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # The install still completed and wrote the file.
+        with open(os.path.join(named, "settings.json")) as fh:
+            got = json.load(fh)
+        self.assertIn("statusLine", got)
+
     def test_no_proxy_does_not_delete_proxy_files(self):
         # --no-proxy leaves the proxy files alone: an earlier run's base URL
         # still points at the proxy port, so removing them would break it.

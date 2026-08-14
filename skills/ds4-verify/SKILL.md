@@ -16,6 +16,12 @@ verified/discrepant/unfounded verdicts.
 `pro-xhigh` artifact needs a Claude or Fable pass (not another ds4 run).
 Money/security/irreversible work never routes lower than `pro-xhigh`.
 
+The tier step is real only on `direct`, the one profile that serves the pro
+family. On `openrouter` and `nous` both families resolve to the same flash
+model, so `pro-xhigh` there is the same request as `flash-xhigh` under another
+name — see `references/roles.md`. Verify on `direct`, or with a Claude/Fable
+pass, when the step has to mean something.
+
 ## Dispatch
 
 ```bash

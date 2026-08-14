@@ -46,7 +46,17 @@ build_go() {
     exit 1
   fi
   # Go 1.26 is the floor (the module's go.mod pins it).
-  if ! awk -F. -v v="$go_version" 'BEGIN { exit !(v+0 >= 1.26) }'; then
+  #
+  # Compared field by field, not as a decimal. `v+0 >= 1.26` reads "1.9" as the
+  # number 1.9 and passes it, and reads "1.100" as 1.1 and rejects it — so the
+  # gate waved through toolchains a decade old (they then die at `go build`
+  # with a message about C compilers that names the wrong cause) and will
+  # reject every valid toolchain once Go reaches 1.100.
+  if ! awk -v v="$go_version" 'BEGIN {
+        split(v, a, ".")
+        if (a[1] + 0 != 1) { exit !(a[1] + 0 > 1) }
+        exit !(a[2] + 0 >= 26)
+      }'; then
     echo "go $go_version is too old; need >= 1.26 (go.mod pins 1.26.5)" >&2
     exit 1
   fi
@@ -252,6 +262,16 @@ p = sys.argv[1]
 stamp = time.strftime("%Y%m%d%H%M%S")
 with open(p) as fh:
     s = json.load(fh)
+# Claude Code's own schema says env is an object. A hand-edited settings.json
+# where it is not would otherwise raise AttributeError on the first .get() below
+# and abort the run AFTER the symlinks have been re-pointed and BEFORE this file
+# is written — a half-installed state produced by a file this script does not
+# own the shape of. Replacing it is loud and leaves a working config; Claude
+# Code would reject the original anyway.
+if not isinstance(s.get("env"), dict):
+    if "env" in s:
+        print(f"warning: {p} has a non-object \"env\"; replacing it with an empty one")
+    s["env"] = {}
 s["statusLine"] = {"type": "command", "command": os.environ["BAR_DST"], "padding": 0}
 if os.environ["WANT_PROXY"] == "1":
     url = "http://127.0.0.1:" + os.environ["PORT"]
@@ -327,7 +347,16 @@ def migrate(settings, label):
     return changed
 
 
-migrate(s, "")
+# Guarded like the swept profiles below. settings.setdefault("env", {}) returns
+# the EXISTING value when the key is present, so a hand-edited settings.json
+# whose "env" is not an object raises AttributeError — and under `set -e` that
+# aborts after the symlinks have been re-pointed and before this file is
+# written, which is the half-installed state the isinstance guard already
+# exists to prevent, reached through a different field.
+try:
+    migrate(s, "")
+except Exception as exc:
+    print(f"warning: could not migrate sentinels in {p}: {exc}")
 
 # Every other installed profile, because this run re-points the shared binary
 # for all of them.

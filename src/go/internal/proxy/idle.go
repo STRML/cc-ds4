@@ -213,7 +213,7 @@ func scanClaudeRunning(dir string) (bool, error) {
 	// would never match and the watch would exit out from under a live
 	// session. Read /proc instead, which is the same question asked natively.
 	if runtime.GOOS == "linux" {
-		return claudeRunningProc(dir), nil
+		return claudeRunningProc(dir)
 	}
 	return claudeRunningPS(dir)
 }
@@ -242,7 +242,7 @@ func claudeRunningPS(dir string) (bool, error) {
 // A process owned by another user returns EACCES here. That is not a case to
 // work around: the proxy only cares about sessions belonging to the user who
 // started it, and those are readable.
-func claudeRunningProc(dir string) bool {
+func claudeRunningProc(dir string) (bool, error) {
 	return claudeRunningProcIn("/proc", dir)
 }
 
@@ -250,11 +250,17 @@ func claudeRunningProc(dir string) bool {
 // the Linux scan can be tested on any platform against a fake tree. Without
 // this the path is only ever exercised on a Linux CI runner, which is how it
 // shipped broken in the first place.
-func claudeRunningProcIn(procRoot, dir string) bool {
+func claudeRunningProcIn(procRoot, dir string) (bool, error) {
 	want := "CLAUDE_CONFIG_DIR=" + dir
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
-		return false
+		// "could not look", not "nothing is running". Hardcoding nil here threw
+		// away the distinction the (bool, error) signature exists for, so a
+		// container whose /proc is transiently unreadable — mount-namespace
+		// churn, a restrictive seccomp or AppArmor profile, early startup —
+		// answered "nothing running" on every poll and the fail-safe never
+		// fired. The darwin path propagates the equivalent failure.
+		return false, err
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -269,9 +275,9 @@ func claudeRunningProcIn(procRoot, dir string) bool {
 		}
 		for _, kv := range strings.Split(string(raw), "\x00") {
 			if kv == want {
-				return true
+				return true, nil
 			}
 		}
 	}
-	return false
+	return false, nil
 }

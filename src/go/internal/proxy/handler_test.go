@@ -180,31 +180,45 @@ func TestClaudeRunningProcScansEnviron(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !claudeRunningProcIn(root, "/home/u/.claude-nous") {
+	mustScan := func(dir string) bool {
+		t.Helper()
+		got, err := claudeRunningProcIn(root, dir)
+		if err != nil {
+			t.Fatalf("scan of %s failed: %v", dir, err)
+		}
+		return got
+	}
+	if !mustScan("/home/u/.claude-nous") {
 		t.Error("did not find a live process holding the config dir")
 	}
-	if claudeRunningProcIn(root, "/home/u/.claude-or-ds4") {
+	if mustScan("/home/u/.claude-or-ds4") {
 		t.Error("matched a config dir no process is using")
 	}
 	// The prefix case: a -backup profile must not pin the plain one up. This is
 	// what the BSD path got from its trailing word-boundary match, and the
 	// NUL-separated compare is what preserves it here.
 	writeProc("103", "CLAUDE_CONFIG_DIR=/home/u/.claude-nous-backup\x00")
-	if claudeRunningProcIn(root, "/home/u/.claude-nous-backup") != true {
+	if !mustScan("/home/u/.claude-nous-backup") {
 		t.Error("did not match the backup dir itself")
 	}
 	writeProc("101", "PATH=/usr/bin\x00") // drop the exact match
-	if claudeRunningProcIn(root, "/home/u/.claude-nous") {
+	if mustScan("/home/u/.claude-nous") {
 		t.Error("a dir that is only a prefix of a live one must not match")
 	}
 }
 
-// TestClaudeRunningProcMissingRoot pins the non-Linux and locked-down cases:
-// an unreadable proc root reads as "nothing running", never as an error the
-// caller has to handle.
-func TestClaudeRunningProcMissingRoot(t *testing.T) {
-	if claudeRunningProcIn(filepath.Join(t.TempDir(), "absent"), "/anything") {
-		t.Error("a missing proc root should read as nothing running")
+// TestClaudeRunningProcMissingRootIsAnError pins the case the (bool, error)
+// signature exists for. An unreadable /proc is "could not look", not "nothing
+// is running" — and the Linux branch used to hardcode a nil error, so a
+// container whose /proc is transiently unreadable answered "idle" on every poll
+// and the fail-safe never fired.
+func TestClaudeRunningProcMissingRootIsAnError(t *testing.T) {
+	running, err := claudeRunningProcIn(filepath.Join(t.TempDir(), "absent"), "/anything")
+	if err == nil {
+		t.Error("an unreadable proc root reported success; the fail-safe cannot fire")
+	}
+	if running {
+		t.Error("an unreadable proc root should not report a live process")
 	}
 }
 

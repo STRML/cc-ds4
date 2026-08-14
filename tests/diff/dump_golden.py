@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Freeze the Python proxy's rewrite output as a golden file for Go.
+"""Recipe that produced rewrite_golden.json. It does NOT run against this tree:
+it imports both src/proxy.py and tests/diff/corpus.py, deleted together in the
+Go cutover. Regenerating means restoring BOTH from history first.
+
+Freeze the Python proxy's rewrite output as a golden file for Go.
 
 The differential harness compared a live Python proxy against the Go one. That
 worked while both existed; once Python is deleted the oracle goes with it. This
