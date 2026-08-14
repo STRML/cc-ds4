@@ -54,6 +54,21 @@ class DocsTest(unittest.TestCase):
                         offenders.append((os.path.relpath(path, ROOT), m.group(1)))
         self.assertEqual(offenders, [], "ds4-run would reject these with exit 2")
 
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_no_skill_doc_names_a_retired_tier(self):
+        # The --tier check above only sees a name attached to the flag, so the
+        # one file actually titled "Roles and tiers" — a table whose tier column
+        # read "xhigh/max", and the file SKILL.md tells agents to choose from —
+        # slipped straight past it. Match the bare names anywhere instead, since
+        # in a doc about tiers that is what they mean.
+        retired = r"ds4-max|ds4-xhigh|ds4-high|ds4-low"
+        bare = r"(?<![\w-])(xhigh|high|low|max)(?![\w-])"
+        offenders = []
+        for path in _docs("skills"):
+            with open(path) as fh:
+                text = fh.read()
+            rel = os.path.relpath(path, ROOT)
+            for m in re.finditer(retired, text):
+                offenders.append((rel, m.group(0)))
+            for m in re.finditer(bare, text):
+                offenders.append((rel, m.group(0)))
+        self.assertEqual(offenders, [], "these name tiers ds4-run no longer accepts")

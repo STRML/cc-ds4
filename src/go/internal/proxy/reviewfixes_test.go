@@ -730,3 +730,80 @@ func TestFailoverDropsXAPIKeyToo(t *testing.T) {
 		t.Errorf("the origin key survived in authorization: %q", dst.Get("authorization"))
 	}
 }
+
+// TestZDRGateIgnoresAnUnrelatedNestedFlag pins the gate against the substring
+// scan it used to be. Searching the serialized body for the injected text
+// matched anywhere in the document, so a request that demanded ZDR and happened
+// to carry an unrelated nested "zdr": true satisfied a gate whose entire
+// purpose is to fail closed.
+func TestZDRGateIgnoresAnUnrelatedNestedFlag(t *testing.T) {
+	installProfiles(t, "openrouter")
+	var reached bool
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer up.Close()
+
+	t.Setenv("DS4_KEY_OPENROUTER", "k")
+	cfg := withUpstream(testOpenRouter(), up.URL)
+	cfg.Dir = t.TempDir()
+
+	// A model with no ZDR-capable host, plus a decoy flag somewhere else.
+	body := `{"model":"deepseek/deepseek-v4-pro-0813","max_tokens":32000,` +
+		`"metadata":{"zdr": true},"messages":[]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	req.Header.Set("authorization", "Bearer k")
+	req.Header.Set("x-ds4-require-zdr", "1")
+	rr := httptest.NewRecorder()
+	NewHandler(cfg, time.Minute).ServeHTTP(rr, req)
+
+	if reached {
+		t.Error("a decoy nested zdr flag satisfied the fail-closed gate")
+	}
+	if rr.Code != 409 {
+		t.Errorf("status = %d, want 409 (body %s)", rr.Code, rr.Body.String())
+	}
+}
+
+// TestCachedImageIsServedPastTheBudget pins exhausted()'s stated contract. The
+// limits gate spending, not answering: a cache hit costs nothing, and
+// placeholdering an image the proxy already has a description for is a
+// regression the user sees for no saving at all.
+func TestCachedImageIsServedPastTheBudget(t *testing.T) {
+	t.Setenv("DS4_VISION", "1")
+	cfg := testNous()
+	cfg.Dir = t.TempDir()
+
+	// Warm the cache for one image with a working describer.
+	good := fakeClaudeBin(t, fakeResultJSON("a warmed description"))
+	t.Setenv("DS4_CLAUDE_BIN", good)
+	cached := imageBody(1)
+	if _, err := applyVision([]byte(cached), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now send a body that burns the whole budget on fresh images first, with
+	// the cached one last.
+	bin, _ := failingClaudeBin(t)
+	t.Setenv("DS4_CLAUDE_BIN", bin)
+	var b strings.Builder
+	b.WriteString(`{"model":"ds4-flash-medium","max_tokens":32000,"messages":[{"role":"user","content":[`)
+	for i := 0; i < maxImagesPerRequest+2; i++ {
+		data := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("filler-%d", i)))
+		b.WriteString(`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + data + `"}},`)
+	}
+	// image-bytes-0 is the one warmed above (imageBody(1) uses that payload).
+	warm := base64.StdEncoding.EncodeToString([]byte("image-bytes-0"))
+	b.WriteString(`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + warm + `"}}`)
+	b.WriteString(`]}]}`)
+
+	out, err := applyVision([]byte(b.String()), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "a warmed description") {
+		t.Error("a cached description was placeholdered because the budget was spent on other images")
+	}
+}

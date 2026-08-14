@@ -32,9 +32,12 @@ proxy emitted for the differential corpus on its last run, replayed by
 (`tests/diff/`) compared two implementations, and there is one now.
 
 `tests/diff/dump_golden.py` is kept as the recipe that wrote it. It does not run
-against this tree — it imports the deleted proxy — so regenerating means
-restoring `src/proxy.py` from history first. It stays because a golden whose
-provenance cannot be reproduced is one nobody can ever justify changing.
+against this tree, and restoring the proxy alone is not enough: it also does
+`import corpus`, and `tests/diff/corpus.py` went in the same deletion.
+Regenerating means restoring BOTH `src/proxy.py` and `tests/diff/corpus.py`
+from history. It stays because a golden whose provenance cannot be reproduced
+is one nobody can ever justify changing — and a recipe that names half its
+inputs is the same problem wearing a different hat.
 
 ## Rule
 

@@ -74,7 +74,20 @@ func parseValue(dec *json.Decoder) (*OrderedValue, error) {
 				if err != nil {
 					return nil, err
 				}
-				o.keys = append(o.keys, key)
+				// CPython builds a dict here, so a repeated key keeps its
+				// FIRST position and its LAST value —
+				// json.dumps(json.loads('{"a":1,"b":2,"a":3}')) is
+				// {"a": 3, "b": 2}. Appending the key again instead emitted it
+				// twice, which is a parity bug in a codec whose only job is
+				// byte parity, and it left keys longer than vals: Delete then
+				// removed the single map entry while a stale key survived, and
+				// emit dereferenced the missing value and crashed the
+				// connection. Both classifier routes rebuild a client-supplied
+				// body by deleting every key, so that was reachable from the
+				// wire.
+				if _, seen := o.vals[key]; !seen {
+					o.keys = append(o.keys, key)
+				}
 				o.vals[key] = v
 			}
 			if _, err := dec.Token(); err != nil { // closing '}'
@@ -162,7 +175,16 @@ func (o *OrderedValue) emit(b *bytes.Buffer) {
 			b.WriteByte('"')
 			b.WriteString(escapeAscii(k))
 			b.WriteString(`": `)
-			o.vals[k].emit(b)
+			// A key with no value is a bug in this package, not something a
+			// caller can cause. Emitting null beats dereferencing nil: this
+			// runs inside a network daemon, where the difference is a wrong
+			// byte versus a dropped connection that also strands whatever
+			// per-request state the handler was holding.
+			if v := o.vals[k]; v != nil {
+				v.emit(b)
+			} else {
+				b.WriteString("null")
+			}
 		}
 		b.WriteByte('}')
 	case o.arr:
@@ -236,12 +258,16 @@ func (o *OrderedValue) Delete(key string) {
 	if _, ok := o.vals[key]; !ok {
 		return
 	}
-	for i, k := range o.keys {
-		if k == key {
-			o.keys = append(o.keys[:i], o.keys[i+1:]...)
-			break
+	// Every occurrence, not just the first. Duplicates cannot survive the
+	// parser any more, but a key left in keys with no entry in vals is the
+	// shape that crashed emit, and this is the only place that can create it.
+	kept := o.keys[:0]
+	for _, k := range o.keys {
+		if k != key {
+			kept = append(kept, k)
 		}
 	}
+	o.keys = kept
 	delete(o.vals, key)
 }
 

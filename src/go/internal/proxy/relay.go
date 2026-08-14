@@ -93,6 +93,21 @@ func retryAttempts(origTier string) int {
 	return 3
 }
 
+// hasZDRBlock reports whether the body carries the top-level provider.zdr flag
+// the OpenRouter ZDR contract requires. It parses rather than scanning, so only
+// the field that actually governs routing can satisfy it.
+func hasZDRBlock(body []byte) bool {
+	var found bool
+	if _, err := jsonpy.Marshal(body, func(root *jsonpy.OrderedValue) {
+		found = root.Get("provider").Get("zdr").Raw() == "true"
+	}); err != nil {
+		// Unparseable: the rewrite could not have injected anything either, so
+		// the demand cannot be satisfied. Fail closed.
+		return false
+	}
+	return found
+}
+
 // relayUserAgent is the User-Agent every relayed request carries. Python sent
 // this unconditionally for the same reason: Cloudflare 403s Claude Code's own
 // agent string in front of some upstreams.
@@ -304,6 +319,11 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 
 	// The authoritative ZDR check: does the body actually carry the block?
 	//
+	// Parsed, not a substring scan. A byte search for the injected text matches
+	// anywhere in the document, so a request that demanded ZDR and happened to
+	// carry an unrelated nested "zdr": true — in metadata, in a tool result —
+	// would satisfy a gate that exists to fail closed.
+	//
 	// The gate above asks whether the serving PROFILE enforces ZDR, which is
 	// not the same question. rewrite skips the provider block for any model in
 	// ZDRSkipModels — pro-0813, whose only host rejects it — and a request
@@ -312,7 +332,12 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	// gate whose entire purpose is to fail closed and went to the upstream with
 	// no ZDR at all. Asking the finished body removes the chance for the gate
 	// and the injection to disagree about coverage.
-	if requires && !bytes.Contains(body, []byte(`"zdr": true`)) {
+	if requires && !hasZDRBlock(body) {
+		// Same release as the gate above: this answers without reaching an
+		// upstream, so it cannot be the trial.
+		if trial {
+			h.releaseTrial()
+		}
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(409)
 		io.WriteString(w, `{"error": {"message": "request requires ZDR, but no ZDR-capable host serves this model"}}`)

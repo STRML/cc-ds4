@@ -3,7 +3,7 @@
 | profile | CLAUDE_CONFIG_DIR | port | sentinel tiers | effort override | privacy |
 |---|---|---|---|---|---|
 | direct | ~/.claude-ds4 | 31500 | no (literal ids; the tier's family half still picks pro vs flash) | no | sends to DeepSeek (retention/training) |
-| openrouter | ~/.claude-or-ds4 | 31501 | yes (ds4-{pro,flash}-{xhigh,medium}) | yes | ZDR on by default |
+| openrouter | ~/.claude-or-ds4 | 31501 | yes (`pro-xhigh`, `pro-medium`, `flash-xhigh`, `flash-medium`) | yes | ZDR on by default |
 | nous | ~/.claude-nous | 31502 | yes | yes | no ZDR, 90% promo pricing |
 
 A sentinel is `ds4-<family>-<effort>`: the family half picks the model, the

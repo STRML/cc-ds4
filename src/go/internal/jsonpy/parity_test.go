@@ -122,24 +122,50 @@ func TestMalformedInputIsRejected(t *testing.T) {
 	}
 }
 
-// TestDuplicateKeysArePreservedNotCollapsed pins a known divergence rather
-// than a desired behavior. CPython's dict construction collapses duplicates to
-// the last value, so json.dumps emits one key; this codec keeps the input's
-// structure and emits both, and a Set writes through to every occurrence.
+// TestDuplicateKeysCollapseLikeCPython pins what used to be a documented
+// divergence and turned out to be a crash.
 //
-// Nothing Claude Code sends carries duplicate keys, so this has never been
-// reachable in practice. It is pinned so that if it ever starts to matter, the
-// difference is documented rather than discovered.
-func TestDuplicateKeysArePreservedNotCollapsed(t *testing.T) {
-	got, err := Marshal([]byte(`{"a": 1, "b": 2, "a": 3}`), func(root *OrderedValue) {
-		root.Set("a", Val(9))
+// CPython builds a dict, so a repeated key keeps its FIRST position and its
+// LAST value: json.dumps(json.loads('{"a":1,"b":2,"a":3}')) is {"a": 3, "b": 2}.
+// This codec used to keep both occurrences and emit the key twice. The old test
+// called that "a known divergence rather than a desired behavior" and reasoned
+// it was unreachable because nothing Claude Code sends carries duplicate keys.
+//
+// It was reachable, and it was worse than a wrong byte. Keys held the duplicate
+// while vals held one entry, so Delete removed the entry and left a stale key
+// behind, and emit then dereferenced the missing value and panicked. Both
+// classifier routes rebuild a client-supplied body by deleting every key, so
+// any request with a duplicate key crashed its connection — and a request that
+// had claimed the failover trial took trialActive down with it, leaving a
+// circuit that could never close again.
+func TestDuplicateKeysCollapseLikeCPython(t *testing.T) {
+	got, err := Marshal([]byte(`{"a": 1, "b": 2, "a": 3}`), func(*OrderedValue) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exactly what python3 -c 'import json; print(json.dumps(json.loads(...)))'
+	// prints for the same input.
+	if want := `{"a": 3, "b": 2}`; string(got) != want {
+		t.Errorf("duplicate keys\n got %s\nwant %s", got, want)
+	}
+}
+
+// TestDeletingADuplicateKeyDoesNotPanic is the crash itself, kept as its own
+// case: the parser no longer produces the shape, and this is what proves the
+// path that used to reach it is safe.
+func TestDeletingADuplicateKeyDoesNotPanic(t *testing.T) {
+	got, err := Marshal([]byte(`{"model":"m","provider":{},"provider":{}}`), func(root *OrderedValue) {
+		for _, k := range root.Keys() {
+			if k != "model" {
+				root.Delete(k)
+			}
+		}
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"a": 9, "b": 2, "a": 9}`
-	if string(got) != want {
-		t.Errorf("duplicate-key handling changed\n got %s\nwant %s (CPython would emit a single key)", got, want)
+	if want := `{"model": "m"}`; string(got) != want {
+		t.Errorf("got %s, want %s", got, want)
 	}
 }
 

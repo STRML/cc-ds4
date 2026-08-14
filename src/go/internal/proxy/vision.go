@@ -176,13 +176,13 @@ func (w *visionWalk) blocks(content *jsonpy.OrderedValue) {
 		}
 		switch block.Get("type").String() {
 		case "image":
-			if w.exhausted() {
-				// Out of budget or out of time: placeholder it without
-				// spawning a child.
-				items[i] = placeholderBlock()
-				continue
-			}
-			replacement, spent := swapImage(block, w.cacheDir)
+			// The limits gate SPENDING, not answering. swapImage still runs
+			// when they are used up, because a cached description costs
+			// nothing and the cache probe lives inside it — checking the
+			// limits out here placeholdered images the proxy already had
+			// descriptions for, which is what exhausted's own comment says
+			// must not happen.
+			replacement, spent := swapImage(block, w.cacheDir, !w.exhausted())
 			items[i] = replacement
 			// Budget is charged for time spent, not for descriptions
 			// obtained. A cache hit costs nothing and is exempt — charging it
@@ -211,7 +211,7 @@ func (w *visionWalk) blocks(content *jsonpy.OrderedValue) {
 // reference is not followed: the proxy must never open a path from the
 // request body, which would be a local arbitrary-file-read primitive on an
 // unauthenticated loopback listener. Such blocks become the placeholder.
-func swapImage(block *jsonpy.OrderedValue, cacheDir string) (*jsonpy.OrderedValue, bool) {
+func swapImage(block *jsonpy.OrderedValue, cacheDir string, maySpend bool) (*jsonpy.OrderedValue, bool) {
 	src := block.Get("source")
 	if !src.IsObject() || src.Get("type").String() != "base64" {
 		return placeholderBlock(), false
@@ -225,15 +225,15 @@ func swapImage(block *jsonpy.OrderedValue, cacheDir string) (*jsonpy.OrderedValu
 	if err != nil || len(imageBytes) == 0 {
 		return placeholderBlock(), false
 	}
-	return transcribeBytes(imageBytes, mediaType.String(), cacheDir)
+	return transcribeBytes(imageBytes, mediaType.String(), cacheDir, maySpend)
 }
 
 // transcribeBytes describes raw image bytes and wraps the result, or falls
 // back to the placeholder. The "[image transcribed by ...]" prefix appears
 // ONLY on a real description, so nothing claims a transcription that never
 // happened.
-func transcribeBytes(imageBytes []byte, mediaType, cacheDir string) (*jsonpy.OrderedValue, bool) {
-	text, spent := transcribe(imageBytes, mediaType, cacheDir)
+func transcribeBytes(imageBytes []byte, mediaType, cacheDir string, maySpend bool) (*jsonpy.OrderedValue, bool) {
+	text, spent := transcribe(imageBytes, mediaType, cacheDir, maySpend)
 	if text == "" {
 		// transcribe never returns a real description as "": _parse_result
 		// requires the trimmed result to be non-empty, so an empty string
@@ -303,10 +303,16 @@ var (
 // entered, false for a cache hit or a reject that ran nothing. Never spawns two
 // billed children for the same (cacheDir, key): concurrent callers that miss
 // the same key wait on the winner instead of a stampede.
-func transcribe(imageBytes []byte, mediaType, cacheDir string) (text string, spent bool) {
+func transcribe(imageBytes []byte, mediaType, cacheDir string, maySpend bool) (text string, spent bool) {
 	key := hashKey(imageBytes, mediaType)
 	if hit, ok := cacheGet(cacheDir, key); ok {
 		return hit, false
+	}
+	// The cache probe is deliberately ahead of this: a hit is free and is
+	// served whatever the per-request limits say. Past them, a MISS becomes the
+	// placeholder rather than a child.
+	if !maySpend {
+		return "", false
 	}
 	// Resolved after the cache check (Python resolves it once at import and
 	// checks it first; that only differs in the case where the binary has
