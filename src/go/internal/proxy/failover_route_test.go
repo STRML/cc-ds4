@@ -674,6 +674,15 @@ func TestCreditExhausted(t *testing.T) {
 		{"ordinary 400", 400, `{"error":{"message":"bad request"}}`, false},
 		{"transient 503", 503, ``, false},
 		{"success", 200, `{"ok":true}`, false},
+		// The false positives a bare-word match produced. Each one routes the
+		// request to another provider and reports a billing problem for
+		// something that is not one.
+		{"model id containing the word", 404,
+			`{"error":{"message":"model 'acme/credit-scoring-v2' not found"}}`, false},
+		{"echoed request field", 400,
+			`{"error":{"message":"unknown field: balance"}}`, false},
+		{"block page mentioning billing", 403,
+			`<html><body>Access denied. Contact billing or your account balance manager.</body></html>`, false},
 	} {
 		if got := creditExhausted(c.status, []byte(c.body)); got != c.want {
 			t.Errorf("%s: creditExhausted = %v, want %v", c.name, got, c.want)

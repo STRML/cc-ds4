@@ -64,6 +64,22 @@ func envFloat(k string, def float64) float64 {
 // balance is a total outage with a healthy target sitting idle, and the CLI
 // reports it as "that model may not exist", which sends you looking in
 // completely the wrong place.
+// creditPhrases are the ways the supported providers actually say it. Nous
+// sends "requires available credits ... balance is too low"; OpenRouter sends a
+// 402, which is handled by status alone above, and "insufficient credits" on
+// some paths.
+var creditPhrases = []string{
+	"insufficient credit",
+	"insufficient funds",
+	"insufficient balance",
+	"available credit",
+	"balance is too low",
+	"balance too low",
+	"out of credit",
+	"credit balance",
+	"payment required",
+}
+
 func creditExhausted(status int, body []byte) bool {
 	if status == 402 {
 		return true
@@ -71,9 +87,19 @@ func creditExhausted(status int, body []byte) bool {
 	if status != 404 && status != 403 {
 		return false
 	}
+	// Phrases, not bare words. "credit" or "balance" anywhere in 8KB of a 403 or
+	// 404 body matched a provider echoing a request field or an HTML block page,
+	// and the consequences are not cosmetic: the request is re-sent to another
+	// provider, the breaker takes a strike, and a bad model id comes back as
+	// "your account is out of credit, this is a billing problem" — sending the
+	// reader to top up an account that was never the problem.
 	b := strings.ToLower(string(body))
-	return strings.Contains(b, "credit") || strings.Contains(b, "balance") ||
-		strings.Contains(b, "insufficient funds")
+	for _, phrase := range creditPhrases {
+		if strings.Contains(b, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func failoverThreshold() int {

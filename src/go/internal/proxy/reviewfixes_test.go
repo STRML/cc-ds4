@@ -807,3 +807,52 @@ func TestCachedImageIsServedPastTheBudget(t *testing.T) {
 		t.Error("a cached description was placeholdered because the budget was spent on other images")
 	}
 }
+
+// TestFailoverOffSwitchStopsTheRescue pins DS4_FAILOVER=0, which
+// profiles/nous.md documents as the way to turn failover off.
+//
+// The breaker read it; the rescue path was added later and did not. So a user
+// who had explicitly disabled failover still had their prompt re-sent to the
+// other provider, under the other account, the first time their own upstream
+// returned a 503 — believing all the while that the traffic stayed put. An off
+// switch that covers only some paths is worse than none.
+func TestFailoverOffSwitchStopsTheRescue(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
+	old := failoverEnabled
+	failoverEnabled = false
+	defer func() { failoverEnabled = old }()
+
+	var reached bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"served"}`))
+	}))
+	defer target.Close()
+	broke := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503)
+	}))
+	defer broke.Close()
+
+	t.Setenv("DS4_KEY_NOUS", "k")
+	t.Setenv("DS4_KEY_OPENROUTER", "ok")
+	t.Setenv("DS4_UPSTREAM_OPENROUTER", target.URL)
+
+	cfg := withUpstream(testNous(), broke.URL)
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "openrouter"
+	h := NewHandler(cfg, time.Minute)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"ds4-flash-medium","max_tokens":32000,"messages":[]}`))
+	req.Header.Set("authorization", "Bearer k")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if reached {
+		t.Error("DS4_FAILOVER=0 was set and the prompt still went to the other provider")
+	}
+	if rr.Code == 200 {
+		t.Errorf("the caller got a 200 from somewhere with failover disabled: %s", rr.Body.String())
+	}
+}

@@ -60,15 +60,28 @@ class DocsTest(unittest.TestCase):
         # read "xhigh/max", and the file SKILL.md tells agents to choose from —
         # slipped straight past it. Match the bare names anywhere instead, since
         # in a doc about tiers that is what they mean.
-        retired = r"ds4-max|ds4-xhigh|ds4-high|ds4-low"
-        bare = r"(?<![\w-])(xhigh|high|low|max)(?![\w-])"
+        retired = re.compile(r"ds4-max|ds4-xhigh|ds4-high|ds4-low")
+        bare = re.compile(r"(?<![\w-])(xhigh|high|low|max)(?![\w-])")
+        # Where a bare word reads as a tier NAME rather than as English: inside
+        # backticks, or alone in a table cell. Scoping by "does this line say
+        # tier" was tried and is wrong — the roles.md table puts the column
+        # header on one line and the values on others, and the verify floor
+        # says "never routes lower than `high`" without the word at all, so
+        # both regressions this guard exists for slipped straight through.
+        # Whole-file matching is also wrong: it fails on "a high level of
+        # detail".
         offenders = []
         for path in _docs("skills"):
             with open(path) as fh:
                 text = fh.read()
             rel = os.path.relpath(path, ROOT)
-            for m in re.finditer(retired, text):
+            for m in retired.finditer(text):
                 offenders.append((rel, m.group(0)))
-            for m in re.finditer(bare, text):
-                offenders.append((rel, m.group(0)))
+            spans = re.findall(r"`([^`]+)`", text)
+            for line in text.splitlines():
+                if line.lstrip().startswith("|"):
+                    spans.extend(c.strip() for c in line.split("|"))
+            for span in spans:
+                for m in bare.finditer(span):
+                    offenders.append((rel, m.group(0)))
         self.assertEqual(offenders, [], "these name tiers ds4-run no longer accepts")

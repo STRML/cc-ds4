@@ -157,15 +157,11 @@ func prepareUpstreamHeaders(dst, src http.Header, failedOver bool, key string, b
 // the tree intact, so it sees the client-sent tier before any rewrite remaps
 // it. A non-JSON body or a non-string model yields "".
 func modelFromJSON(body []byte) string {
-	model := ""
-	_, err := jsonpy.Marshal(body, func(root *jsonpy.OrderedValue) {
-		if m := root.Get("model"); m != nil && m.IsString() {
-			model = m.String()
-		}
-	})
-	if err != nil {
-		return ""
-	}
+	// Peek, not Marshal. Marshal parses AND re-emits the whole document, and
+	// this runs on every relayed request purely to read one string — on a
+	// 1M-context profile that is a multi-megabyte allocate-and-copy thrown away
+	// immediately, on top of the parse rewrite already does.
+	model, _, _ := jsonpy.PeekModelMaxTokens(body)
 	return model
 }
 
@@ -486,7 +482,14 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 // NOT told about the outcome here: these attempts measure the target, and only
 // the profile's own upstream decides whether its circuit opens or closes.
 func (h *Handler) rescueViaFailover(w http.ResponseWriter, r *http.Request, body []byte, upstreamURL string, requiresZDR bool) bool {
-	if h.cfg.Failover == "" {
+	// failoverEnabled is DS4_FAILOVER, documented in profiles/nous.md as the
+	// way to turn failover off. The breaker reads it, but this rescue was added
+	// afterwards and did not — so a user who had explicitly disabled failover
+	// still had their prompt re-sent to the other provider, under the other
+	// account, the first time their upstream returned a 503. An off switch that
+	// only covers some of the paths is worse than none, because the user
+	// believes the traffic stayed put.
+	if !failoverEnabled || h.cfg.Failover == "" {
 		return false
 	}
 	target, key, ok := h.failoverTarget()
@@ -509,6 +512,12 @@ func (h *Handler) rescueViaFailover(w http.ResponseWriter, r *http.Request, body
 	}
 	// No applyVision here: the caller already ran it once on this body, and a
 	// second pass would hand a failed describer a fresh budget and deadline.
+	// The same authoritative check the main path runs: the profile-level answer
+	// above is not the same question as whether THIS body ends up carrying the
+	// block, because rewrite suppresses it for the target's ZDRSkipModels.
+	if requiresZDR && !hasZDRBlock(out) {
+		return false
+	}
 	url := strings.TrimRight(target.Upstream, "/") +
 		strings.TrimPrefix(upstreamURL, strings.TrimRight(h.cfg.Upstream, "/"))
 

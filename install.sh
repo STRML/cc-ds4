@@ -233,7 +233,20 @@ fi
 BACKUP="$SETTINGS.bak-$(date +%Y%m%d%H%M%S)"
 cp -p "$SETTINGS" "$BACKUP"
 
-BAR_DST="$BAR_DST" WANT_PROXY="$WANT_PROXY" PORT="$PORT" DIR="$DIR" python3 - "$SETTINGS" <<'PY'
+# The migration below must sweep every INSTALLED profile, not just the one
+# named on the command line. One binary serves all three, and this run rebuilds
+# and re-points it for all of them — so upgrading only ~/.claude-nous left
+# ~/.claude-or-ds4 naming a sentinel the new proxy no longer resolves, and every
+# or-ds4 request failed until install.sh happened to be run for that profile
+# too. Nothing told the user to do that.
+OTHER_SETTINGS=""
+for d in "$HOME/.claude-ds4" "$HOME/.claude-or-ds4" "$HOME/.claude-nous"; do
+  [ "$d" = "$DIR" ] && continue
+  [ -f "$d/settings.json" ] && OTHER_SETTINGS="$OTHER_SETTINGS$d/settings.json
+"
+done
+
+BAR_DST="$BAR_DST" WANT_PROXY="$WANT_PROXY" PORT="$PORT" DIR="$DIR" OTHER_SETTINGS="$OTHER_SETTINGS" python3 - "$SETTINGS" <<'PY'
 import json, os, sys
 p = sys.argv[1]
 with open(p) as fh:
@@ -275,28 +288,56 @@ OLD_SENTINELS = {
     "ds4-high": "ds4-flash-xhigh",
     "ds4-low": "ds4-flash-medium",
 }
-for key, value in list(s.setdefault("env", {}).items()):
-    if "MODEL" not in key or value not in OLD_SENTINELS:
-        continue
-    # Opus moves to the pro family's medium effort rather than following
-    # the mechanical map, which would put it on the main loop's tier.
-    new = ("ds4-pro-medium" if key == "ANTHROPIC_DEFAULT_OPUS_MODEL"
-           else OLD_SENTINELS[value])
-    s["env"][key] = new
-    print(f"migrated: {key} {value} -> {new}")
 
-# The env block is not the only place a sentinel lives. The profile setup
-# also writes a TOP-LEVEL "model" (and Claude Code writes "fallbackModel"
-# when the picker is used), which is the session default the main loop
-# actually sends. Migrating only env leaves that default naming a sentinel
-# the proxy no longer knows, so the main loop 400s on every request while
-# the subagent tiers work — which reads as a broken account, not a stale
-# config.
-for key in ("model", "fallbackModel"):
-    value = s.get(key)
-    if value in OLD_SENTINELS:
-        s[key] = OLD_SENTINELS[value]
-        print(f"migrated: {key} {value} -> {s[key]}")
+
+def migrate(settings, label):
+    """Rewrite retired sentinels in one profile's settings. Returns True if
+    anything changed."""
+    changed = False
+    for key, value in list(settings.setdefault("env", {}).items()):
+        if "MODEL" not in key or value not in OLD_SENTINELS:
+            continue
+        # Opus moves to the pro family's medium effort rather than following
+        # the mechanical map, which would put it on the main loop's tier.
+        new = ("ds4-pro-medium" if key == "ANTHROPIC_DEFAULT_OPUS_MODEL"
+               else OLD_SENTINELS[value])
+        settings["env"][key] = new
+        print(f"migrated: {label}{key} {value} -> {new}")
+        changed = True
+
+    # The env block is not the only place a sentinel lives. The profile setup
+    # also writes a TOP-LEVEL "model" (and Claude Code writes "fallbackModel"
+    # when the picker is used), which is the session default the main loop
+    # actually sends. Migrating only env leaves that default naming a dead
+    # sentinel — the main loop 400ing on every request while subagents work,
+    # which reads as a broken account rather than stale config.
+    for key in ("model", "fallbackModel"):
+        value = settings.get(key)
+        if value in OLD_SENTINELS:
+            settings[key] = OLD_SENTINELS[value]
+            print(f"migrated: {label}{key} {value} -> {settings[key]}")
+            changed = True
+    return changed
+
+
+migrate(s, "")
+
+# Every other installed profile, because this run re-points the shared binary
+# for all of them.
+for other in os.environ.get("OTHER_SETTINGS", "").split("\n"):
+    other = other.strip()
+    if not other:
+        continue
+    try:
+        with open(other) as fh:
+            osettings = json.load(fh)
+    except (OSError, ValueError) as exc:
+        print(f"warning: could not read {other} to migrate sentinels: {exc}")
+        continue
+    if migrate(osettings, f"{other}: "):
+        with open(other, "w") as fh:
+            json.dump(osettings, fh, indent=2)
+        os.chmod(other, 0o600)
 
 with open(p, "w") as fh:
     json.dump(s, fh, indent=2)

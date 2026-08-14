@@ -211,6 +211,36 @@ class InstallTest(unittest.TestCase):
         # Opus takes the pro family's medium effort, not the mechanical map.
         self.assertEqual(got["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "ds4-pro-medium", got)
 
+    def test_migration_sweeps_every_installed_profile(self):
+        # One binary serves all three profiles and this run re-points it for
+        # all of them, so migrating only the named profile left the others
+        # naming sentinels the new proxy no longer resolves — every request on
+        # those profiles failing, with nothing telling the user to re-run
+        # install.sh per profile.
+        named = os.path.join(self.home, PROFILE_DIRS["direct"])
+        other = os.path.join(self.home, PROFILE_DIRS["openrouter"])
+        for d in (named, other):
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "settings.json"), "w") as fh:
+                json.dump({
+                    "model": "ds4-xhigh",
+                    "env": {"ANTHROPIC_DEFAULT_SONNET_MODEL": "ds4-high"},
+                }, fh)
+
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env["PATH"] = self.bindir + os.pathsep + env["PATH"]
+        proc = subprocess.run(
+            ["bash", INSTALL, "--profile", "direct"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        with open(os.path.join(other, "settings.json")) as fh:
+            got = json.load(fh)
+        self.assertEqual(got["model"], "ds4-pro-xhigh", got)
+        self.assertEqual(got["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "ds4-flash-xhigh", got)
+
     def test_no_proxy_does_not_delete_proxy_files(self):
         # --no-proxy leaves the proxy files alone: an earlier run's base URL
         # still points at the proxy port, so removing them would break it.
