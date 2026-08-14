@@ -71,10 +71,15 @@ func Listeners(names []string, ports map[string]int) (map[string]net.Listener, e
 	for _, name := range names {
 		ln, err := listenerFor(name, ports, requireOwned)
 		if err != nil {
-			if requireOwned {
-				// The point of this mode is to fail loudly rather than bind a
-				// port launchd believes it owns, so one failure is fatal. Close
-				// what we have so a partial bind leaves no dangling ports.
+			// Fatal only when launchd may actually own this port. A bind that
+			// failed on a port launchd demonstrably does NOT own (errNotOwned,
+			// e.g. a leftover process still holding it) is one profile's
+			// problem, and killing the process over it recreates the very
+			// outage the errNotOwned split was added to prevent — just one step
+			// further along.
+			if requireOwned && !errors.Is(err, errNotOwned) {
+				// Fail loudly rather than bind a port launchd believes it owns.
+				// Close what we have so a partial bind leaves no dangling ports.
 				for _, l := range out {
 					l.Close()
 				}
@@ -134,7 +139,10 @@ func listenerFor(name string, ports map[string]int, requireOwned bool) (net.List
 	}
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", name, err)
+		// Carry errNotOwned forward: we only reached the plain bind because
+		// launchd holds nothing here, and that stays true whether or not the
+		// bind succeeded.
+		return nil, fmt.Errorf("%s: %w: %w", name, errNotOwned, err)
 	}
 	return ln, nil
 }

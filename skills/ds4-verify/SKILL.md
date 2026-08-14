@@ -11,10 +11,10 @@ verified/discrepant/unfounded verdicts.
 
 ## Verify floor
 
-**Never verify with the same tier that produced the artifact.** ds4 `low`
-artifact → `high` verify; `high` artifact → `max` verify; a `max` artifact needs
-a Claude or Fable pass (not another ds4 run). Money/security/irreversible work
-never routes lower than `high`.
+**Never verify with the same tier that produced the artifact.** A
+`flash-medium` artifact → `flash-xhigh` verify; `flash-xhigh` → `pro-xhigh`; a
+`pro-xhigh` artifact needs a Claude or Fable pass (not another ds4 run).
+Money/security/irreversible work never routes lower than `pro-xhigh`.
 
 ## Dispatch
 

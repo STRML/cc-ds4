@@ -42,9 +42,10 @@ Choose tier/role from `references/roles.md` and profile from `references/profile
 
 1. **Choose profile** — `nous` (cheapest, opportunistic) or `openrouter` (ZDR,
    safest) for real work; `direct` only for scratch. `references/profiles.md`.
-2. **Choose tier** — `max`/`xhigh` for planning and load-bearing review; `high`
-   for implementation; `low` for mechanical sweeps and quick verify. Never route
-   money/security/irreversible work lower than `high` with a Fable/Opus verify.
+2. **Choose tier** — `pro-xhigh` for planning and load-bearing review;
+   `flash-xhigh` for implementation; `flash-medium` for mechanical sweeps and
+   quick verify. Never route money/security/irreversible work lower than
+   `flash-xhigh` with a Fable/Opus verify.
    On `direct` the tier is ignored (the endpoint takes no `reasoning_effort` and
    exposes only `deepseek-v4-flash`/`-pro`) — use or-ds4/nous for effort control.
 3. **Run** via Bash. Wait for completion; the CLI blocks until the child exits.

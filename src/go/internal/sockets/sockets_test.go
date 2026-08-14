@@ -304,3 +304,40 @@ func TestListeners_RequireOwned_OwnedPortStaysFatal(t *testing.T) {
 		t.Fatal("a port launchd may already hold was bound anyway")
 	}
 }
+
+// TestListeners_RequireOwned_BusyPortDoesNotKillOthers pins the second half of
+// the errNotOwned split. Falling back to a plain bind is only useful if a
+// FAILED plain bind is also non-fatal: launchd demonstrably does not own that
+// port, so a leftover process holding it is one profile's problem. Treating it
+// as fatal recreated the same "one profile takes down the others" outage the
+// split was added to prevent, one step further along.
+func TestListeners_RequireOwned_BusyPortDoesNotKillOthers(t *testing.T) {
+	setEnv(t, "DS4_REQUIRE_OWNED_SOCKET", "1")
+	old := activate
+	activate = func(name string) ([]int, error) {
+		return nil, fmt.Errorf("%w: %w: no Sockets entry", errNotActivated, errNotOwned)
+	}
+	defer func() { activate = old }()
+
+	// Hold one profile's port the way a leftover process would.
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	busyPort := busy.Addr().(*net.TCPAddr).Port
+
+	lns, err := Listeners([]string{"direct", "openrouter"},
+		map[string]int{"direct": busyPort, "openrouter": freePort(t)})
+	if err != nil {
+		t.Fatalf("one busy port killed the whole process: %v", err)
+	}
+	defer func() {
+		for _, l := range lns {
+			l.Close()
+		}
+	}()
+	if _, ok := lns["openrouter"]; !ok {
+		t.Error("the profile whose port was free did not get a listener")
+	}
+}

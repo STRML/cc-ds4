@@ -658,3 +658,75 @@ func TestVisionRunsOnceAcrossARescue(t *testing.T) {
 			n, maxImagesPerRequest)
 	}
 }
+
+// TestZDRDemandRefusedWhenTheModelHasNoZDRHost closes a fail-open in the
+// privacy gate.
+//
+// The early gate asks whether the serving PROFILE enforces ZDR. That is not the
+// same question as whether THIS request will carry the block: rewrite skips it
+// for any model in ZDRSkipModels, and a request naming such a model literally
+// is neither a sentinel nor an Anthropic id, so nothing rewrites it either. The
+// demand therefore passed a gate whose entire purpose is to fail closed, and
+// went upstream with no ZDR at all.
+func TestZDRDemandRefusedWhenTheModelHasNoZDRHost(t *testing.T) {
+	installProfiles(t, "openrouter")
+	var reached bool
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer up.Close()
+
+	t.Setenv("DS4_KEY_OPENROUTER", "k")
+	cfg := withUpstream(testOpenRouter(), up.URL)
+	cfg.Dir = t.TempDir()
+
+	// The literal id whose only host rejects the ZDR block.
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"deepseek/deepseek-v4-pro-0813","max_tokens":32000,"messages":[]}`))
+	req.Header.Set("authorization", "Bearer k")
+	req.Header.Set("x-ds4-require-zdr", "1")
+	rr := httptest.NewRecorder()
+	h := NewHandler(cfg, time.Minute)
+	h.ServeHTTP(rr, req)
+
+	if reached {
+		t.Error("a ZDR-demanding request reached the upstream with no ZDR block")
+	}
+	if rr.Code != 409 {
+		t.Errorf("status = %d, want 409 refusing the demand (body %s)", rr.Code, rr.Body.String())
+	}
+
+	// The same profile still serves a model that DOES get the block.
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"ds4-flash-xhigh","max_tokens":32000,"messages":[]}`))
+	req2.Header.Set("authorization", "Bearer k")
+	req2.Header.Set("x-ds4-require-zdr", "1")
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, req2)
+	if rr2.Code != 200 {
+		t.Errorf("a ZDR-capable model was refused too: %d %s", rr2.Code, rr2.Body.String())
+	}
+}
+
+// TestFailoverDropsXAPIKeyToo pins the credential boundary against the other
+// spelling. The profile docs set ANTHROPIC_API_KEY to "" because Claude Code
+// sends it when populated; a user who leaves it set authenticates on
+// authorization, passes the gate, and would otherwise ship this profile's key
+// to another provider in a header nobody was checking.
+func TestFailoverDropsXAPIKeyToo(t *testing.T) {
+	client := http.Header{}
+	client.Set("authorization", "Bearer origin-secret")
+	client.Set("x-api-key", "origin-secret")
+	dst := http.Header{}
+
+	prepareUpstreamHeaders(dst, client, true, "target-key", 10)
+
+	if got := dst.Get("x-api-key"); got != "" {
+		t.Errorf("x-api-key survived failover: %q", got)
+	}
+	if strings.Contains(dst.Get("authorization"), "origin-secret") {
+		t.Errorf("the origin key survived in authorization: %q", dst.Get("authorization"))
+	}
+}

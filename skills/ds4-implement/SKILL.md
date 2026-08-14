@@ -35,8 +35,8 @@ just `error:timed out after 300s`. Any real implementation task needs 1800.
 - Profile: prefer `nous` for cheap edits; `openrouter` (ZDR) when the context
   carries private code. Never silently fall back to `nous` for private code when
   `openrouter` fails — that is a data decision, so surface it.
-- Tier: default `high`. Use `xhigh` for the hardest bugs; `low` for mechanical
-  sweeps and boilerplate.
+- Tier: default `flash-xhigh`. Use `pro-xhigh` for the hardest bugs;
+  `flash-medium` for mechanical sweeps and boilerplate.
 - The child sees the repo from the coordinator's cwd. Give it a specific task
   and a clear acceptance check (test to run, invariant to verify).
 

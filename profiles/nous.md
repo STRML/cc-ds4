@@ -241,7 +241,8 @@ Notes:
 
 ## Step 6 — The proxy
 
-Every profile here routes through one shared proxy, `src/proxy.py`. It listens on
+Every profile here routes through one shared proxy, the Go binary
+`src/go/cmd/ds4-proxy/ds4-proxy` that `install.sh` builds. It listens on
 a separate port per profile (31502 for this one), so this profile's
 `settings.json` is unaware it is shared. What differs between profiles is a row in
 that file's `PROFILES` table, not a separate script.
@@ -334,15 +335,17 @@ session token under `<profile>/.ds4-sessions` has a live PID, or when `ps` shows
 that and run forever. Without a launcher there is nothing to start it again, so
 step 8 matters.
 
-On Linux, or without launchd, run it yourself: `python3 src/proxy.py &`.
+On Linux, or without launchd, run it yourself: `src/go/cmd/ds4-proxy/ds4-proxy &`.
+Build it first with `cd src/go && go build -o cmd/ds4-proxy/ds4-proxy
+./cmd/ds4-proxy` — `install.sh` does that for you on macOS.
 
 Setting a knob under launchd: the plist bakes in whatever `DS4_*` variables are
 exported when install.sh runs. For example, `DS4_IDLE_EXIT=0 ./install.sh
 --profile nous` makes the agent run forever (also replaces the plist and reloads
 the agent, which drops any live session on all three profiles). The proxy has to
 restart to pick a knob up, because it reads them once at startup. Running the
-proxy by hand instead picks them up from the shell: `DS4_DEBUG=1 python3
-src/proxy.py`.
+proxy by hand instead picks them up from the shell: `DS4_DEBUG=1
+src/go/cmd/ds4-proxy/ds4-proxy`.
 
 ## Step 7 — Skip onboarding
 

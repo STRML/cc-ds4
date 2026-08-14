@@ -74,6 +74,15 @@ const mainLoopTier = "ds4-pro-xhigh"
 // origTier is the client-sent model captured before any failover remap: the
 // remap rewrites the body's model to the target's literal id, which would
 // otherwise make every failed-over request look like a subagent call.
+//
+// The direct profile is outside this rule and always has been. Its settings
+// name literal ids rather than sentinels, so the lookup misses and its main
+// loop takes the subagent branch — three in-proxy attempts under Claude Code's
+// own retry, the stacking this function exists to avoid. That is not a
+// regression (the old single-name rule behaved identically), and it is left
+// alone rather than special-cased here: the profile's settings are the place
+// that decides, and pretending otherwise in this comment is what made the
+// invariant read as universal when it never was.
 func retryAttempts(origTier string) int {
 	if retryAttemptsOverride > 0 {
 		return retryAttemptsOverride
@@ -106,6 +115,13 @@ func prepareUpstreamHeaders(dst, src http.Header, failedOver bool, key string, b
 	copyHeaders(dst, src)
 	if failedOver {
 		dst.Del("authorization")
+		// x-api-key too. The profile docs set ANTHROPIC_API_KEY to "" precisely
+		// because Claude Code sends it when populated, but a user who leaves it
+		// set authenticates on authorization, passes authOK, and would then
+		// ship this profile's key to another provider in a header nobody
+		// looked at. The credential boundary is about the credential, not about
+		// one spelling of it.
+		dst.Del("x-api-key")
 	}
 	dst.Set("content-length", strconv.Itoa(bodyLen))
 	if dst.Get("content-type") == "" {
@@ -284,6 +300,23 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	rewritten, err := rewrite(body, effCfg, effortOverride(h.cfg))
 	if err == nil {
 		body = rewritten
+	}
+
+	// The authoritative ZDR check: does the body actually carry the block?
+	//
+	// The gate above asks whether the serving PROFILE enforces ZDR, which is
+	// not the same question. rewrite skips the provider block for any model in
+	// ZDRSkipModels — pro-0813, whose only host rejects it — and a request
+	// naming that model literally is neither a sentinel nor an Anthropic id, so
+	// nothing else rewrites it either. A ZDR demand for it therefore passed a
+	// gate whose entire purpose is to fail closed and went to the upstream with
+	// no ZDR at all. Asking the finished body removes the chance for the gate
+	// and the injection to disagree about coverage.
+	if requires && !bytes.Contains(body, []byte(`"zdr": true`)) {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(409)
+		io.WriteString(w, `{"error": {"message": "request requires ZDR, but no ZDR-capable host serves this model"}}`)
+		return
 	}
 
 	effURL := strings.TrimRight(effUpstream, "/") + strings.TrimPrefix(upstreamURL, strings.TrimRight(h.cfg.Upstream, "/"))

@@ -25,7 +25,8 @@ Shells out via Bash. Read-only; no `dangerouslyDisableSandbox` needed.
 - Profile: prefer `openrouter` when the diff/context carries private code (ZDR).
   `nous` for scratch; `direct` for quick turnaround where privacy is unconstrained.
   Never silently fall back to `nous` for private code when `openrouter` fails.
-- Tier: `xhigh` (default) or `max` for load-bearing merges. or-ds4 runs are slow;
+- Tier: `pro-xhigh` (default) for load-bearing merges, `pro-medium` when the
+  diff is small. or-ds4 runs are slow;
   300 is too tight for a real review, use 900+.
 - The child Reads the repo **from the spawn cwd** — so `cd` into the worktree that
   holds the commit under review, in the same command. Launching from the session's
