@@ -32,6 +32,14 @@ func activateSocket(name string) ([]int, error) {
 	var count C.size_t
 
 	if ret := C.launch_activate_socket(cname, &fds, &count); ret != 0 {
+		// ENOENT means launchd holds nothing under this name, so a plain bind
+		// cannot collide with it. Anything else (EALREADY above all, and ESRCH,
+		// which says we are not the launchd job we were configured as) may mean
+		// launchd does hold the port, which is what requireOwned refuses.
+		if ret == C.ENOENT {
+			return nil, fmt.Errorf("%w: %w: launch_activate_socket(%q): %s",
+				errNotActivated, errNotOwned, name, errnoName(ret))
+		}
 		return nil, fmt.Errorf("%w: launch_activate_socket(%q): %s", errNotActivated, name, errnoName(ret))
 	}
 	// launch.h documents the array as malloc'd for us and ours to free.

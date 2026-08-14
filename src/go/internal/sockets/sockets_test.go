@@ -1,6 +1,7 @@
 package sockets
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -256,5 +257,50 @@ func TestListenersFailsWhenNothingCanBind(t *testing.T) {
 
 	if _, err := Listeners([]string{"only"}, map[string]int{"only": taken}); err == nil {
 		t.Error("no profile could bind but Listeners reported success")
+	}
+}
+
+// TestListeners_RequireOwned_UnknownNameFallsBack pins the fix for the outage
+// case. The plist's Sockets entries come from the profiles installed at install
+// time; the serve list is directory existence at runtime. A profile directory
+// created before install.sh runs for it therefore has no Sockets entry, and
+// treating that as fatal took down every OTHER profile on every launch until
+// install.sh was re-run. launchd is not listening on a port it has no entry
+// for, so binding it is safe.
+func TestListeners_RequireOwned_UnknownNameFallsBack(t *testing.T) {
+	setEnv(t, "DS4_REQUIRE_OWNED_SOCKET", "1")
+	old := activate
+	activate = func(name string) ([]int, error) {
+		return nil, fmt.Errorf("%w: %w: no Sockets entry", errNotActivated, errNotOwned)
+	}
+	defer func() { activate = old }()
+
+	port := freePort(t)
+	lns, err := Listeners([]string{"direct"}, map[string]int{"direct": port})
+	if err != nil {
+		t.Fatalf("an unknown socket name should fall back to a plain bind, got %v", err)
+	}
+	for _, l := range lns {
+		l.Close()
+	}
+}
+
+// TestListeners_RequireOwned_OwnedPortStaysFatal is the other half: an error
+// that does NOT mean "launchd holds nothing here" must still refuse to bind,
+// which is the entire point of the flag.
+func TestListeners_RequireOwned_OwnedPortStaysFatal(t *testing.T) {
+	setEnv(t, "DS4_REQUIRE_OWNED_SOCKET", "1")
+	old := activate
+	activate = func(name string) ([]int, error) {
+		return nil, fmt.Errorf("%w: EALREADY (already activated)", errNotActivated)
+	}
+	defer func() { activate = old }()
+
+	lns, err := Listeners([]string{"direct"}, map[string]int{"direct": freePort(t)})
+	if err == nil {
+		for _, l := range lns {
+			l.Close()
+		}
+		t.Fatal("a port launchd may already hold was bound anyway")
 	}
 }

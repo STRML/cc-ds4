@@ -25,7 +25,32 @@ import (
 // which can never be activated. All of them mean the same thing to the
 // caller: bind the port yourself, or fail loud if the environment insists
 // launchd must own it.
+// activate is activateSocket, swappable so a test can drive the requireOwned
+// branch. Reaching the real ENOENT needs a launchd job with a Sockets entry
+// missing for one name, which a test binary cannot arrange.
+var activate = activateSocket
+
 var errNotActivated = errors.New("no launchd-owned socket for this name")
+
+// errNotOwned means launchd is managing us but has no Sockets entry under this
+// name (ENOENT), so it is not listening on that port and never was. Binding it
+// directly cannot collide with launchd, so DS4_REQUIRE_OWNED_SOCKET must not
+// treat it as fatal: that flag exists to refuse a port launchd already holds,
+// not to require that launchd hold every port.
+//
+// ESRCH is deliberately NOT included. It means we are not running under launchd
+// at all, and the flag is only ever set by the launch agent itself, so ESRCH
+// says the process is not the thing it was configured to be. That stays fatal.
+//
+// The distinction is load-bearing. The plist's Sockets entries are written
+// from the profiles installed AT INSTALL TIME, while the serve list is
+// directory existence AT RUNTIME. Creating a profile directory before running
+// install.sh for it — which is exactly what the profile docs tell you to do,
+// settings.json first and install.sh after — then gave that name no Sockets
+// entry, and one fatal error took down every OTHER profile too, on every
+// launch, until install.sh was re-run. With idle exit on by default a restart
+// is never far away, so the window was not narrow.
+var errNotOwned = errors.New("launchd does not own this port")
 
 // Listeners returns one listener per profile port, preferring inherited
 // launchd fds. It mirrors serve()'s port resolution: DS4_PORT_<NAME>
@@ -73,7 +98,7 @@ func Listeners(names []string, ports map[string]int) (map[string]net.Listener, e
 // listenerFor resolves one profile's listener: try the launchd-activated fd
 // first, then fall back to (or refuse, under requireOwned) a plain bind.
 func listenerFor(name string, ports map[string]int, requireOwned bool) (net.Listener, error) {
-	fds, err := activateSocket(name)
+	fds, err := activate(name)
 	if err == nil {
 		// getaddrinfo(3) can hand back more than one fd for a single Sockets
 		// key (e.g. one interface per address family). install.sh only ever
@@ -97,7 +122,7 @@ func listenerFor(name string, ports map[string]int, requireOwned bool) (net.List
 		}
 		return ln, nil
 	}
-	if requireOwned {
+	if requireOwned && !errors.Is(err, errNotOwned) {
 		return nil, fmt.Errorf("%s: %w (DS4_REQUIRE_OWNED_SOCKET=1 refuses to bind its own port)", name, err)
 	}
 

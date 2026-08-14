@@ -35,12 +35,15 @@ var table = []Profile{
 		ZDRSkipModels: nil,
 		ZDR:           false,
 		Spend:         false,
-		// The direct profile is a failover target for the 1M profiles. Its
-		// endpoint counts input + completion against the same 1M cap, while
+		// This endpoint counts input + completion against one 1M cap, while
 		// Claude Code budgets 131072 output against the advertised window — so
-		// an uncapped failover session overflows at ~923K input and 400s
-		// ("maximum context length"). The same cap as the other 1M profiles
-		// keeps a failed-over request inside the endpoint's real limit.
+		// an uncapped long session overflows at ~923K input and 400s ("maximum
+		// context length"). The same cap as the other 1M profiles keeps a
+		// request inside the endpoint's real limit.
+		//
+		// Nothing fails over to direct any more (nous targets openrouter,
+		// openrouter targets nothing), so this is no longer a failover
+		// concern — it applies to any long session on this profile.
 		MaxOut: 65536,
 		// Only this endpoint requires an assistant tool_use message to replay
 		// its thinking block. Claude Code 2.x does replay it, so this guards a

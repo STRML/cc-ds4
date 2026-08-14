@@ -18,6 +18,23 @@ PROFILES = {
 # table is what it resolves against.
 TIERS = {t: "ds4-" + t for t in
          ("pro-xhigh", "pro-medium", "flash-xhigh", "flash-medium")}
+# The direct endpoint's literal ids. [1m] declares the context window and is
+# stripped by the endpoint (deepseek-v4-pro[1m] -> deepseek-v4-pro).
+DIRECT_MODELS = {"pro": "deepseek-v4-pro[1m]", "flash": "deepseek-v4-flash[1m]"}
+
+
+def direct_model(tier, override=None):
+    """Literal model id for the direct endpoint, which takes no sentinel.
+
+    The tier's family half still decides pro vs flash: direct is the one
+    profile that actually serves pro, so mapping every tier to flash handed
+    back flash on the only endpoint that could have honoured the request.
+    The effort half is dropped because api.deepseek.com ignores
+    reasoning_effort.
+    """
+    if override:
+        return override
+    return DIRECT_MODELS["pro" if tier.startswith("pro-") else "flash"]
 ROLE_PERMISSION = {"plan": "plan", "review": "plan", "verify": "plan", "implement": "acceptEdits"}
 
 SCRUB_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "DS4_")
@@ -67,14 +84,12 @@ def main():
     if cfg["sentinel"]:
         model = a.model or TIERS[a.tier]
     else:
-        model = a.model or "deepseek-v4-flash[1m]"
-        # Warn: the direct profile's deepseek endpoint ignores reasoning_effort,
-        # and this dispatcher pins it to flash. A pro tier therefore collapses
-        # to flash with no effort control — a coordinator expecting pro-level
-        # reasoning gets flash with thinking on.
+        model = direct_model(a.tier, a.model)
+        # The effort half still has nowhere to go: api.deepseek.com ignores
+        # reasoning_effort, so pro-xhigh and pro-medium are the same request.
         if a.tier.startswith("pro-"):
-            print("note:direct profile ignores --tier; reasoning effort is unproven",
-                  "on the direct endpoint (see README)", file=sys.stderr)
+            print("note: direct serves pro, but ignores reasoning effort — "
+                  "pro-xhigh and pro-medium are identical here", file=sys.stderr)
     dir_path = os.path.expanduser(cfg["dir"])
     cmd = ["claude", "-p",
            "--settings", '{"disableAllHooks":true}',

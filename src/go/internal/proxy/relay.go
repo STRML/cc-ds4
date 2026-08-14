@@ -51,7 +51,6 @@ var skipRelayHeaders = map[string]bool{
 	"connection":        true,
 }
 
-// retryAttempts returns how many upstream attempts a request gets. It mirrors
 // errPeekLimit is how much of a non-2xx body is read so the failover decision
 // can inspect it. Big enough for any provider's JSON error envelope, small
 // enough that a huge error page is not buffered.
@@ -246,6 +245,14 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	// to the target's literal id, so a failed-over main-loop request does not
 	// look retryable.
 	origTier := modelFromJSON(body)
+	// Kept for the rescue path. rewrite() below swaps the sentinel for the
+	// EFFECTIVE profile's literal model id, and a rescue re-runs the rewrite
+	// for the target — but against an already-rewritten body no sentinel
+	// remains, so the target's family map cannot match and only the hardcoded
+	// failoverModel net does anything. That coupling is invisible from the
+	// table: change a profile's Model without adding a failoverModel entry and
+	// every rescued request forwards an id the target does not serve.
+	clientBody := body
 
 	// Effective profile + key: the profile's own, or the failover target's
 	// when the breaker is open. The rewrite uses the EFFECTIVE config so a
@@ -328,11 +335,20 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 			}{io.MultiReader(bytes.NewReader(errBody), resp.Body), resp.Body}
 		}
 		drained := creditExhausted(resp.StatusCode, errBody)
-		if drained {
-			// Not transient, but the upstream is unusable until someone pays.
-			h.recordConnFailure()
-		} else {
-			h.recordOutcome(resp.StatusCode)
+		// Only the profile's OWN upstream tells us anything about the profile's
+		// health. While failed over, every response came from the target, and
+		// folding those into this breaker's window makes it a record of the
+		// wrong host. Nothing misbehaves today — the circuit is already open so
+		// no trip can fire, and closing nils the window — but the window is
+		// read by name elsewhere, and a future reader would inherit the bug
+		// with nothing to warn it.
+		if !failedOver {
+			if drained {
+				// Not transient, but the upstream is unusable until someone pays.
+				h.recordConnFailure()
+			} else {
+				h.recordOutcome(resp.StatusCode)
+			}
 		}
 		if trial {
 			// This request went to the profile's own upstream to prove it can
@@ -344,7 +360,7 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 			// serve this. Learning that the upstream is still down is the point
 			// of a trial, but the client should not pay for the lesson, and the
 			// same applies to the window before the breaker has tripped.
-			if h.rescueViaFailover(w, r, body, upstreamURL, requires) {
+			if h.rescueViaFailover(w, r, clientBody, upstreamURL, requires) {
 				resp.Body.Close()
 				return
 			}
@@ -356,7 +372,10 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 			// and sends the reader off to check model names and API keys when
 			// the real answer is that the account is out of money.
 			resp.Body.Close()
-			writeDrainedBalance(w, h.cfg.Name)
+			// effCfg, not h.cfg: while failed over the empty account is the
+			// TARGET's, and naming the origin sends the user to top up a
+			// profile that has money in it while nothing changes.
+			writeDrainedBalance(w, effCfg.Name)
 			return
 		}
 		streamResponse(w, resp, effUpstream)
@@ -367,7 +386,7 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	if trial {
 		h.trialClose(false)
 	}
-	if !failedOver && h.rescueViaFailover(w, r, body, upstreamURL, requires) {
+	if !failedOver && h.rescueViaFailover(w, r, clientBody, upstreamURL, requires) {
 		return
 	}
 	// Pre-first-byte failure: 502 "proxy upstream failure".

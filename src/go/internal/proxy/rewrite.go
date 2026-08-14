@@ -127,14 +127,20 @@ func rewrite(body []byte, cfg profiles.Profile, effortPin string) ([]byte, error
 			case model == "":
 				// Nothing to rewrite to. Leave the request alone rather than
 				// blanking its model.
-			case isSentinel && effortLevels[root.Get("reasoning_effort").String()]:
-				// /effort, or an explicit request. It beats the sentinel's
-				// default; the level is already in the body, so only the model
-				// needs swapping.
-				root.SetString("model", model)
 			case isSentinel && cfg.Effort:
 				root.SetString("model", model)
+				// Precedence, weakest first: the sentinel's own default, then a
+				// reasoning_effort the client sent, then the /ds4-effort pin.
+				//
+				// The pin sits on top because it is the most explicit thing the
+				// user did and the status line advertises it as active. It used
+				// to lose to any client-sent level — so a request that carried
+				// one silently ran at that level while the bar still rendered
+				// the pin, which is worse than either behaviour on its own.
 				effort := sen.effort
+				if lvl := root.Get("reasoning_effort").String(); effortLevels[lvl] {
+					effort = lvl
+				}
 				if effortPin != "" {
 					effort = effortPin
 				}

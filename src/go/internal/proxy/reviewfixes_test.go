@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -455,5 +456,127 @@ func TestVisionDeadlineStopsTheWalk(t *testing.T) {
 	}
 	if strings.Contains(string(out), `"type": "image"`) {
 		t.Error("an image block reached the upstream body")
+	}
+}
+
+// TestDrainedTargetNamesTheProfileThatServed pins who the 402 blames. Once the
+// circuit is open the request is served by the target, so an empty balance
+// there is the TARGET's. Naming the origin sends the user to top up an account
+// that already has money while nothing changes — the same class of
+// wrong-signpost error the drained path was written to remove.
+func TestDrainedTargetNamesTheProfileThatServed(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(402)
+		_, _ = w.Write([]byte(`{"error":{"message":"insufficient credits"}}`))
+	}))
+	defer target.Close()
+
+	t.Setenv("DS4_KEY_NOUS", "k")
+	t.Setenv("DS4_KEY_OPENROUTER", "ok")
+	t.Setenv("DS4_UPSTREAM_OPENROUTER", target.URL)
+
+	cfg := testNous()
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "openrouter"
+	h := NewHandler(cfg, time.Minute)
+	tripBreaker(h) // already failed over: the target is what serves this
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"ds4-flash-medium","max_tokens":32000,"messages":[]}`))
+	req.Header.Set("authorization", "Bearer k")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != 402 {
+		t.Fatalf("status = %d, want 402 (body %s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "openrouter") {
+		t.Errorf("the 402 blames the wrong profile: %s", rr.Body.String())
+	}
+}
+
+// TestEffortPinBeatsAClientSentLevel pins the precedence the status line
+// advertises. The bar renders the pin from the override file unconditionally,
+// so a client-sent reasoning_effort that quietly outranked it made the display
+// assert an effort the proxy did not apply.
+func TestEffortPinBeatsAClientSentLevel(t *testing.T) {
+	cfg := testOpenRouter()
+	cfg.Dir = t.TempDir()
+	body := []byte(`{"model":"ds4-flash-medium","reasoning_effort":"low","max_tokens":32000,"messages":[]}`)
+
+	got, err := rewrite(body, cfg, "max")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), `"reasoning_effort": "max"`) {
+		t.Errorf("the pin lost to the client's level: %s", got)
+	}
+	if strings.Contains(string(got), `"reasoning_effort": "low"`) {
+		t.Errorf("the client's level survived over the pin: %s", got)
+	}
+
+	// With no pin set, the client's level still beats the sentinel default.
+	got, err = rewrite(body, cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), `"reasoning_effort": "low"`) {
+		t.Errorf("without a pin the client's level should stand: %s", got)
+	}
+}
+
+// TestRescueResolvesTheSentinelForTheTarget pins that the rescue sees the body
+// as the client sent it.
+//
+// The rescue re-runs rewrite for the target so the target's family map applies
+// — but it was handed a body the origin's rewrite had already resolved, so no
+// sentinel remained to match and only the hardcoded failoverModel net did
+// anything. With the shipped table both paths happen to land on the same id,
+// which is precisely why this needs a profile whose model the net does not
+// know: that is the case where a table edit silently starts forwarding an id
+// the target does not serve.
+func TestRescueResolvesTheSentinelForTheTarget(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
+	var gotModel string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		gotModel = modelFromJSON(raw)
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"served"}`))
+	}))
+	defer target.Close()
+	broke := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503) // transient: rescue territory
+	}))
+	defer broke.Close()
+
+	t.Setenv("DS4_KEY_NOUS", "k")
+	t.Setenv("DS4_KEY_OPENROUTER", "ok")
+	t.Setenv("DS4_UPSTREAM_OPENROUTER", target.URL)
+
+	// An origin whose own model id the failoverModel net has never heard of,
+	// standing in for any future edit to the profile table.
+	cfg := withUpstream(testNous(), broke.URL)
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "openrouter"
+	cfg.Model = "nous/some-future-build"
+	cfg.FamilyModels = map[string]string{
+		"pro":   "nous/some-future-build",
+		"flash": "nous/some-future-build",
+	}
+	h := NewHandler(cfg, time.Minute)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"ds4-flash-medium","max_tokens":32000,"messages":[]}`))
+	req.Header.Set("authorization", "Bearer k")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if gotModel == "" {
+		t.Fatal("the target never received the rescued request")
+	}
+	if strings.HasPrefix(gotModel, "nous/") {
+		t.Errorf("the target was sent the ORIGIN's model id %q, which it does not serve", gotModel)
 	}
 }
