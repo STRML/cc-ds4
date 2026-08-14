@@ -14,8 +14,8 @@ PROFILES = {
     "nous":     {"dir": "~/.claude-nous",  "port": 31502, "sentinel": True},
 }
 # --tier is the sentinel without its ds4- prefix. The sentinel encodes model
-# family (pro vs flash) and default reasoning effort; proxy.py EFFORT is the
-# table it resolves against.
+# family (pro vs flash) and default reasoning effort; the proxy's sentinel
+# table is what it resolves against.
 TIERS = {t: "ds4-" + t for t in
          ("pro-xhigh", "pro-medium", "flash-xhigh", "flash-medium")}
 ROLE_PERMISSION = {"plan": "plan", "review": "plan", "verify": "plan", "implement": "acceptEdits"}

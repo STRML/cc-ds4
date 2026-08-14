@@ -3,11 +3,13 @@
 | profile | CLAUDE_CONFIG_DIR | port | sentinel tiers | effort override | privacy |
 |---|---|---|---|---|---|
 | direct | ~/.claude-ds4 | 31500 | no (literal `deepseek-v4-flash[1m]`) | no | sends to DeepSeek (retention/training) |
-| openrouter | ~/.claude-or-ds4 | 31501 | yes (ds4-max/xhigh/high/low) | yes | ZDR on by default |
+| openrouter | ~/.claude-or-ds4 | 31501 | yes (ds4-{pro,flash}-{xhigh,medium}) | yes | ZDR on by default |
 | nous | ~/.claude-nous | 31502 | yes | yes | no ZDR, 90% promo pricing |
 
-Effort: `ds4-max`→max, `ds4-xhigh`→xhigh, `ds4-high`→high, `ds4-low`→low
-(proxy.py `EFFORT`). The proxy must be up on the profile's port. The launcher
+A sentinel is `ds4-<family>-<effort>`: the family half picks the model, the
+effort half the default reasoning effort. Only `direct` actually serves the pro
+family; on or-ds4 and nous both families resolve to the same flash model.
+The proxy must be up on the profile's port. The launcher
 `bin/ds4-effort` writes the profile's `effort-override` file.
 
 The `direct` profile takes no sentinel tier and no effort override: the endpoint

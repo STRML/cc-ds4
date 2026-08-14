@@ -26,8 +26,9 @@ and the data flow diagram are load-bearing for correctness.
 - The proxy must be running for any ds4 profile to work. On a cold start the
   SessionStart hook kickstarts it; the launcher function in `profiles/*.md` does
   the same on first launch.
-- `src/proxy.py` is the single source of truth for profile ports, upstreams, and
-  failover config. Never duplicate that information outside the PROFILES dict.
+- `src/go/internal/profiles/table.go` is the single source of truth for profile
+  ports, upstreams, models, and failover config. Never duplicate that
+  information outside the table.
 
 ## Profiles
 
@@ -56,7 +57,7 @@ and the data flow diagram are load-bearing for correctness.
 
 ## Failure modes worth knowing
 
-- **Auto-mode classifier relay flaps ("ds4-high temporarily unavailable").**
+- **Auto-mode classifier relay flaps ("ds4-flash-xhigh temporarily unavailable").**
   The classifier is routed to the Anthropic subscription; when it 403s/524s
   the gate blocks every Bash call. It fails open to ds4 per proxy config but
   the CLI still gates. Retry with backoff — it's transient load.
@@ -68,7 +69,8 @@ and the data flow diagram are load-bearing for correctness.
 ## Testing
 
 ```sh
-python3 -m unittest discover -s tests -q    # 269 tests, stdlib only, no deps
+cd src/go && go test ./...                  # the proxy
+python3 -m unittest discover -s tests -q    # status line + install, stdlib only
 ```
 
 No pip deps. Pure stdlib. The suite pins published price tables, per-model cost

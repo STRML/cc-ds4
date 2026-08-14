@@ -278,7 +278,7 @@ lands between the two.
 
 ## Routing the permission classifier
 
-The auto-mode permission classifier (the small `ds4-high` call that gates every tool
+The auto-mode permission classifier (the small `ds4-flash-xhigh` call that gates every tool
 call) is a security gate: it sees the intent of every tool call before anything else.
 By default the gate lives in a trusted boundary; the other routes trade that boundary
 for cost or simplicity. The classifier body is already an Anthropic-shaped request, so
@@ -374,13 +374,12 @@ profiles/           setup prompts — paste one into Claude Code
   nous.md               Nous Portal, pinned -0731, no ZDR, needs the proxy.
   kimi.md               Moonshot's Kimi K3.
 src/
-  proxy.py              one process, one port per profile: thinking off on small
-                        calls, tier to effort, ZDR routing, guards, /__spend
+  go/                   the proxy: one process, one port per profile. Thinking
+                        off on small calls, sentinel to model + effort, ZDR
+                        routing, guards, /__spend, vision, idle exit
   commands/
     ds4-effort.md       /ds4-effort slash command; the write side of the
                         per-profile effort override
-  vision.py             image blocks -> text via a local `claude -p --model haiku`
-                        child, content-hash cached, fail-open
   ds4-proxy-kickstart.sh   SessionStart hook that starts the proxy (see below)
   statusline/
     common.py           transcript accounting and cost maths, shared
@@ -458,7 +457,7 @@ It installs five things and backs up `settings.json` first:
 | | where it lands | why |
 |---|---|---|
 | status line | `<profile>/ds4-statusline.py` → this checkout | `git pull` updates it |
-| proxy | one launch agent running `src/proxy.py` from this checkout, socket-activated | serves every profile, one port each. A Go rewrite (`src/go/`) is byte-compatible and differential-harness GREEN; it replaces Python once the cutover checklist lands (socket activation, vision rewrite, effort override, real /__spend, classifier zdr/ds4 routes, ZDR 409 gate, sessions_live idle-exit) |
+| proxy | one launch agent running the Go binary built from this checkout, socket-activated | serves every profile, one port each. `install.sh` builds it to `src/go/cmd/ds4-proxy/ds4-proxy` |
 | kickstart hook | `<profile>/ds4-proxy-kickstart.sh` → this checkout, registered as `SessionStart` | starts the proxy so a cold session doesn't hit connection-refused |
 | memory link | `<profile>/ds4-link-memory.sh` → this checkout, run at install and on every SessionStart | shares project memory with the real `~/.claude` |
 | `cship.toml` | copied into the profile directory | meant to be edited |
@@ -494,16 +493,15 @@ up the hook exits in milliseconds.
 
 Socket activation is the structural version of that guarantee. The plist declares
 each profile's port under `Sockets`, so launchd binds and listens at load time and
-hands the listening fd to `src/proxy.py` on the first connection
-(`launch_activate_socket`, reached through ctypes because CPython has no binding
-for it). Three things follow. The port answers even when the proxy is stopped, so
+hands the listening fd to the proxy on the first connection
+(`launch_activate_socket`, reached through cgo). Three things follow. The port answers even when the proxy is stopped, so
 connection-refused stops being reachable and the hook is now a warm-up rather than
 a correctness fix. The idle exit costs a cold start (~90ms) instead of an outage.
 And launchd stops reaping the job: a launch agent with no demand criteria gets
 `service inactive` then `removing service` a couple of minutes in, which is what
 used to take the proxy down mid-session, and owning a socket is the demand
-criterion that ends it. Run `src/proxy.py` by hand and none of this applies — it
-binds the ports itself, exactly as before.
+criterion that ends it. Run the binary by hand and none of this applies: with no
+launchd parent it binds the ports itself, exactly as before.
 
 Verify the bar renders before walking away — a wrapper that fails open turns a syntax
 error into a blank bar and exit 0:
