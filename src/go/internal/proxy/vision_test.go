@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,34 @@ func fakeClaudeBin(t *testing.T, stdout string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// countingClaudeBin is fakeClaudeBin plus a spawn counter. The script appends
+// to a tally file on each invocation and the returned func reads it, so a test
+// asserts how many children actually ran rather than inferring it from output.
+func countingClaudeBin(t *testing.T) (bin string, calls func() int) {
+	t.Helper()
+	dir := t.TempDir()
+	tally := filepath.Join(dir, "calls")
+	bin = filepath.Join(dir, "claude")
+	script := "#!/bin/sh\necho x >> " + tally + "\n" +
+		"cat <<'EOF'\n" + `{"type":"result","result":"a description"}` + "\nEOF\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin, func() int {
+		raw, err := os.ReadFile(tally)
+		if err != nil {
+			return 0 // never invoked
+		}
+		return strings.Count(string(raw), "x")
+	}
+}
+
+// distinctPNG returns valid base64 whose decoded bytes differ per index, so
+// each image hashes to its own cache key and none is served from cache.
+func distinctPNG(i int) string {
+	return base64.StdEncoding.EncodeToString([]byte("png-payload-" + strconv.Itoa(i)))
 }
 
 func imageBlock(mediaType, data string) map[string]any {
@@ -448,5 +477,42 @@ func TestImageExt(t *testing.T) {
 		if got := imageExt(mt); got != want {
 			t.Errorf("imageExt(%q) = %q, want %q", mt, got, want)
 		}
+	}
+}
+
+// TestVisionBudgetCapsChildSpawns pins the cap that STRML/cc-ds4#42 was filed
+// about. Each describe spawns a child with a 120s ceiling and they run
+// serially, so without the cap one transcript full of uncached images holds a
+// request for minutes and bills a describe for every one.
+func TestVisionBudgetCapsChildSpawns(t *testing.T) {
+	bin, calls := countingClaudeBin(t)
+	t.Setenv("DS4_CLAUDE_BIN", bin)
+
+	cfg := testNous()
+	cfg.Dir = t.TempDir()
+
+	// One more image than the budget allows, each with distinct bytes so no
+	// two share a cache entry.
+	var blocks []string
+	for i := 0; i < maxImagesPerRequest+3; i++ {
+		blocks = append(blocks, `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"`+
+			distinctPNG(i)+`"}}`)
+	}
+	body := []byte(`{"model":"ds4-flash-xhigh","max_tokens":32000,"messages":[{"role":"user","content":[` +
+		strings.Join(blocks, ",") + `]}]}`)
+
+	out, err := applyVision(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := calls(); n > maxImagesPerRequest {
+		t.Errorf("spawned %d children for %d images, want at most %d",
+			n, maxImagesPerRequest+3, maxImagesPerRequest)
+	}
+	// Nothing image-shaped may survive, budget or not: the upstream cannot
+	// read one, so an over-budget image must become a placeholder rather than
+	// being passed through.
+	if strings.Contains(string(out), `"type": "image"`) {
+		t.Errorf("an image block reached the upstream body: %s", out)
 	}
 }

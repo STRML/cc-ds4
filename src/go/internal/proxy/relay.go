@@ -52,14 +52,20 @@ var skipRelayHeaders = map[string]bool{
 }
 
 // retryAttempts returns how many upstream attempts a request gets. It mirrors
-// mainLoopTier is the sentinel the main thread sends (ANTHROPIC_MODEL). It
-// runs its own 10x-backoff retry, so an in-proxy retry would double up.
+// mainLoopTier is what ANTHROPIC_MODEL is set to out of the box.
 const mainLoopTier = "ds4-pro-xhigh"
 
-// retryAttempts decides how hard to retry a transient upstream error. Subagent
-// tiers die with "Execution error" on a raw forward, so the proxy absorbs the
-// error for them; the main loop retries itself. A non-sentinel model (a
-// failed-over request, or a raw Anthropic model) is retryable by the same rule.
+// retryAttempts decides how hard to retry a transient upstream error.
+//
+// The main loop runs its own 10x-backoff retry, so retrying in the proxy as
+// well would stack two backoffs on an upstream that is already struggling.
+// Subagents have no such retry and die with "Execution error" on a raw
+// forward, so the proxy absorbs the error for them.
+//
+// The split is by FAMILY, not by one sentinel name. The main loop rides pro
+// (ds4-pro-xhigh by default, ds4-pro-medium once the user picks opus) and
+// subagents ride flash. Keying off a single name meant switching the main loop
+// to opus silently re-enabled the double retry this exists to prevent.
 //
 // origTier is the client-sent model captured before any failover remap: the
 // remap rewrites the body's model to the target's literal id, which would
@@ -68,10 +74,10 @@ func retryAttempts(origTier string) int {
 	if retryAttemptsOverride > 0 {
 		return retryAttemptsOverride
 	}
-	if origTier != mainLoopTier {
-		return 3
+	if sen, ok := sentinelTable[origTier]; ok && sen.family == "pro" {
+		return 1
 	}
-	return 1
+	return 3
 }
 
 // modelFromJSON extracts the top-level "model" string from a request body
@@ -91,22 +97,21 @@ func modelFromJSON(body []byte) string {
 	return model
 }
 
-// relay mirrors _relay + _stream in proxy.py: it rewrites the body, POSTs it
-// to the profile's upstream, retries transient statuses for the retryable
-// tiers, records the outcome for the breaker BEFORE streaming, and streams the
-// response body back with flush.
-// effectiveUpstream returns the upstream + auth key to use, applying the
-// failover target when the breaker is open (mirroring failover_effective).
-// Returns the effective profile (own, or the target with the FAILOVER_MODEL
-// remap and the target's upstream/key overrides) plus the auth key.
-func (h *Handler) effectiveProfile() (profiles.Profile, string) {
+// effectiveProfile returns the profile a request should be served by, its key,
+// and whether this request is the breaker's armed trial.
+//
+// A trial routes to the profile's OWN upstream even though the circuit is
+// open: the whole point is to find out whether that upstream can carry a real
+// request again. The caller reports the outcome back through trialClose.
+func (h *Handler) effectiveProfile() (profiles.Profile, string, bool) {
 	eff := h.cfg
 	key := os.Getenv("DS4_KEY_" + strings.ToUpper(eff.Name))
 	if key == "" {
 		key = readKeyFromDir(eff.Dir)
 	}
-	if !h.breakerOpen() {
-		return eff, key
+	open, trial := h.breakerOpen()
+	if !open || trial {
+		return eff, key, trial
 	}
 	// Failover: route to the target profile's upstream, key, and config. The
 	// target's upstream honors the DS4_UPSTREAM_<NAME> override (the harness
@@ -125,10 +130,10 @@ func (h *Handler) effectiveProfile() (profiles.Profile, string) {
 			if key == "" {
 				key = readKeyFromDir(p.Dir)
 			}
-			return eff, key
+			return eff, key, false
 		}
 	}
-	return eff, key
+	return eff, key, false
 }
 
 func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, upstreamURL string) {
@@ -157,7 +162,7 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	// when the breaker is open. The rewrite uses the EFFECTIVE config so a
 	// failed-over request is remapped for the target (FAILOVER_MODEL, no
 	// reasoning_effort), exactly like Python's failover routing.
-	effCfg, effKey := h.effectiveProfile()
+	effCfg, effKey, trial := h.effectiveProfile()
 	effUpstream := effCfg.Upstream
 	rewritten, err := rewrite(body, effCfg)
 	if err == nil {
@@ -211,8 +216,18 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 		// is still being read. A mid-stream stall therefore counts the
 		// request as a HIT (the upstream served a response), not a strike.
 		h.recordOutcome(resp.StatusCode)
+		if trial {
+			// This request went to the profile's own upstream to prove it can
+			// carry real load. Its result, not the probe's, closes the circuit.
+			h.trialClose(!isTransient(resp.StatusCode))
+		}
 		streamResponse(w, resp, effUpstream)
 		return
+	}
+	// Every attempt failed before a first byte. A trial that cannot even
+	// connect is the clearest possible evidence the upstream is still down.
+	if trial {
+		h.trialClose(false)
 	}
 	// Pre-first-byte failure: 502 "proxy upstream failure".
 	w.Header().Set("content-type", "application/json")

@@ -33,9 +33,16 @@ type goldenCase struct {
 // restoring src/proxy.py from history first. It is kept because a golden whose
 // provenance is unreproducible is a golden nobody can ever justify changing.
 //
-// A failure here is not automatically a bug: it means the rewrite drifted from
-// behavior that shipped for months. That deserves a deliberate decision and a
-// regenerated golden, not a quiet edit to make the test pass.
+// Scope, precisely: the Python tree it was dumped from already carried the
+// sentinel rename, so this pins Go against Python's rewrite SEMANTICS —
+// key order, number formatting, escaping, where reasoning_effort lands — not
+// against a build that shipped to users under these names. The byte-level
+// serialization is the part that had two independent implementations and is
+// what a regression here would be about.
+//
+// A failure is therefore not automatically a bug, but it does mean the emitted
+// bytes changed. That deserves a deliberate decision and a regenerated golden,
+// not a quiet edit to make the test pass.
 func TestRewriteMatchesPythonGolden(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "rewrite_golden.json"))
 	if err != nil {

@@ -212,3 +212,49 @@ func assertServes(t *testing.T, ln net.Listener) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 }
+
+// TestListenersDegradesWhenOnePortIsBusy pins that one occupied port does not
+// take the other profiles down. A leftover process holding :31500 used to be
+// survivable (the old code bound per profile and logged the failure); making
+// Listeners all-or-nothing would turn it into a total outage.
+func TestListenersDegradesWhenOnePortIsBusy(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	taken := busy.Addr().(*net.TCPAddr).Port
+
+	ports := map[string]int{"blocked": taken, "free": 0}
+	got, err := Listeners([]string{"blocked", "free"}, ports)
+	if err != nil {
+		t.Fatalf("one busy port failed the whole call: %v", err)
+	}
+	defer func() {
+		for _, l := range got {
+			l.Close()
+		}
+	}()
+	if _, ok := got["blocked"]; ok {
+		t.Error("the busy profile reported a listener it does not have")
+	}
+	if _, ok := got["free"]; !ok {
+		t.Error("a free profile lost its listener because another was busy")
+	}
+}
+
+// TestListenersFailsWhenNothingCanBind pins the other end: if no profile binds
+// at all there is nothing to serve, and returning an empty map with no error
+// would leave the process alive and silently useless.
+func TestListenersFailsWhenNothingCanBind(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	taken := busy.Addr().(*net.TCPAddr).Port
+
+	if _, err := Listeners([]string{"only"}, map[string]int{"only": taken}); err == nil {
+		t.Error("no profile could bind but Listeners reported success")
+	}
+}

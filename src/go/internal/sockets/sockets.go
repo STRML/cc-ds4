@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // errNotActivated means launchd did not hand this process a socket for the
@@ -41,16 +42,30 @@ var errNotActivated = errors.New("no launchd-owned socket for this name")
 func Listeners(names []string, ports map[string]int) (map[string]net.Listener, error) {
 	requireOwned := os.Getenv("DS4_REQUIRE_OWNED_SOCKET") == "1"
 	out := make(map[string]net.Listener, len(names))
+	var failed []string
 	for _, name := range names {
 		ln, err := listenerFor(name, ports, requireOwned)
 		if err != nil {
-			// Close what we have so a partial bind leaves no dangling ports.
-			for _, l := range out {
-				l.Close()
+			if requireOwned {
+				// The point of this mode is to fail loudly rather than bind a
+				// port launchd believes it owns, so one failure is fatal. Close
+				// what we have so a partial bind leaves no dangling ports.
+				for _, l := range out {
+					l.Close()
+				}
+				return nil, err
 			}
-			return nil, err
+			// One profile's port being busy (a leftover process, usually) is
+			// not a reason to take the other profiles down with it. Report it
+			// and keep serving the rest; the caller sees a missing entry.
+			fmt.Fprintf(os.Stderr, "ds4-proxy: %s: %v\n", name, err)
+			failed = append(failed, name)
+			continue
 		}
 		out[name] = ln
+	}
+	if len(out) == 0 && len(names) > 0 {
+		return nil, fmt.Errorf("no profile could bind (%s)", strings.Join(failed, ", "))
 	}
 	return out, nil
 }

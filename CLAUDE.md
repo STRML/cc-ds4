@@ -33,17 +33,20 @@ and the data flow diagram are load-bearing for correctness.
 ## Profiles
 
 - `claude-ds4` (direct): fastest, cheapest, no ZDR, sends prompts to DeepSeek
-  (retention/training). Model is literal `deepseek-v4-flash[1m]`; no effort
-  knob. Tier sentinels don't rewrite — the CLI passes literal model names.
-  Failover from other profiles lands here flash-only (`FAILOVER_MODEL`), never
-  pro.
+  (retention/training). Its settings.json uses literal model names, so no
+  sentinel reaches it in practice; one that did would resolve through the
+  family map. It ignores `reasoning_effort`, so there is no effort knob. This
+  is the only profile where the pro family actually serves pro. Nothing fails
+  over to it any more.
 - `claude-or-ds4` (OpenRouter): ZDR on, pinned `-0731` build, slower. Sentinel
-  tiers + effort control.
+  tiers + effort control. No working host for pro, so both families run flash.
 - `claude-nous` (Nous Portal): cheapest (90% promo), pinned `-0731`, no ZDR.
-  Sentinel tiers + effort control. No public credits/balance endpoint.
+  Sentinel tiers + effort control. No public credits/balance endpoint. Fails
+  over to or-ds4 when its breaker trips.
 - A profile env MUST be scrubbed before spawning a child — follow the
-  `vision._env()` recipe (strip `ANTHROPIC_*`, `CLAUDE_CODE_*`, `DS4_*`,
-  `CLAUDE_CONFIG_DIR`, `CLAUDECODE`, `CMUX*`, proxy vars).
+  `scrubbedEnv` recipe in `src/go/internal/proxy/vision.go` (strip
+  `ANTHROPIC_*`, `CLAUDE_CODE_*`, `DS4_*`, `CLAUDE_CONFIG_DIR`, `CLAUDECODE`,
+  `CMUX*`, proxy vars).
 
 ## Skills
 

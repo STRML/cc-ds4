@@ -25,7 +25,7 @@ func TestEffectiveProfileClosedBreakerStaysHome(t *testing.T) {
 	cfg.Dir = t.TempDir()
 	h := NewHandler(cfg, time.Minute)
 
-	eff, _ := h.effectiveProfile()
+	eff, _, _ := h.effectiveProfile()
 	if eff.Name != "nous" {
 		t.Fatalf("closed breaker routed to %q, want nous", eff.Name)
 	}
@@ -44,7 +44,7 @@ func TestEffectiveProfileOpenBreakerRoutesToTarget(t *testing.T) {
 	h := NewHandler(cfg, time.Minute)
 	tripBreaker(h)
 
-	eff, _ := h.effectiveProfile()
+	eff, _, _ := h.effectiveProfile()
 	if eff.Name != "openrouter" {
 		t.Fatalf("open breaker routed to %q, want openrouter", eff.Name)
 	}
@@ -74,7 +74,7 @@ func TestEffectiveProfileUnknownTargetStaysHome(t *testing.T) {
 	h := NewHandler(cfg, time.Minute)
 	tripBreaker(h)
 
-	eff, _ := h.effectiveProfile()
+	eff, _, _ := h.effectiveProfile()
 	if eff.Name != "nous" {
 		t.Fatalf("unknown target routed to %q, want to stay on nous", eff.Name)
 	}
@@ -92,7 +92,7 @@ func TestEffectiveProfileNoTargetStaysHome(t *testing.T) {
 	h := NewHandler(cfg, time.Minute)
 	tripBreaker(h)
 
-	eff, _ := h.effectiveProfile()
+	eff, _, _ := h.effectiveProfile()
 	if eff.Name != "openrouter" {
 		t.Fatalf("routed to %q with no failover target configured", eff.Name)
 	}
@@ -111,11 +111,11 @@ func TestFailoverUsesTargetKeyNotOwn(t *testing.T) {
 	cfg.Failover = "openrouter"
 	h := NewHandler(cfg, time.Minute)
 
-	if _, key := h.effectiveProfile(); key != "key-for-nous" {
+	if _, key, _ := h.effectiveProfile(); key != "key-for-nous" {
 		t.Errorf("closed breaker used key %q, want nous's own", key)
 	}
 	tripBreaker(h)
-	if _, key := h.effectiveProfile(); key != "key-for-openrouter" {
+	if _, key, _ := h.effectiveProfile(); key != "key-for-openrouter" {
 		t.Errorf("failed over with key %q, want the target's", key)
 	}
 }
@@ -203,5 +203,156 @@ func TestFailoverDoesNotRetryTheMainLoop(t *testing.T) {
 
 	if attempts != 1 {
 		t.Errorf("main-loop request attempted %d times through failover, want 1", attempts)
+	}
+}
+
+// armTrial puts the breaker in the state a clean probe streak leaves it in.
+func armTrial(h *Handler) {
+	h.br.mu.Lock()
+	h.br.open = true
+	h.br.trial = true
+	h.br.mu.Unlock()
+}
+
+func breakerIsOpen(h *Handler) bool {
+	h.br.mu.Lock()
+	defer h.br.mu.Unlock()
+	return h.br.open
+}
+
+// TestTrialRoutesToOwnUpstream pins the point of the trial: it goes to the
+// profile's OWN upstream, not the failover target. Routing it to the target
+// would measure the target's health and close the circuit on evidence about
+// the wrong server.
+func TestTrialRoutesToOwnUpstream(t *testing.T) {
+	cfg := testNous()
+	cfg.Dir = t.TempDir()
+	cfg.Upstream = "https://nous.example"
+	cfg.Failover = "openrouter"
+	h := NewHandler(cfg, time.Minute)
+	armTrial(h)
+
+	eff, _, trial := h.effectiveProfile()
+	if !trial {
+		t.Fatal("armed trial not reported to the caller")
+	}
+	if eff.Name != "nous" {
+		t.Errorf("trial routed to %q, want the profile's own upstream", eff.Name)
+	}
+}
+
+// TestTrialCloseOnlyOnCleanRequest pins that a probe alone never closes the
+// circuit. A clean probe arms a trial; only a real request served without a
+// transient error closes it. Closing on the probe is the flap this prevents:
+// the probe passes during a lull, the next heavy request fails, and the
+// circuit reopens immediately.
+func TestTrialCloseOnlyOnCleanRequest(t *testing.T) {
+	cfg := testNous()
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "openrouter"
+
+	t.Run("transient trial keeps it open", func(t *testing.T) {
+		h := NewHandler(cfg, time.Minute)
+		armTrial(h)
+		if closed := h.trialClose(false); closed {
+			t.Error("a failed trial closed the circuit")
+		}
+		if !breakerIsOpen(h) {
+			t.Error("circuit closed despite the trial failing")
+		}
+	})
+
+	t.Run("clean trial closes it", func(t *testing.T) {
+		h := NewHandler(cfg, time.Minute)
+		armTrial(h)
+		if closed := h.trialClose(true); !closed {
+			t.Error("a clean trial did not close the circuit")
+		}
+		if breakerIsOpen(h) {
+			t.Error("circuit still open after a clean trial")
+		}
+	})
+}
+
+// TestTrialIsSpentOnce pins that a burst does not spend one trial across
+// several concurrent requests. The second report finds the trial disarmed and
+// changes nothing, so a single clean response cannot be double-counted.
+func TestTrialIsSpentOnce(t *testing.T) {
+	cfg := testNous()
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "openrouter"
+	h := NewHandler(cfg, time.Minute)
+	armTrial(h)
+
+	if !h.trialClose(true) {
+		t.Fatal("first report did not close the circuit")
+	}
+	if h.trialClose(true) {
+		t.Error("a second report acted on an already-spent trial")
+	}
+}
+
+// TestFailedTrialResetsTheProbeClock pins that a failed trial does not let the
+// next request probe immediately. Without this the proxy would retry the
+// struggling upstream on every request instead of waiting out the recheck
+// interval, which is the load pattern the breaker exists to stop.
+func TestFailedTrialResetsTheProbeClock(t *testing.T) {
+	cfg := testNous()
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "openrouter"
+	h := NewHandler(cfg, time.Minute)
+	armTrial(h)
+	h.br.mu.Lock()
+	h.br.lastProbe = time.Time{} // as if a probe were due right now
+	h.br.mu.Unlock()
+
+	h.trialClose(false)
+
+	h.br.mu.Lock()
+	due := h.br.lastProbe.IsZero()
+	h.br.mu.Unlock()
+	if due {
+		t.Error("a failed trial left the upstream immediately re-probeable")
+	}
+}
+
+// TestCleanProbeArmsButDoesNotClose is the regression test for the flap. It
+// drives the real probe path rather than arming the trial by hand, because the
+// bug being guarded against lives in that path: an earlier version closed the
+// circuit the moment the probe streak was long enough, and a probe passing
+// during a lull is not evidence the upstream can carry load.
+func TestCleanProbeArmsButDoesNotClose(t *testing.T) {
+	own := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer own.Close()
+
+	cfg := testNous()
+	cfg.Dir = t.TempDir()
+	cfg.Upstream = own.URL // the probe targets the profile's OWN upstream
+	cfg.Failover = "openrouter"
+	h := NewHandler(cfg, time.Minute)
+
+	// Open the circuit with the probe clock due, so the next call probes.
+	h.br.mu.Lock()
+	h.br.open = true
+	h.br.lastProbe = time.Time{}
+	h.br.mu.Unlock()
+
+	// Probe until the streak is long enough to arm.
+	var armed bool
+	for i := 0; i < failoverProbesToClose+2 && !armed; i++ {
+		h.br.mu.Lock()
+		h.br.lastProbe = time.Time{} // make each iteration eligible to probe
+		h.br.mu.Unlock()
+		_, armed = h.breakerOpen()
+	}
+
+	if !armed {
+		t.Fatal("a clean probe streak never armed a trial")
+	}
+	if !breakerIsOpen(h) {
+		t.Fatal("probes alone closed the circuit; only a real request may do that")
 	}
 }

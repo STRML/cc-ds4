@@ -67,8 +67,12 @@ var table = []Profile{
 		},
 		ZDR: true,
 		// pro-0813's only host is DeepSeek itself, which rejects the ZDR block
-		// (404 "no endpoints matching data policy"). Skipping ZDR for it lets
-		// the pro tier serve while the flash tiers keep ZDR.
+		// (404 "no endpoints matching data policy"). Nothing routes to that id
+		// today, since FamilyModels above points pro at flash, so this entry is
+		// currently unreachable. It is kept as the paired half of that
+		// decision: whoever points pro back at pro-0813 needs the ZDR skip in
+		// the same row, and finding it already here is the difference between
+		// a working pro tier and a 404 on every request.
 		ZDRSkipModels: []string{"deepseek/deepseek-v4-pro-0813"},
 		Spend:         true,
 		// Smallest max_completion_tokens in the ZDR pool (DeepInfra, Io Net).

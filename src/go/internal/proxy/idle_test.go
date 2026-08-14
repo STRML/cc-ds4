@@ -474,7 +474,7 @@ func TestShouldExit_InFlightRequestBlocksExit(t *testing.T) {
 // would drive it negative and make the proxy look permanently busy, which
 // disables idle exit silently.
 func TestTrafficCountsRequests(t *testing.T) {
-	var tr Traffic
+	tr := NewTraffic()
 	if got := tr.InFlight(); got != 0 {
 		t.Fatalf("fresh Traffic InFlight = %d, want 0", got)
 	}

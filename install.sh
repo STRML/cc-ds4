@@ -50,8 +50,16 @@ build_go() {
     echo "go $go_version is too old; need >= 1.26 (go.mod pins 1.26.5)" >&2
     exit 1
   fi
-  ( cd "$GO_DIR" && go build -o "$GO_BIN" ./cmd/ds4-proxy ) || {
+  # CGO_ENABLED=1 is not optional on macOS. launch_activate_socket lives in
+  # libSystem and is reached through cgo; with cgo off the build silently picks
+  # the stub, and because the plist sets DS4_REQUIRE_OWNED_SOCKET=1 the agent
+  # then refuses to bind and exits 1 on every launch. Install would still report
+  # success, since the --ports smoke check below never touches socket
+  # activation. Forcing it here turns a silent three-dead-profiles outcome into
+  # a build error naming the cause.
+  ( cd "$GO_DIR" && CGO_ENABLED=1 go build -o "$GO_BIN" ./cmd/ds4-proxy ) || {
     echo "go build of the ds4-proxy binary failed" >&2
+    echo "  (needs a working C toolchain: xcode-select --install)" >&2
     exit 1
   }
   # Verify the binary serves --ports before writing anything that depends on it.
@@ -232,6 +240,31 @@ if os.environ["WANT_PROXY"] == "1":
     hooks = s["hooks"]["SessionStart"][0]["hooks"]
     if not any(h.get("command") == cmd for h in hooks):
         hooks.append({"type": "command", "command": cmd, "timeout": 15})
+
+    # Migrate the pre-family sentinel names. They used to encode only a
+    # reasoning-effort level; they now encode a model family too. install.sh
+    # does not own these values (the profile prompt has the user set them by
+    # hand once), so an upgrade would otherwise leave a settings.json naming
+    # sentinels the proxy no longer knows. Those requests reach the upstream
+    # unrewritten and are rejected, and the auto-mode permission gate stops
+    # matching at the same time, so the failure is total and looks like a bad
+    # key. Rewriting here is a one-time migration, not a compatibility shim:
+    # the old names stay dead in the proxy.
+    OLD_SENTINELS = {
+        "ds4-max": "ds4-pro-xhigh",
+        "ds4-xhigh": "ds4-pro-xhigh",
+        "ds4-high": "ds4-flash-xhigh",
+        "ds4-low": "ds4-flash-medium",
+    }
+    for key, value in list(s["env"].items()):
+        if "MODEL" not in key or value not in OLD_SENTINELS:
+            continue
+        # Opus moves to the pro family's medium effort rather than following
+        # the mechanical map, which would put it on the main loop's tier.
+        new = ("ds4-pro-medium" if key == "ANTHROPIC_DEFAULT_OPUS_MODEL"
+               else OLD_SENTINELS[value])
+        s["env"][key] = new
+        print(f"migrated: {key} {value} -> {new}")
 with open(p, "w") as fh:
     json.dump(s, fh, indent=2)
 os.chmod(p, 0o600)

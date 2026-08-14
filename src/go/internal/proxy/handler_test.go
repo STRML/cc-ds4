@@ -125,7 +125,7 @@ func TestServeHTTPCountsTrafficForIdleWatch(t *testing.T) {
 // A lost decrement leaves InFlight permanently positive, which disables idle
 // exit silently: the proxy just never reclaims its memory and nobody notices.
 func TestTrafficInFlightIsConcurrencySafe(t *testing.T) {
-	var tr Traffic
+	tr := NewTraffic()
 	var wg sync.WaitGroup
 	for i := 0; i < 200; i++ {
 		wg.Add(1)
@@ -144,7 +144,7 @@ func TestTrafficInFlightIsConcurrencySafe(t *testing.T) {
 // TestTrafficActivityExposesBothSignals pins the adapter WatchIdle consumes. A
 // nil field there would panic the watcher on its first tick.
 func TestTrafficActivityExposesBothSignals(t *testing.T) {
-	var tr Traffic
+	tr := NewTraffic()
 	act := tr.Activity()
 	if act.LastSeen == nil || act.InFlight == nil {
 		t.Fatal("Activity left a signal nil; WatchIdle would panic on it")

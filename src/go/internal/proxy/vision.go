@@ -106,14 +106,16 @@ func rewriteImages(root *jsonpy.OrderedValue, cacheDir string) {
 	if !messages.IsArray() {
 		return
 	}
-	// budget is decremented on every fresh (child-spawned) describe but never
-	// consulted to skip a swap — that matches the actual behavior of
-	// _rewrite_blocks in src/vision.py today: MAX_IMAGES_PER_REQUEST is
-	// computed and threaded through recursion, but nothing in that function
-	// checks it before calling _swap_image. The docstring there describes a
-	// cap that the code does not enforce. Ported as-is for parity with the
-	// reference; flagged separately as a likely bug in vision.py, not fixed
-	// here since src/vision.py is out of scope for this port.
+	// The budget caps how many images may spawn a child on one request. Each
+	// child costs up to childTimeout and they run serially, so an uncapped
+	// transcript full of fresh images holds a single request for minutes and
+	// bills a describe for every one.
+	//
+	// The Python original threaded this counter through the recursion and
+	// decremented it but never consulted it, so the cap its own docstring
+	// promised did nothing. That was ported verbatim to keep the two
+	// implementations byte-identical while both existed. Python is gone, so
+	// the cap is now enforced (STRML/cc-ds4#42).
 	budget := maxImagesPerRequest
 	for _, msg := range messages.Items() {
 		if !msg.IsObject() {
@@ -139,9 +141,18 @@ func rewriteBlocks(content *jsonpy.OrderedValue, cacheDir string, budget *int) {
 		}
 		switch block.Get("type").String() {
 		case "image":
+			if *budget <= 0 {
+				// Out of budget: placeholder it without spawning a child.
+				items[i] = placeholderBlock()
+				continue
+			}
 			replacement, fresh := swapImage(block, cacheDir)
 			items[i] = replacement
-			if fresh == 1 && *budget > 0 {
+			// Only a real child spawn spends budget. A cache hit does no
+			// describe work, and charging it would permanently placeholder
+			// every image past position N once a cached prefix filled the
+			// budget on every turn.
+			if fresh == 1 {
 				*budget--
 			}
 		case "tool_result":

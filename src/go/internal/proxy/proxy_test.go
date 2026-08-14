@@ -210,7 +210,7 @@ func TestRetryAttempts(t *testing.T) {
 	}{
 		{"ds4-flash-xhigh", 3},
 		{"ds4-flash-medium", 3},
-		{"ds4-pro-medium", 3},
+		{"ds4-pro-medium", 1}, // opus: still the main loop, still exempt
 		{"ds4-pro-xhigh", 1},
 		{"", 3},
 		{"deepseek/deepseek-v4-flash-0731", 3},

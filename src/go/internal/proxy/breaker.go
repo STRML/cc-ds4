@@ -67,6 +67,11 @@ type breaker struct {
 	open      bool
 	probes    int
 	lastProbe time.Time
+	// trial is armed once the probe streak is long enough to believe the
+	// upstream is back. It routes ONE request to the profile's own upstream;
+	// that request's outcome, not the probe's, decides whether the circuit
+	// closes. See trialClose.
+	trial bool
 }
 
 // recordOutcome feeds one relay's outcome into the failover breaker. It runs
@@ -103,25 +108,39 @@ func (h *Handler) recordOutcome(statusCode int) {
 	}
 }
 
-// breakerOpen reports whether the profile's circuit is open and requests
-// should route to the failover target. When open, a request whose recheck
-// interval has lapsed performs one probe (mirroring failover_effective): a
-// clean probe increments the streak, and PROBES_TO_CLOSE clean probes close
-// the circuit. The probe runs outside the lock.
-func (h *Handler) breakerOpen() bool {
+// breakerOpen reports whether the profile's circuit is open (so requests route
+// to the failover target) and, separately, whether THIS request is the armed
+// trial and should go to the profile's own upstream instead.
+//
+// A clean probe is not enough to close the circuit. The probe is a minimal
+// ping: it says the upstream accepts a connection, not that it can carry real
+// load, and a probe that passes during a lull followed by the next heavy
+// request failing is exactly the close-then-reopen flap this avoids. So a long
+// enough probe streak only ARMS a trial; the first real request the profile's
+// own upstream serves cleanly is what closes the circuit, via trialClose.
+//
+// The probe runs outside the lock.
+func (h *Handler) breakerOpen() (open, trial bool) {
 	if !failoverEnabled || h.cfg.Failover == "" {
-		return false
+		return false, false
 	}
 	h.br.mu.Lock()
 	b := &h.br
 	if !b.open {
 		h.br.mu.Unlock()
-		return false
+		return false, false
+	}
+	// An already-armed trial takes this request to the profile's own upstream.
+	// It stays armed until that request reports back, so a burst does not spend
+	// the trial on several requests at once.
+	if b.trial {
+		h.br.mu.Unlock()
+		return true, true
 	}
 	now := time.Now()
 	if !b.lastProbe.IsZero() && now.Sub(b.lastProbe) < time.Duration(failoverRecheck)*time.Second {
 		h.br.mu.Unlock()
-		return true // within recheck window: keep failing over
+		return true, false // within recheck window: keep failing over
 	}
 	b.lastProbe = now
 	h.br.mu.Unlock()
@@ -130,9 +149,12 @@ func (h *Handler) breakerOpen() bool {
 		h.br.mu.Lock()
 		b.probes++
 		if b.probes >= failoverProbesToClose {
-			b.open = false
+			// Arm, do not close. The next request proves it for real.
+			b.trial = true
 			b.probes = 0
-			b.outcomes = nil
+			armed := b.trial
+			h.br.mu.Unlock()
+			return true, armed
 		}
 		h.br.mu.Unlock()
 	} else {
@@ -140,6 +162,30 @@ func (h *Handler) breakerOpen() bool {
 		b.probes = 0
 		h.br.mu.Unlock()
 	}
+	return true, false
+}
+
+// trialClose reports the outcome of a trial request served by the profile's
+// own upstream. A clean result closes the circuit; a transient one disarms the
+// trial and leaves it open, so the next recheck has to earn a fresh probe
+// streak. Returns true when the circuit closed.
+func (h *Handler) trialClose(clean bool) bool {
+	h.br.mu.Lock()
+	defer h.br.mu.Unlock()
+	b := &h.br
+	if !b.trial {
+		return false
+	}
+	b.trial = false
+	if !clean {
+		// Keep the circuit open and make the next attempt wait out a full
+		// recheck interval rather than retrying immediately.
+		b.lastProbe = time.Now()
+		return false
+	}
+	b.open = false
+	b.probes = 0
+	b.outcomes = nil
 	return true
 }
 

@@ -21,7 +21,21 @@ type Traffic struct {
 // DefaultTraffic is what Handler records into and what main() reads. A package
 // global matches Python's shape and keeps the recording off the Handler's
 // constructor, so every profile's Handler feeds one process-wide view.
-var DefaultTraffic Traffic
+// It is a pointer because Traffic holds atomics, which must not be copied.
+var DefaultTraffic = NewTraffic()
+
+// NewTraffic starts the clock at construction rather than at the zero value.
+//
+// The zero value puts LastSeen at the Unix epoch, which reads as "idle since
+// 1970" on the very first tick. A proxy started by hand, before any session
+// exists to register a token or a claude process, would then exit within one
+// poll interval. Python set its last-seen at import for the same reason, giving
+// a full idle timeout of grace before the first request ever arrives.
+func NewTraffic() *Traffic {
+	t := &Traffic{}
+	t.lastSeenUnixNano.Store(time.Now().UnixNano())
+	return t
+}
 
 // begin marks a request as started. The returned func marks it done and must
 // run exactly once, so callers defer it.
