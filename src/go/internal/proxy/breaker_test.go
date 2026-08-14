@@ -21,7 +21,7 @@ func TestBreakerThresholdCrossing(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		h.recordOutcome(503)
 	}
-	if !h.breakerOpen() {
+	if open, _ := h.breakerOpen(); !open {
 		t.Fatal("breaker should be open after 3 strikes in window 3")
 	}
 }
@@ -34,7 +34,7 @@ func TestBreakerDoesNotOpenBelowThreshold(t *testing.T) {
 	h := testHandler("direct")
 	h.recordOutcome(503)
 	h.recordOutcome(503)
-	if h.breakerOpen() {
+	if open, _ := h.breakerOpen(); open {
 		t.Fatal("breaker should stay closed with 2/3 strikes")
 	}
 }
@@ -48,7 +48,7 @@ func TestBreakerHitsDoNotCount(t *testing.T) {
 	h.recordOutcome(200)
 	h.recordOutcome(200)
 	h.recordOutcome(200)
-	if h.breakerOpen() {
+	if open, _ := h.breakerOpen(); open {
 		t.Fatal("breaker should stay closed on hits only")
 	}
 }
@@ -58,7 +58,7 @@ func TestBreakerNoFailoverConfig(t *testing.T) {
 	failoverEnabled = true
 	h := testHandler("") // no failover target
 	h.recordOutcome(503)
-	if h.breakerOpen() {
+	if open, _ := h.breakerOpen(); open {
 		t.Fatal("breaker should not open without a failover target")
 	}
 }
@@ -68,7 +68,7 @@ func TestBreakerDisabled(t *testing.T) {
 	failoverEnabled = false
 	h := testHandler("direct")
 	h.recordOutcome(503)
-	if h.breakerOpen() {
+	if open, _ := h.breakerOpen(); open {
 		t.Fatal("breaker should stay closed when disabled")
 	}
 }
@@ -84,7 +84,7 @@ func TestBreakerRecovery(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		h.recordOutcome(503)
 	}
-	if !h.breakerOpen() {
+	if open, _ := h.breakerOpen(); !open {
 		t.Fatal("breaker should be open")
 	}
 	// A clean probe (the target's upstream returns 200) closes it.

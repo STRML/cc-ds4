@@ -233,19 +233,19 @@ s = json.load(open(src)) if os.path.exists(src) else {}
 overrides = {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:31501",
     "ANTHROPIC_AUTH_TOKEN": "KEY_OR_PLACEHOLDER",
-    "ANTHROPIC_MODEL": "ds4-xhigh",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "ds4-xhigh",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "ds4-high",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "ds4-low",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL": "ds4-max",
-    "CLAUDE_CODE_SUBAGENT_MODEL": "ds4-high",
+    "ANTHROPIC_MODEL": "ds4-pro-xhigh",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "ds4-pro-medium",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "ds4-flash-xhigh",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "ds4-flash-medium",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "ds4-pro-xhigh",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "ds4-flash-xhigh",
     "ENABLE_TOOL_SEARCH": "false",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1048576",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1048576",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "65536",
 }
 s.setdefault("env", {}).update(overrides)
-s["model"] = "ds4-xhigh"
+s["model"] = "ds4-pro-xhigh"
 s.pop("fallbackModel", None)
 s["env"]["ANTHROPIC_API_KEY"] = ""   # must be blank, not absent
 json.dump(s, open(dst, "w"), indent=2)
@@ -272,7 +272,7 @@ stdin payload, then reading `context_window.context_window_size`:
 
 That last row is why only the OpenRouter profile is affected. Claude Code infers the
 window from a `[1m]` suffix in the model ID, and the direct profile can carry one
-because DeepSeek accepts and strips it. A sentinel like `ds4-xhigh` never can, so it
+because DeepSeek accepts and strips it. A sentinel like `ds4-pro-xhigh` never can, so it
 falls to the default. Note the suffix yields a round 1,000,000 while the env var gives
 the exact 1,048,576.
 
@@ -301,7 +301,8 @@ cost, and model name as machine-readable JSON.
 
 ## Step 6 — The proxy
 
-Every profile here routes through one shared proxy, `src/proxy.py`. It listens on
+Every profile here routes through one shared proxy, the Go binary
+`src/go/cmd/ds4-proxy/ds4-proxy` that `install.sh` builds. It listens on
 a separate port per profile (31501 for this one), so this profile's
 `settings.json` is unaware it is shared. What differs between profiles is a row in
 that file's `PROFILES` table, not a separate script.
@@ -352,7 +353,7 @@ launchctl kickstart gui/$(id -u)/com.strml.cc-ds4.proxy
 sleep 1
 curl -s -o /dev/null -w "proxy responded: %{http_code}\n" -X POST \
   http://127.0.0.1:31501/v1/messages -H 'content-type: application/json' \
-  -d '{"model":"ds4-low","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"ds4-flash-medium","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
 A 401 is expected and correct without a key in the header: it proves the proxy
@@ -369,7 +370,9 @@ session token under `<profile>/.ds4-sessions` has a live PID, or when `ps` shows
 that and run forever. Without a launcher there is nothing to start it again, so
 step 8 matters.
 
-On Linux, or without launchd, run it yourself: `python3 src/proxy.py &`.
+On Linux, or without launchd, run it yourself: `src/go/cmd/ds4-proxy/ds4-proxy &`.
+Build it first with `cd src/go && go build -o cmd/ds4-proxy/ds4-proxy
+./cmd/ds4-proxy` — `install.sh` does that for you on macOS.
 
 Setting a knob under launchd: the plist bakes in whatever `DS4_*` variables are
 exported when install.sh runs. For example, `DS4_IDLE_EXIT=0 ./install.sh
@@ -602,7 +605,7 @@ Two things worth telling the user:
 - Sub-penny sessions. `cship` formats cost to 2 decimals with no conditional, so a
   whole DeepSeek session renders as `$0.00`. The wrapper renders the cost segment
   itself with a `<$0.01` floor.
-- If the proxy is down the model name shows as `or-ds4-xhigh (proxy?)` rather than the
+- If the proxy is down the model name shows as `or-ds4-pro-xhigh (proxy?)` rather than the
   real slug, which makes a dead proxy visible at a glance.
 
 ## Final report to the user

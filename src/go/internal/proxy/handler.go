@@ -21,6 +21,7 @@ type Handler struct {
 	classifierClient *http.Client // classifier client: DisableCompression, no deadline wrapper
 	classifierModel  string       // resolved once at build (Python reads it at module load, proxy.py:65)
 	br               breaker      // failover circuit breaker (per profile)
+	sc               spendCache   // pricing/credits caches for GET /__spend
 }
 
 // NewHandler builds a Handler for one profile. The relay transport sets
@@ -58,6 +59,11 @@ func NewHandler(cfg profiles.Profile, relayTimeout time.Duration) *Handler {
 // Python's do_GET/do_POST only having two methods). A GET to any other path
 // 404s, exactly as Python's do_GET does for a non-/__spend path.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Every request counts as activity for the idle watch, including the
+	// status line's GET /__spend: the proxy exiting under a live status line
+	// would make the next render look like a dead endpoint.
+	defer DefaultTraffic.begin()()
+
 	if r.Method == http.MethodGet {
 		if r.URL.Path == "/__spend" {
 			h.spend(w, r)

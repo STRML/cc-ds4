@@ -10,7 +10,7 @@
 #   ./install.sh --profile direct --no-proxy   # status line only
 #
 # One proxy process serves every profile, each on its own port, so a profile's
-# settings.json is unchanged and unaware it is shared. src/proxy.py holds the
+# settings.json is unchanged and unaware it is shared. The proxy binary holds the
 # table and fixes the profile directories, so --dir is not accepted. On macOS
 # this also writes and loads a single launch agent that runs it.
 #
@@ -26,9 +26,10 @@ PROFILE="" DIR="" DRY=0 WANT_PROXY=1
 LABEL="com.strml.cc-ds4.proxy"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
-# The Go proxy binary, built from this checkout. install.sh builds it and the
-# plist ProgramArguments exec it. The Python proxy (src/proxy.py) is superseded
-# by the Go rewrite; the differential harness proved byte-compatibility.
+# The proxy binary, built from this checkout. install.sh builds it and the plist
+# ProgramArguments exec it. It replaced a Python implementation whose behaviour
+# it reproduces byte for byte, which tests/diff/run_diff.py asserted against the
+# Python original before that original was removed.
 GO_DIR="$REPO/src/go"
 GO_BIN="$GO_DIR/cmd/ds4-proxy/ds4-proxy"
 
@@ -45,12 +46,42 @@ build_go() {
     exit 1
   fi
   # Go 1.26 is the floor (the module's go.mod pins it).
-  if ! awk -F. -v v="$go_version" 'BEGIN { exit !(v+0 >= 1.26) }'; then
+  #
+  # Compared field by field, not as a decimal. `v+0 >= 1.26` reads "1.9" as the
+  # number 1.9 and passes it, and reads "1.100" as 1.1 and rejects it — so the
+  # gate waved through toolchains a decade old (they then die at `go build`
+  # with a message about C compilers that names the wrong cause) and will
+  # reject every valid toolchain once Go reaches 1.100.
+  if ! awk -v v="$go_version" 'BEGIN {
+        split(v, a, ".")
+        if (a[1] + 0 != 1) { exit !(a[1] + 0 > 1) }
+        exit !(a[2] + 0 >= 26)
+      }'; then
     echo "go $go_version is too old; need >= 1.26 (go.mod pins 1.26.5)" >&2
     exit 1
   fi
-  ( cd "$GO_DIR" && go build -o "$GO_BIN" ./cmd/ds4-proxy ) || {
+  # CGO_ENABLED=1 is not optional where launchd is. launch_activate_socket lives in
+  # libSystem and is reached through cgo; with cgo off the build silently picks
+  # the stub, and because the plist sets DS4_REQUIRE_OWNED_SOCKET=1 the agent
+  # then refuses to bind and exits 1 on every launch. Install would still report
+  # success, since the --ports smoke check below never touches socket
+  # activation. Forcing it here turns a silent three-dead-profiles outcome into
+  # a build error naming the cause.
+  # ...on macOS only. Linux has no launchd, so the build selects the stub
+  # regardless and cgo buys nothing — while forcing it there drags in the
+  # stdlib's cgo resolver, which needs a C compiler. A Linux user without gcc
+  # went from a working install to a build failure whose advice was to run
+  # xcode-select, a command that does not exist on their machine.
+  if [ "$(uname)" = Darwin ]; then
+    BUILD_CGO=1
+    CGO_HINT="  (needs a working C toolchain: xcode-select --install)"
+  else
+    BUILD_CGO=0
+    CGO_HINT="  (needs a working Go toolchain)"
+  fi
+  ( cd "$GO_DIR" && CGO_ENABLED="$BUILD_CGO" go build -o "$GO_BIN" ./cmd/ds4-proxy ) || {
     echo "go build of the ds4-proxy binary failed" >&2
+    echo "$CGO_HINT" >&2
     exit 1
   }
   # Verify the binary serves --ports before writing anything that depends on it.
@@ -63,7 +94,7 @@ build_go() {
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile)  PROFILE="${2:-}"; shift 2 ;;
-    --dir)      echo "--dir is not supported: src/proxy.py only serves the three fixed profile directories" >&2
+    --dir)      echo "--dir is not supported: the proxy only serves the three fixed profile directories" >&2
                 echo "  (~/.claude-ds4, ~/.claude-or-ds4, ~/.claude-nous)" >&2
                 echo "  use one of those profiles or pick a different machine" >&2
                 exit 2 ;;
@@ -109,9 +140,9 @@ valid_port() {
   [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
 }
 
-# DS4_PORT_<PROFILE> overrides the port and proxy.py is what honours it, so the
+# DS4_PORT_<PROFILE> overrides the port and the proxy binary is what honours it, so
 # effective value comes from there instead of a second copy of the mapping. The
-# hardcoded PORT above is the fallback for a --dir that proxy.py cannot see.
+# hardcoded PORT above is the fallback for a profile the binary cannot see.
 # Build the Go proxy BEFORE the --ports lookup and before any write: a
 # missing toolchain or a failed build leaves the profile files and plist
 # untouched, and the binary must exist for its --ports to be consulted.
@@ -145,7 +176,7 @@ echo "config:   $DIR/cship.toml  (from $(basename "$CONFIG"))"
 echo "memory:   $MEMLINK_DST -> $MEMLINK_SRC  (shares memory with ~/.claude)"
 echo "command:  $CMD_DST -> $CMD_SRC  (/ds4-effort sets effort mid-session)"
 if [ "$WANT_PROXY" = 1 ]; then
-  echo "proxy:    $REPO/src/proxy.py  (this profile on :$PORT; Go binary built, cutover awaits socket activation)"
+  echo "proxy:    $GO_BIN  (this profile on :$PORT)"
   echo "hook:     $HOOK_DST -> $HOOK_SRC  (SessionStart kickstart)"
   echo "base URL: http://127.0.0.1:$PORT"
   [ "$(uname)" = Darwin ] && echo "agent:    $PLIST"
@@ -212,11 +243,35 @@ fi
 BACKUP="$SETTINGS.bak-$(date +%Y%m%d%H%M%S)"
 cp -p "$SETTINGS" "$BACKUP"
 
-BAR_DST="$BAR_DST" WANT_PROXY="$WANT_PROXY" PORT="$PORT" DIR="$DIR" python3 - "$SETTINGS" <<'PY'
-import json, os, sys
+# The migration below must sweep every INSTALLED profile, not just the one
+# named on the command line. One binary serves all three, and this run rebuilds
+# and re-points it for all of them — so upgrading only ~/.claude-nous left
+# ~/.claude-or-ds4 naming a sentinel the new proxy no longer resolves, and every
+# or-ds4 request failed until install.sh happened to be run for that profile
+# too. Nothing told the user to do that.
+OTHER_SETTINGS=""
+for d in "$HOME/.claude-ds4" "$HOME/.claude-or-ds4" "$HOME/.claude-nous"; do
+  [ "$d" = "$DIR" ] && continue
+  [ -f "$d/settings.json" ] && OTHER_SETTINGS="$OTHER_SETTINGS$d/settings.json
+"
+done
+
+BAR_DST="$BAR_DST" WANT_PROXY="$WANT_PROXY" PORT="$PORT" DIR="$DIR" OTHER_SETTINGS="$OTHER_SETTINGS" python3 - "$SETTINGS" <<'PY'
+import json, os, shutil, sys, time
 p = sys.argv[1]
+stamp = time.strftime("%Y%m%d%H%M%S")
 with open(p) as fh:
     s = json.load(fh)
+# Claude Code's own schema says env is an object. A hand-edited settings.json
+# where it is not would otherwise raise AttributeError on the first .get() below
+# and abort the run AFTER the symlinks have been re-pointed and BEFORE this file
+# is written — a half-installed state produced by a file this script does not
+# own the shape of. Replacing it is loud and leaves a working config; Claude
+# Code would reject the original anyway.
+if not isinstance(s.get("env"), dict):
+    if "env" in s:
+        print(f"warning: {p} has a non-object \"env\"; replacing it with an empty one")
+    s["env"] = {}
 s["statusLine"] = {"type": "command", "command": os.environ["BAR_DST"], "padding": 0}
 if os.environ["WANT_PROXY"] == "1":
     url = "http://127.0.0.1:" + os.environ["PORT"]
@@ -231,6 +286,114 @@ if os.environ["WANT_PROXY"] == "1":
     hooks = s["hooks"]["SessionStart"][0]["hooks"]
     if not any(h.get("command") == cmd for h in hooks):
         hooks.append({"type": "command", "command": cmd, "timeout": 15})
+
+# Migrate the pre-family sentinel names. This runs whatever WANT_PROXY says:
+# it rewrites settings.json, not the proxy, and --no-proxy does not remove an
+# ANTHROPIC_BASE_URL an earlier run already pointed at the proxy. Gating it
+# meant `install.sh --profile X --no-proxy` left that profile naming sentinels
+# the proxy no longer resolves, while the profile installed normally worked —
+# one binary serves all three, so the result is a single profile failing
+# totally, which is the exact outcome this migration exists to prevent.
+#
+# The names used to encode only a reasoning-effort level; they now encode a
+# model family too. install.sh does not own these values (the profile prompt
+# has the user set them by hand once), so an upgrade would otherwise leave a
+# settings.json naming sentinels the proxy no longer knows. Those requests
+# reach the upstream unrewritten and are rejected, and the auto-mode
+# permission gate stops matching at the same time. Rewriting here is a
+# one-time migration, not a compatibility shim: the old names stay dead in
+# the proxy.
+OLD_SENTINELS = {
+    "ds4-max": "ds4-pro-xhigh",
+    "ds4-xhigh": "ds4-pro-xhigh",
+    "ds4-high": "ds4-flash-xhigh",
+    "ds4-low": "ds4-flash-medium",
+}
+
+
+def migrate(settings, label):
+    """Rewrite retired sentinels in one profile's settings. Returns True if
+    anything changed."""
+    changed = False
+    for key, value in list(settings.setdefault("env", {}).items()):
+        if "MODEL" not in key or not isinstance(value, str) or value not in OLD_SENTINELS:
+            continue
+        # Opus moves to the pro family's medium effort rather than following
+        # the mechanical map, which would put it on the main loop's tier.
+        new = ("ds4-pro-medium" if key == "ANTHROPIC_DEFAULT_OPUS_MODEL"
+               else OLD_SENTINELS[value])
+        settings["env"][key] = new
+        print(f"migrated: {label}{key} {value} -> {new}")
+        changed = True
+
+    # The env block is not the only place a sentinel lives. The profile setup
+    # also writes a TOP-LEVEL "model" (and Claude Code writes "fallbackModel"
+    # when the picker is used), which is the session default the main loop
+    # actually sends. Migrating only env leaves that default naming a dead
+    # sentinel — the main loop 400ing on every request while subagents work,
+    # which reads as a broken account rather than stale config.
+    for key in ("model", "fallbackModel"):
+        value = settings.get(key)
+        # isinstance first: `value in OLD_SENTINELS` raises TypeError on an
+        # unhashable value, and a top-level "model" is not guaranteed to be a
+        # string. Under `set -e` that aborted the whole run AFTER the symlinks
+        # had been re-pointed and BEFORE this profile's settings.json was
+        # written — a half-installed state from a settings file this script
+        # does not own the shape of.
+        if isinstance(value, str) and value in OLD_SENTINELS:
+            settings[key] = OLD_SENTINELS[value]
+            print(f"migrated: {label}{key} {value} -> {settings[key]}")
+            changed = True
+    return changed
+
+
+# Guarded like the swept profiles below. settings.setdefault("env", {}) returns
+# the EXISTING value when the key is present, so a hand-edited settings.json
+# whose "env" is not an object raises AttributeError — and under `set -e` that
+# aborts after the symlinks have been re-pointed and before this file is
+# written, which is the half-installed state the isinstance guard already
+# exists to prevent, reached through a different field.
+try:
+    migrate(s, "")
+except Exception as exc:
+    print(f"warning: could not migrate sentinels in {p}: {exc}")
+
+# Every other installed profile, because this run re-points the shared binary
+# for all of them.
+for other in os.environ.get("OTHER_SETTINGS", "").split("\n"):
+    other = other.strip()
+    if not other:
+        continue
+    try:
+        with open(other) as fh:
+            osettings = json.load(fh)
+    except (OSError, ValueError) as exc:
+        print(f"warning: could not read {other} to migrate sentinels: {exc}")
+        continue
+    try:
+        changed = migrate(osettings, f"{other}: ")
+    except Exception as exc:  # never abort the install over another profile
+        print(f"warning: could not migrate {other}: {exc}")
+        continue
+    if changed:
+        # Same backup the named profile gets. This script is rewriting a file
+        # the user owns and did not ask it to touch on this run.
+        try:
+            # copy2, not a plain open(w): settings.json holds the profile's
+            # provider API key, the original is 0600, and a bare open() creates
+            # the backup at 0666 & ~umask — 0644 on a default umask, so the key
+            # landed world-readable and stayed that way. copy2 carries the mode
+            # across; the chmod makes it explicit rather than inherited.
+            backup = other + ".bak-" + stamp
+            shutil.copy2(other, backup)
+            os.chmod(backup, 0o600)
+        except OSError as exc:
+            print(f"warning: could not back up {other}: {exc}")
+            continue
+        with open(other, "w") as fh:
+            json.dump(osettings, fh, indent=2)
+        os.chmod(other, 0o600)
+
 with open(p, "w") as fh:
     json.dump(s, fh, indent=2)
 os.chmod(p, 0o600)
@@ -241,10 +404,10 @@ echo "backup:   $BACKUP"
 if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   mkdir -p "$(dirname "$PLIST")"
 
-  # The plist carries the DS4_* knobs into the agent. src/proxy.py reads them at
+  # The plist carries the DS4_* knobs into the agent. The proxy reads them at
   # startup, and launchd starts the agent from its own environment, so anything
   # exported when install.sh runs is baked in. Sweep the whole DS4_* namespace so
-  # a knob proxy.py adds later works without a second edit here. Values are XML
+  # a knob the proxy adds later works without a second edit here. Values are XML
   # entities only; the rest of the heredoc body is not re-expanded.
   #
   # Vision spawns `claude` directly. Under launchd the bare name is not on PATH,
@@ -358,8 +521,8 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   done < <(env)
 
   # One Sockets entry per served profile, keyed by profile name because that is
-  # what proxy.py passes to launch_activate_socket. Ports come from proxy.py so
-  # PROFILES stays the only declaration of them.
+  # the name the binary passes to launch_activate_socket. Ports come from the
+  # binary's own --ports so its profile table stays the only declaration.
   PLIST_SOCKETS=""
   while read -r sock_name sock_port; do
     [ -n "$sock_name" ] || continue
@@ -375,10 +538,10 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
       <string>${sock_port}</string>
     </dict>
 "
-  done < <(/usr/bin/python3 "$REPO/src/proxy.py" --ports)
+  done < <("$GO_BIN" --ports)
 
   if [ -z "$PLIST_SOCKETS" ]; then
-    echo "agent:    proxy.py --ports listed no profiles; not writing plist" >&2
+    echo "agent:    ds4-proxy --ports listed no profiles; not writing plist" >&2
     exit 1
   fi
 
@@ -391,16 +554,14 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   <key>Label</key>
   <string>$LABEL</string>
 
-  <!-- The Go proxy is built and smoke-tested above, but the PRODUCTION agent
-       stays on Python until the Go binary implements socket activation
-       (launch_activate_socket fd collection). Under the launchd Sockets
-       contract launchd owns the ports; the Go binary's plain net.Listen would
-       fail to bind and the port would hang rather than refuse. Flip this array
-       to "$GO_BIN" once that lands. -->
+  <!-- The Go binary is built and smoke-tested above. It collects the sockets
+       launchd binds below via launch_activate_socket, so it satisfies the
+       Sockets contract: launchd owns the ports and hands over already-listening
+       fds. Absent a launchd parent (a manual run, the differential harness) the
+       same code falls back to binding its own ports. -->
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
-    <string>$REPO/src/proxy.py</string>
+    <string>$GO_BIN</string>
   </array>
 
   <!-- These are the DS4_* knobs present when install.sh ran, e.g.
@@ -424,7 +585,7 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
 $PLIST_ENV  </dict>
 
   <!-- launchd binds these itself and hands the listening fds to the process it
-       starts on the first connection; proxy.py collects them via
+       starts on the first connection; the proxy collects them via
        launch_activate_socket. Owning a socket is what makes the job on-demand,
        which is the point: a job with no demand criteria is reaped a couple of
        minutes after kickstart ("service inactive" then "removing service" in
@@ -517,6 +678,6 @@ starts it without the launcher. The '$LAUNCHER' function in profiles/$DOC still
 matters: it starts the proxy and registers a session so it is not reaped
 mid-use. A bare ccam alias is not enough. To start it by hand right now:
 
-  launchctl kickstart gui/$(id -u)/$LABEL     # or: python3 $REPO/src/proxy.py &
+  launchctl kickstart gui/$(id -u)/$LABEL     # or run $GO_BIN directly
 EOF
 fi

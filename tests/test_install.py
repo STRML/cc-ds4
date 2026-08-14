@@ -175,6 +175,122 @@ class InstallTest(unittest.TestCase):
         after = len([c for c in self.launchctl_calls() if c[0] == "bootout"])
         self.assertEqual(after, before + 1, self.launchctl_calls())
 
+    def test_sentinel_migration_runs_without_the_proxy(self):
+        # The migration rewrites settings.json, not the proxy, so gating it on
+        # the proxy install was wrong. --no-proxy does not remove an
+        # ANTHROPIC_BASE_URL an earlier run pointed at the proxy, and one
+        # binary serves all three profiles: a profile upgraded with --no-proxy
+        # kept naming sentinels the proxy no longer resolves, so every one of
+        # its requests failed while the other profiles worked.
+        profile_dir = os.path.join(self.home, PROFILE_DIRS["direct"])
+        os.makedirs(profile_dir, exist_ok=True)
+        settings = os.path.join(profile_dir, "settings.json")
+        with open(settings, "w") as fh:
+            json.dump({
+                "model": "ds4-xhigh",
+                "env": {
+                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:31500",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "ds4-high",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "ds4-xhigh",
+                },
+            }, fh)
+
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env["PATH"] = self.bindir + os.pathsep + env["PATH"]
+        proc = subprocess.run(
+            ["bash", INSTALL, "--profile", "direct", "--no-proxy"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        with open(settings) as fh:
+            got = json.load(fh)
+        self.assertEqual(got["model"], "ds4-pro-xhigh", got)
+        self.assertEqual(got["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "ds4-flash-xhigh", got)
+        # Opus takes the pro family's medium effort, not the mechanical map.
+        self.assertEqual(got["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "ds4-pro-medium", got)
+
+    def test_migration_sweeps_every_installed_profile(self):
+        # One binary serves all three profiles and this run re-points it for
+        # all of them, so migrating only the named profile left the others
+        # naming sentinels the new proxy no longer resolves — every request on
+        # those profiles failing, with nothing telling the user to re-run
+        # install.sh per profile.
+        named = os.path.join(self.home, PROFILE_DIRS["direct"])
+        other = os.path.join(self.home, PROFILE_DIRS["openrouter"])
+        for d in (named, other):
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "settings.json"), "w") as fh:
+                json.dump({
+                    "model": "ds4-xhigh",
+                    "env": {"ANTHROPIC_DEFAULT_SONNET_MODEL": "ds4-high"},
+                }, fh)
+
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env["PATH"] = self.bindir + os.pathsep + env["PATH"]
+        proc = subprocess.run(
+            ["bash", INSTALL, "--profile", "direct"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        with open(os.path.join(other, "settings.json")) as fh:
+            got = json.load(fh)
+        self.assertEqual(got["model"], "ds4-pro-xhigh", got)
+        self.assertEqual(got["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "ds4-flash-xhigh", got)
+
+    def test_migration_survives_a_non_string_model(self):
+        # `value in OLD_SENTINELS` raises TypeError on an unhashable value, and
+        # nothing guarantees a top-level "model" is a string. Under set -e that
+        # aborted the run after the symlinks were re-pointed and before the
+        # named profile's settings.json was written.
+        named = os.path.join(self.home, PROFILE_DIRS["direct"])
+        other = os.path.join(self.home, PROFILE_DIRS["nous"])
+        os.makedirs(named, exist_ok=True)
+        os.makedirs(other, exist_ok=True)
+        with open(os.path.join(named, "settings.json"), "w") as fh:
+            json.dump({"model": {"id": "something-structured"}, "env": {}}, fh)
+        with open(os.path.join(other, "settings.json"), "w") as fh:
+            json.dump({"model": ["also", "not", "a", "string"], "env": {}}, fh)
+
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env["PATH"] = self.bindir + os.pathsep + env["PATH"]
+        proc = subprocess.run(
+            ["bash", INSTALL, "--profile", "direct"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # And the file was still written, not left half-installed.
+        with open(os.path.join(named, "settings.json")) as fh:
+            got = json.load(fh)
+        self.assertEqual(got["model"], {"id": "something-structured"}, got)
+
+    def test_migration_survives_a_malformed_env_block(self):
+        # settings.setdefault("env", {}) returns the EXISTING value when the key
+        # is present, so an "env" that is not an object raises AttributeError.
+        # Unguarded, that aborted the run after the symlinks were re-pointed and
+        # before settings.json was written.
+        named = os.path.join(self.home, PROFILE_DIRS["direct"])
+        os.makedirs(named, exist_ok=True)
+        with open(os.path.join(named, "settings.json"), "w") as fh:
+            json.dump({"env": "not-an-object", "model": "ds4-xhigh"}, fh)
+
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env["PATH"] = self.bindir + os.pathsep + env["PATH"]
+        proc = subprocess.run(
+            ["bash", INSTALL, "--profile", "direct"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # The install still completed and wrote the file.
+        with open(os.path.join(named, "settings.json")) as fh:
+            got = json.load(fh)
+        self.assertIn("statusLine", got)
+
     def test_no_proxy_does_not_delete_proxy_files(self):
         # --no-proxy leaves the proxy files alone: an earlier run's base URL
         # still points at the proxy port, so removing them would break it.
@@ -304,3 +420,47 @@ class MemoryLinkTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BackupModeTest(unittest.TestCase):
+    """The migration backup carries the profile's API key."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = os.path.join(self.tmp.name, "home")
+        os.makedirs(self.home)
+        self.bindir = os.path.join(self.tmp.name, "bin")
+        os.makedirs(self.bindir)
+        _write_stub(self.bindir, "launchctl", "#!/bin/sh\nexit 0\n")
+
+    def test_other_profile_backup_is_not_world_readable(self):
+        # settings.json holds env.ANTHROPIC_AUTH_TOKEN. A plain open(w) creates
+        # the backup at 0644 on a default umask, so the key was left readable
+        # by every user on the box, permanently.
+        named = os.path.join(self.home, PROFILE_DIRS["direct"])
+        other = os.path.join(self.home, PROFILE_DIRS["nous"])
+        for d in (named, other):
+            os.makedirs(d, exist_ok=True)
+        with open(os.path.join(named, "settings.json"), "w") as fh:
+            json.dump({"env": {}}, fh)
+        opath = os.path.join(other, "settings.json")
+        with open(opath, "w") as fh:
+            json.dump({"model": "ds4-xhigh",
+                       "env": {"ANTHROPIC_AUTH_TOKEN": "sk-secret"}}, fh)
+        os.chmod(opath, 0o600)
+
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env["PATH"] = self.bindir + os.pathsep + env["PATH"]
+        proc = subprocess.run(
+            ["bash", INSTALL, "--profile", "direct"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        backups = [f for f in os.listdir(other) if f.startswith("settings.json.bak-")]
+        self.assertTrue(backups, "the swept profile was rewritten with no backup")
+        for b in backups:
+            mode = os.stat(os.path.join(other, b)).st_mode & 0o777
+            self.assertEqual(mode, 0o600, f"{b} is {oct(mode)}; it holds an API key")

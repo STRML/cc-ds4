@@ -1,47 +1,48 @@
-# Test inventory — Python vs Go
+# Test inventory
 
-The Python proxy is being superseded by the Go rewrite (`src/go/`). The
-differential harness (`tests/diff/run_diff.py`) proves byte-for-byte parity on
-the Phase A surface. This file names which tests are **Python-only regression**
-(belongs to the old implementation, retired with it) vs **contract** (the
-behavior contract both proxies must satisfy, ported to Go).
+The proxy is Go. What is left in this directory tests the Python that remains:
+the status line and the install script.
 
-## Differential harness (the swap gate)
+## Python (`python3 -m unittest discover -s tests -q`, 85 tests)
 
-- `tests/diff/run_diff.py` — boots the Python oracle + the Go binary at the
-  same fake upstreams and asserts identical status, headers, and body bytes.
-  **This is the gate**: the Go proxy only takes over when it is GREEN.
-- `tests/diff/corpus.py` — the Phase A corpus (10 cases).
-- `tests/diff/fake_upstream.py` — canned upstreams (SSE, retry, failover).
+- `test_statusline.py`, `test_statusline_edge.py` — transcript accounting, the
+  cost maths, and the label the bar renders.
+- `test_install.py`, `test_install.sh` — install.sh: argument parsing, symlinks,
+  the settings.json rewrite, the sentinel migration, stale-symlink cleanup.
+- `test_render_svg.py` — status line SVG rendering.
+- `helpers.py` — shared fixtures.
 
-## Python-only regression tests (retire with src/proxy.py)
+## Go (`cd src/go && go test ./...`)
 
-These test the Python implementation's internals; the Go rewrite ports the
-behavior but not the code, so these are not the swap gate:
+- `internal/proxy` — rewrite, relay and retry, auth, the failover breaker and
+  its trial close, the classifier routes, the ZDR gate, spend, vision, idle
+  exit. Race-tested.
+- `internal/jsonpy` — CPython `json.dumps` byte parity: number spelling,
+  ensure_ascii escaping, key order, malformed input.
+- `internal/profiles` — the profile table, `Served`, and the `--ports` output
+  install.sh parses.
+- `internal/sockets` — launchd socket activation and the plain-bind fallback.
+- `internal/relay` — the upstream idle-deadline dial wrapper.
 
-- `test_proxies.py` — PROFILES table, failover breaker internals, `--ports`.
-- `test_proxy_http.py` — relay/rewrite/auth behavior against a fake upstream.
-- `test_proxy_socket.py` — launchd socket activation.
-- `test_classifier.py` — classifier routing internals.
-- `test_vision.py` — image->text child process.
-- `test_install.py` / `test_install.sh` — install.sh behavior.
+## The golden file
 
-These stay green while the Python proxy is the production agent (Phase A). They
-are NOT ported to Go; the Go equivalents live in `src/go/internal/*`.
+`src/go/internal/proxy/testdata/rewrite_golden.json` holds what the Python
+proxy emitted for the differential corpus on its last run, replayed by
+`TestRewriteMatchesPythonGolden`. It is frozen: the harness that produced it
+(`tests/diff/`) compared two implementations, and there is one now.
 
-## Contract tests (must be re-asserted in Go before the swap)
-
-The differential harness corpus is the canonical contract check. The Go unit
-suites that back it up:
-
-- `src/go/internal/proxy` — rewrite parity, relay/retry, auth, spend shape,
-  classifier whitelist, failover breaker (race-tested).
-- `src/go/internal/jsonpy` — ensure_ascii JSON byte-parity with CPython.
-- `src/go/internal/profiles` — PROFILES generation + `--ports` parity.
-- `src/go/internal/relay` — upstream idle-deadline wrapper.
+`tests/diff/dump_golden.py` is kept as the recipe that wrote it. It does not run
+against this tree, and restoring the proxy alone is not enough: it also does
+`import corpus`, and `tests/diff/corpus.py` went in the same deletion.
+Regenerating means restoring BOTH `src/proxy.py` and `tests/diff/corpus.py`
+from history. It stays because a golden whose provenance cannot be reproduced
+is one nobody can ever justify changing — and a recipe that names half its
+inputs is the same problem wearing a different hat.
 
 ## Rule
 
-Before the Go proxy flips into production: the differential harness must be
-GREEN, `src/go` must pass `go test -race ./...`, and the Python-only tests
-stay as the Python proxy's regression net until it is archived.
+A test that cannot fail is worse than no test, because it is trusted. This repo
+has already shipped two: a differential harness that never rebuilt the binary it
+compared against, and a corpus whose inputs both sides passed through untouched.
+When a test guards something that matters, break the code on purpose once and
+confirm it goes red.

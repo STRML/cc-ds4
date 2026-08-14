@@ -26,23 +26,27 @@ and the data flow diagram are load-bearing for correctness.
 - The proxy must be running for any ds4 profile to work. On a cold start the
   SessionStart hook kickstarts it; the launcher function in `profiles/*.md` does
   the same on first launch.
-- `src/proxy.py` is the single source of truth for profile ports, upstreams, and
-  failover config. Never duplicate that information outside the PROFILES dict.
+- `src/go/internal/profiles/table.go` is the single source of truth for profile
+  ports, upstreams, models, and failover config. Never duplicate that
+  information outside the table.
 
 ## Profiles
 
 - `claude-ds4` (direct): fastest, cheapest, no ZDR, sends prompts to DeepSeek
-  (retention/training). Model is literal `deepseek-v4-flash[1m]`; no effort
-  knob. Tier sentinels don't rewrite — the CLI passes literal model names.
-  Failover from other profiles lands here flash-only (`FAILOVER_MODEL`), never
-  pro.
+  (retention/training). Its settings.json uses literal model names, so no
+  sentinel reaches it in practice; one that did would resolve through the
+  family map. It ignores `reasoning_effort`, so there is no effort knob. This
+  is the only profile where the pro family actually serves pro. Nothing fails
+  over to it any more.
 - `claude-or-ds4` (OpenRouter): ZDR on, pinned `-0731` build, slower. Sentinel
-  tiers + effort control.
+  tiers + effort control. No working host for pro, so both families run flash.
 - `claude-nous` (Nous Portal): cheapest (90% promo), pinned `-0731`, no ZDR.
-  Sentinel tiers + effort control. No public credits/balance endpoint.
+  Sentinel tiers + effort control. No public credits/balance endpoint. Fails
+  over to or-ds4 when its breaker trips.
 - A profile env MUST be scrubbed before spawning a child — follow the
-  `vision._env()` recipe (strip `ANTHROPIC_*`, `CLAUDE_CODE_*`, `DS4_*`,
-  `CLAUDE_CONFIG_DIR`, `CLAUDECODE`, `CMUX*`, proxy vars).
+  `scrubbedEnv` recipe in `src/go/internal/proxy/vision.go` (strip
+  `ANTHROPIC_*`, `CLAUDE_CODE_*`, `DS4_*`, `CLAUDE_CONFIG_DIR`, `CLAUDECODE`,
+  `CMUX*`, proxy vars).
 
 ## Skills
 
@@ -56,7 +60,7 @@ and the data flow diagram are load-bearing for correctness.
 
 ## Failure modes worth knowing
 
-- **Auto-mode classifier relay flaps ("ds4-high temporarily unavailable").**
+- **Auto-mode classifier relay flaps ("ds4-flash-xhigh temporarily unavailable").**
   The classifier is routed to the Anthropic subscription; when it 403s/524s
   the gate blocks every Bash call. It fails open to ds4 per proxy config but
   the CLI still gates. Retry with backoff — it's transient load.
@@ -68,7 +72,8 @@ and the data flow diagram are load-bearing for correctness.
 ## Testing
 
 ```sh
-python3 -m unittest discover -s tests -q    # 269 tests, stdlib only, no deps
+cd src/go && go test ./...                  # the proxy
+python3 -m unittest discover -s tests -q    # status line + install, stdlib only
 ```
 
 No pip deps. Pure stdlib. The suite pins published price tables, per-model cost

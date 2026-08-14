@@ -284,14 +284,14 @@ class TestLabels(unittest.TestCase):
     def test_openrouter_marks_a_dead_proxy(self):
         sl = OpenRouterStatusline("/nonexistent")
         sl._info = {}          # proxy unreachable
-        p = {"model": {"id": "ds4-xhigh"}}
+        p = {"model": {"id": "ds4-pro-xhigh"}}
         sl.label(p, {})
         self.assertIn("(proxy?)", p["model"]["display_name"])
 
     def test_openrouter_shows_real_slug_and_tier(self):
         sl = OpenRouterStatusline("/nonexistent")
         sl._info = {"model": "deepseek/deepseek-v4-flash-0731"}
-        p = {"model": {"id": "ds4-xhigh"}}
+        p = {"model": {"id": "ds4-pro-xhigh"}}
         sl.label(p, {})
         self.assertEqual(p["model"]["display_name"], "or-deepseek-v4-flash-0731 xhigh")
 
@@ -301,7 +301,7 @@ class TestLabels(unittest.TestCase):
                 fh.write("low\n")
             sl = OpenRouterStatusline(profile)
             sl._info = {"model": "deepseek/deepseek-v4-flash-0731"}
-            p = {"model": {"id": "ds4-xhigh"}}
+            p = {"model": {"id": "ds4-pro-xhigh"}}
             sl.label(p, {})
             self.assertEqual(p["model"]["display_name"], "or-deepseek-v4-flash-0731 xhigh->low")
 
@@ -312,7 +312,7 @@ class TestNousStatusline(unittest.TestCase):
         # which backend is being spent against: "ds-", "or-", "nous-".
         sl = NousStatusline("/nonexistent")
         sl._info = {"model": "deepseek/deepseek-v4-flash-0731"}
-        p = {"model": {"id": "ds4-xhigh"}}
+        p = {"model": {"id": "ds4-pro-xhigh"}}
         sl.label(p, {})
         self.assertEqual(p["model"]["display_name"], "nous-deepseek-v4-flash-0731 xhigh")
 
@@ -322,7 +322,7 @@ class TestNousStatusline(unittest.TestCase):
                 fh.write("low\n")
             sl = NousStatusline(profile)
             sl._info = {"model": "deepseek/deepseek-v4-flash-0731"}
-            p = {"model": {"id": "ds4-xhigh"}}
+            p = {"model": {"id": "ds4-pro-xhigh"}}
             sl.label(p, {})
             self.assertEqual(p["model"]["display_name"], "nous-deepseek-v4-flash-0731 xhigh->low")
 
@@ -337,7 +337,7 @@ class TestNousStatusline(unittest.TestCase):
     def test_label_marks_dead_proxy(self):
         sl = NousStatusline("/nonexistent")
         sl._info = {}
-        p = {"model": {"id": "ds4-xhigh"}}
+        p = {"model": {"id": "ds4-pro-xhigh"}}
         sl.label(p, {})
         self.assertIn("(proxy?)", p["model"]["display_name"])
 

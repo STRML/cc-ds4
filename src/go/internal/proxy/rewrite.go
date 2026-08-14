@@ -7,40 +7,79 @@
 package proxy
 
 import (
+	"os"
 	"strings"
 
 	"github.com/strml/cc-ds4/src/go/internal/jsonpy"
 	"github.com/strml/cc-ds4/src/go/internal/profiles"
 )
 
-// effortMap maps the ds4-* sentinel Claude Code sends to the reasoning_effort
-// value the upstream accepts. This is proxy.py's EFFORT table.
-// failoverModel remaps ds4-* sentinels onto the direct target's flash model,
-// mirroring FAILOVER_MODEL in proxy.py. Flash only: the direct profile's own
-// config runs flash for every tier, and the cost difference is what makes
-// failover worth it.
+// failoverModel remaps a model id onto the failover target's own id. The
+// target is openrouter (nous -> openrouter), and this is only a safety net:
+// rewrite resolves every sentinel through the target's family map before the
+// remap runs, so what reaches here is an id the sentinel path did not claim —
+// chiefly a profile's own qualified id riding along after failover.
+//
+// Both families land on flash: pro-0813 has no usable OpenRouter host.
 var failoverModel = map[string]string{
-	"ds4-max":   "deepseek-v4-flash[1m]",
-	"ds4-xhigh": "deepseek-v4-flash[1m]",
-	"ds4-high":  "deepseek-v4-flash[1m]",
-	"ds4-low":   "deepseek-v4-flash[1m]",
-	// The qualified id of the or-ds4/nous profiles is here too (proxy.py's
-	// FAILOVER_MODEL has it): a :nitro variant strips to this base id, and
-	// without the key it would ride the variant onto the direct target, which
-	// 400s on it.
-	"deepseek/deepseek-v4-flash-0731": "deepseek-v4-flash[1m]",
+	"ds4-pro-xhigh":    "deepseek/deepseek-v4-flash-0731:nitro",
+	"ds4-pro-medium":   "deepseek/deepseek-v4-flash-0731:nitro",
+	"ds4-flash-xhigh":  "deepseek/deepseek-v4-flash-0731:nitro",
+	"ds4-flash-medium": "deepseek/deepseek-v4-flash-0731:nitro",
+	// Nous's own qualified id. A :nitro variant strips to this base id first;
+	// without the key the plain id would ride onto the target unchanged.
+	"deepseek/deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash-0731:nitro",
 }
 
-var effortMap = map[string]string{
-	"ds4-max":   "max",
-	"ds4-xhigh": "xhigh",
-	"ds4-high":  "high",
-	"ds4-low":   "low",
+// sentinel is what a ds4-* model name decodes to: which model family serves
+// the request, and how hard that model thinks by default.
+type sentinel struct {
+	family string
+	effort string
+}
+
+// sentinelTable maps the ds4-* names Claude Code sends to (family, default
+// effort). The two halves are independent: family picks the model, effort
+// picks the thinking budget.
+//
+//	fable  -> ds4-pro-xhigh      opus  -> ds4-pro-medium
+//	sonnet -> ds4-flash-xhigh    haiku -> ds4-flash-medium
+//
+// The default effort applies only when the client sent none. /effort puts
+// reasoning_effort in the body and that wins — the knob is meant to change how
+// hard the model thinks, not to be overwritten by the sentinel it rode in on.
+var sentinelTable = map[string]sentinel{
+	"ds4-pro-xhigh":    {"pro", "xhigh"},
+	"ds4-pro-medium":   {"pro", "medium"},
+	"ds4-flash-xhigh":  {"flash", "xhigh"},
+	"ds4-flash-medium": {"flash", "medium"},
+}
+
+// effortLevels is the set OpenRouter accepts. A client-sent reasoning_effort
+// outside it is ignored rather than forwarded: OpenRouter takes the parameter
+// and DeepSeek drops unknown values without error, so a typo would silently
+// change nothing while looking like it worked.
+var effortLevels = map[string]bool{
+	"max": true, "xhigh": true, "high": true, "medium": true,
+	"low": true, "minimal": true, "none": true,
 }
 
 // nothinkBelow is the max_tokens threshold at or below which thinking is
-// disabled (DS4_NOTHINK_BELOW, default 8192 in proxy.py).
-const nothinkBelow = 8192
+// disabled. DS4_NOTHINK_BELOW moves it; README and every profile doc tell users
+// so, and install.sh sweeps the whole DS4_* namespace into the plist, so a
+// hardcoded constant made a documented knob silently inert.
+//
+// Read once at init, matching Python's import-time binding: the value must not
+// change under a running process mid-session.
+var nothinkBelow = envInt("DS4_NOTHINK_BELOW", 8192)
+
+// zdrEnabled reports whether the ZDR provider block may be injected at all.
+// DS4_ZDR=0 is the documented escape hatch for a provider-blocked build (a 403
+// with "error code: 1010" from OpenRouter). It only ever DISABLES: a profile
+// whose table row has no ZDR support never gains it from this.
+func zdrEnabled() bool {
+	return os.Getenv("DS4_ZDR") != "0"
+}
 
 // lowContext is proxy.py's LOW_CONTEXT: OpenRouter endpoints whose context is
 // smaller than the 1M the profile advertises. The ZDR block pins their names
@@ -53,67 +92,110 @@ var lowContext = []string{"Io Net"}
 // whether the placeholder-injection pass runs.
 var thinkingDisabled = jsonpy.MustObj("type", "disabled")
 
-// placeholder is proxy.py's PLACEHOLDER: a fabricated thinking block that
-// satisfies DeepSeek's history validation. DeepSeek 400s on an assistant
-// tool_use message with no thinking block, and does not validate the
-// signature, so the placeholder is enough.
-var placeholder = jsonpy.MustObj(
-	"type", "thinking",
-	"thinking", "(elided)",
-	"signature", "ds4-proxy",
-)
+// disabledThinking returns a FRESH node for insertion. thinkingDisabled above
+// is the comparison template and is never inserted: sharing one pointer across
+// every request's tree means three profiles served concurrently all hold the
+// same node, and the first Get(...).Set(...) anywhere downstream of it corrupts
+// unrelated in-flight requests and races. Nothing does that today, which is
+// exactly why it would be found late.
+func disabledThinking() *jsonpy.OrderedValue {
+	return jsonpy.MustObj("type", "disabled")
+}
 
-// rewrite edits a request body for one profile, mirroring rewrite() in
-// src/proxy.py. The tree is mutated through jsonpy's exported accessors and
-// re-emitted with Python-identical spacing and escaping.
-func rewrite(body []byte, cfg profiles.Profile) ([]byte, error) {
+// placeholderThinking is the same, for the fabricated thinking block.
+func placeholderThinking() *jsonpy.OrderedValue {
+	return jsonpy.MustObj(
+		"type", "thinking",
+		"thinking", "(elided)",
+		"signature", "ds4-proxy",
+	)
+}
+
+// rewrite edits a request body for one profile. The tree is mutated through
+// jsonpy's exported accessors and re-emitted with Python-identical spacing and
+// escaping.
+//
+// effortPin is passed in rather than read from cfg because the two belong to
+// different profiles on a failed-over request: the model comes from the target,
+// but /ds4-effort pinned the ORIGIN. Reading it from cfg silently dropped a
+// user's pin the moment their profile failed over.
+func rewrite(body []byte, cfg profiles.Profile, effortPin string) ([]byte, error) {
 	return jsonpy.Marshal(body, func(root *jsonpy.OrderedValue) {
-		// Sentinel -> real model + reasoning_effort, gated on the profile
-		// having a model at all (cfg["model"] truthiness in proxy.py). The
-		// direct profile has an empty model, so its requests keep the
-		// sentinel. The override pin (effort-override file) is a Task 5
-		// concern; the tier default is all Task 4 needs.
-		if cfg.Model != "" {
-			model := root.Get("model")
-			if model != nil && model.IsString() {
-				tier := model.String()
-				if effort, ok := effortMap[tier]; ok {
-					root.SetString("model", cfg.Model)
-					// Set appends, matching Python's dict insertion order:
-					// json.dumps places reasoning_effort at the end of the
-					// object, after messages.
-					root.Set("reasoning_effort", jsonpy.Val(effort))
-				} else if isAnthropicModel(tier) {
-					// A literal Anthropic model (sonnet, claude-sonnet-4-5,
-					// opus, ...) bypassed the sentinel system and would bill
-					// real Anthropic rates on this profile's upstream. Remap it
-					// defensively, mirroring proxy.py's rewrite() third branch;
-					// no reasoning_effort is added here, exactly like Python.
-					root.SetString("model", cfg.Model)
+		// Sentinel -> real model (+ reasoning_effort where the upstream honors
+		// it). The sentinel's family half selects the model from this
+		// profile's family map; a profile with no family entry falls back to
+		// its single default model.
+		if m := root.Get("model"); m != nil && m.IsString() {
+			tier := m.String()
+			sen, isSentinel := sentinelTable[tier]
+			model := cfg.FamilyModels[sen.family]
+			if model == "" {
+				model = cfg.Model
+			}
+			switch {
+			case model == "":
+				// Nothing to rewrite to. Leave the request alone rather than
+				// blanking its model.
+			case isSentinel && cfg.Effort:
+				root.SetString("model", model)
+				// Precedence, weakest first: the sentinel's own default, then a
+				// reasoning_effort the client sent, then the /ds4-effort pin.
+				//
+				// The pin sits on top because it is the most explicit thing the
+				// user did and the status line advertises it as active. It used
+				// to lose to any client-sent level — so a request that carried
+				// one silently ran at that level while the bar still rendered
+				// the pin, which is worse than either behaviour on its own.
+				effort := sen.effort
+				if lvl := root.Get("reasoning_effort").String(); effortLevels[lvl] {
+					effort = lvl
 				}
+				if effortPin != "" {
+					effort = effortPin
+				}
+				// Set appends, matching Python's dict insertion order:
+				// json.dumps places reasoning_effort at the end of the object,
+				// after messages.
+				root.Set("reasoning_effort", jsonpy.Val(effort))
+			case isSentinel:
+				// The upstream ignores reasoning_effort (direct). Swap the
+				// sentinel for the model id and inject nothing.
+				root.SetString("model", model)
+			case isAnthropicModel(tier):
+				// A literal Anthropic model (sonnet, claude-sonnet-4-5,
+				// opus, ...) bypassed the sentinel system and would bill real
+				// Anthropic rates on this profile's upstream. Remap it
+				// defensively; no reasoning_effort is added.
+				root.SetString("model", model)
 			}
-		} else if cfg.FailoverTarget && root.Get("model") != nil && root.Get("model").IsString() {
-			// A profile with an empty model being used as the FAILOVER TARGET
-			// (e.g. direct) takes real model names and ignores
-			// reasoning_effort. A ds4-* sentinel is remapped via FAILOVER_MODEL
-			// to flash (proxy.py:164-171); no reasoning_effort is added. A
-			// standalone direct-profile request (not a failover target) keeps
-			// the sentinel, matching Python.
-			// A :nitro variant suffix is not a failoverModel key; the direct
-			// target 400s on it. Match on the base id (mirrors proxy.py).
-			key := root.Get("model").String()
-			if i := strings.IndexByte(key, ':'); i >= 0 {
-				key = key[:i]
-			}
-			if flash, ok := failoverModel[key]; ok {
-				root.SetString("model", flash)
+		}
+
+		if cfg.FailoverTarget {
+			// This profile is serving another profile's traffic. Anything the
+			// sentinel path above did not claim — chiefly the failed-over
+			// profile's own qualified id — is remapped onto an id this target
+			// actually serves. A :nitro variant is not a failoverModel key, so
+			// match on the base id.
+			if m := root.Get("model"); m != nil && m.IsString() {
+				key := m.String()
+				if i := strings.IndexByte(key, ':'); i >= 0 {
+					key = key[:i]
+				}
+				if remapped, ok := failoverModel[key]; ok {
+					root.SetString("model", remapped)
+				}
 			}
 		}
 
 		// ZDR provider block (OpenRouter only). DS4_ZDR=0 never enables ZDR on
 		// a profile whose table row does not support it; that env gate is a
 		// serve-time concern, cfg.ZDR is the table row.
-		if cfg.ZDR {
+		//
+		// Some models have no ZDR-capable host — pro-0813's only endpoint is
+		// DeepSeek itself, which rejects the block with a 404 ("no endpoints
+		// matching data policy"). Such models are listed per profile so the
+		// escape hatch is configuration, not a silent special case.
+		if cfg.ZDR && zdrEnabled() && !skipZDR(root.Get("model").String(), cfg.ZDRSkipModels) {
 			prov := root.Get("provider")
 			if !prov.IsObject() {
 				prov = jsonpy.MustObj()
@@ -143,7 +225,7 @@ func rewrite(body []byte, cfg profiles.Profile) ([]byte, error) {
 				mt = cfg.MaxOut
 			}
 			if mt <= nothinkBelow {
-				root.Set("thinking", thinkingDisabled)
+				root.Set("thinking", disabledThinking())
 			}
 		}
 
@@ -186,7 +268,7 @@ func injectMissingThinking(root *jsonpy.OrderedValue) int {
 			}
 		}
 		if hasToolUse && !hasThinking {
-			blocks.Insert(0, placeholder)
+			blocks.Insert(0, placeholderThinking())
 			n++
 		}
 	}
@@ -203,6 +285,18 @@ func isAnthropicModel(name string) bool {
 		strings.Contains(n, "opus") ||
 		strings.Contains(n, "haiku") ||
 		strings.Contains(n, "claude-")
+}
+
+// skipZDR reports whether model matches any prefix in skips. Prefix rather
+// than exact match: the id may carry a variant suffix (:nitro) that has no
+// bearing on which host serves it.
+func skipZDR(model string, skips []string) bool {
+	for _, p := range skips {
+		if strings.HasPrefix(model, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsStr(xs []string, s string) bool {

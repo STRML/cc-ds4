@@ -97,18 +97,18 @@ class Label(unittest.TestCase):
     def test_nous_with_tier(self):
         sl = NousStatusline("/nonexistent")
         sl._info = {"model": "deepseek/deepseek-v4-flash-0731"}
-        p = {"model": {"id": "ds4-low"}}
+        p = {"model": {"id": "ds4-flash-medium"}}
         sl.label(p, {})
         # Main's review-fix added the "nous-" backend tag (was empty).
-        self.assertEqual(p["model"]["display_name"], "nous-deepseek-v4-flash-0731 low")
+        self.assertEqual(p["model"]["display_name"], "nous-deepseek-v4-flash-0731 medium")
 
     def test_sentinel_without_proxy_keeps_proxy_marker(self):
         sl = NousStatusline("/nonexistent")
         sl._info = {}
-        p = {"model": {"id": "ds4-high"}}
+        p = {"model": {"id": "ds4-flash-xhigh"}}
         sl.label(p, {})
         # Main's review-fix added the "nous-" backend tag (was empty).
-        self.assertEqual(p["model"]["display_name"], "nous-ds4-high (proxy?)")
+        self.assertEqual(p["model"]["display_name"], "nous-ds4-flash-xhigh (proxy?)")
 
     def test_base_model_strips_nested_suffix(self):
         self.assertEqual(base_model("a[1m]"), "a")

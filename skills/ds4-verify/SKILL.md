@@ -11,17 +11,23 @@ verified/discrepant/unfounded verdicts.
 
 ## Verify floor
 
-**Never verify with the same tier that produced the artifact.** ds4 `low`
-artifact → `high` verify; `high` artifact → `max` verify; a `max` artifact needs
-a Claude or Fable pass (not another ds4 run). Money/security/irreversible work
-never routes lower than `high`.
+**Never verify with the same tier that produced the artifact.** A
+`flash-medium` artifact → `flash-xhigh` verify; `flash-xhigh` → `pro-xhigh`; a
+`pro-xhigh` artifact needs a Claude or Fable pass (not another ds4 run).
+Money/security/irreversible work never routes lower than `pro-xhigh`.
+
+The tier step is real only on `direct`, the one profile that serves the pro
+family. On `openrouter` and `nous` both families resolve to the same flash
+model, so `pro-xhigh` there is the same request as `flash-xhigh` under another
+name — see `references/roles.md`. Verify on `direct`, or with a Claude/Fable
+pass, when the step has to mean something.
 
 ## Dispatch
 
 ```bash
 ~/.claude/skills/ds4-skill-family/bin/ds4-run \
   --profile {nous|openrouter} \
-  --tier {high|xhigh|max} \
+  --tier {flash-xhigh|pro-xhigh} \
   --role verify \
   --prompt-text '<claim to verify; be specific>'
 ```

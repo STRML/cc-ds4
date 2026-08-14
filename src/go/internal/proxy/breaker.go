@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -26,12 +27,12 @@ import (
 // FAILOVER_RATE=1.0, FAILOVER_PROBES_TO_CLOSE=1 for its failover case.
 
 var (
-	failoverEnabled        = os.Getenv("DS4_FAILOVER") != "0"
-	failoverWindow         = envInt("DS4_FAILOVER_WINDOW", 12)
-	failoverRate           = envFloat("DS4_FAILOVER_RATE", 0.25)
-	failoverRecheck        = envInt("DS4_FAILOVER_RECHECK", 60)
-	failoverProbesToClose  = envInt("DS4_FAILOVER_PROBES_TO_CLOSE", 3)
-	failoverProbeTimeout   = envInt("DS4_FAILOVER_PROBE_TIMEOUT", 6)
+	failoverEnabled       = os.Getenv("DS4_FAILOVER") != "0"
+	failoverWindow        = envInt("DS4_FAILOVER_WINDOW", 12)
+	failoverRate          = envFloat("DS4_FAILOVER_RATE", 0.25)
+	failoverRecheck       = envInt("DS4_FAILOVER_RECHECK", 60)
+	failoverProbesToClose = envInt("DS4_FAILOVER_PROBES_TO_CLOSE", 3)
+	failoverProbeTimeout  = envInt("DS4_FAILOVER_PROBE_TIMEOUT", 6)
 )
 
 func envInt(k string, def int) int {
@@ -52,6 +53,55 @@ func envFloat(k string, def float64) float64 {
 	return def
 }
 
+// creditExhausted reports an upstream refusing service because the account is
+// out of money. Nous spells this as a 404 not_found_error whose message is
+// about credits, and OpenRouter as a 402.
+//
+// It is deliberately NOT treated as transient: retrying does not help, and the
+// in-proxy retry would just burn the request three times. But it IS a reason to
+// route elsewhere, and it is permanent until someone tops up — so it counts as
+// a breaker strike and triggers the failover rescue. Without this a drained
+// balance is a total outage with a healthy target sitting idle, and the CLI
+// reports it as "that model may not exist", which sends you looking in
+// completely the wrong place.
+// creditPhrases are the ways the supported providers actually say it. Nous
+// sends "requires available credits ... balance is too low"; OpenRouter sends a
+// 402, which is handled by status alone above, and "insufficient credits" on
+// some paths.
+var creditPhrases = []string{
+	"insufficient credit",
+	"insufficient funds",
+	"insufficient balance",
+	"available credit",
+	"balance is too low",
+	"balance too low",
+	"out of credit",
+	"credit balance",
+	"payment required",
+}
+
+func creditExhausted(status int, body []byte) bool {
+	if status == 402 {
+		return true
+	}
+	if status != 404 && status != 403 {
+		return false
+	}
+	// Phrases, not bare words. "credit" or "balance" anywhere in 8KB of a 403 or
+	// 404 body matched a provider echoing a request field or an HTML block page,
+	// and the consequences are not cosmetic: the request is re-sent to another
+	// provider, the breaker takes a strike, and a bad model id comes back as
+	// "your account is out of credit, this is a billing problem" — sending the
+	// reader to top up an account that was never the problem.
+	b := strings.ToLower(string(body))
+	for _, phrase := range creditPhrases {
+		if strings.Contains(b, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 func failoverThreshold() int {
 	t := int(float64(failoverWindow) * failoverRate)
 	if t < 1 {
@@ -67,6 +117,18 @@ type breaker struct {
 	open      bool
 	probes    int
 	lastProbe time.Time
+	// trial holds an unclaimed trial: the probe streak was long enough to
+	// believe the upstream is back, but no request has taken it to that
+	// upstream yet. It is set by releaseTrial when a request claimed the trial
+	// and then returned without ever reaching the upstream, so the next request
+	// inherits it instead of the streak's work being thrown away.
+	trial bool
+	// trialActive is set while a claimed trial request is in flight. The split
+	// is what makes the claim exclusive: exactly one request goes to the
+	// profile's own upstream, and its outcome — not the probe's — decides
+	// whether the circuit closes. Without it a burst arriving together would
+	// all take the trial and all hit an upstream that may still be down.
+	trialActive bool
 }
 
 // recordOutcome feeds one relay's outcome into the failover breaker. It runs
@@ -75,10 +137,22 @@ type breaker struct {
 // anything else is a hit — the same classification failover_record applies.
 // Only the profile's own upstream outcomes count (not the failover target's).
 func (h *Handler) recordOutcome(statusCode int) {
+	h.recordStrike(isTransient(statusCode))
+}
+
+// recordConnFailure records a failure that never produced a status at all: a
+// refused connection, a DNS failure, or a read that stalled past the deadline.
+// It is a strike. Nous behind Cloudflare rarely returns a clean 503 during an
+// outage, it simply stops answering, so a breaker that only counted statuses
+// would sit closed through the exact event it exists for.
+func (h *Handler) recordConnFailure() {
+	h.recordStrike(true)
+}
+
+func (h *Handler) recordStrike(bad bool) {
 	if !failoverEnabled || h.cfg.Failover == "" {
 		return
 	}
-	bad := isTransient(statusCode)
 	h.br.mu.Lock()
 	defer h.br.mu.Unlock()
 	b := &h.br
@@ -95,6 +169,11 @@ func (h *Handler) recordOutcome(statusCode int) {
 	if !b.open && strikes >= failoverThreshold() {
 		b.open = true
 		b.probes = 0
+		// Say so. Python printed this and Go did not, which meant a profile
+		// could silently spend an entire session on its failover target with
+		// nothing in the log to explain the change in latency or cost.
+		fmt.Printf("  [%s] failover: %d transient errors in the last %d requests, routing to %s\n",
+			h.cfg.Name, strikes, len(b.outcomes), h.cfg.Failover)
 		// Tripping resets the probe clock to now (mirroring failover_record's
 		// probed_at = time.time()): the target gets a quiet FAILOVER_RECHECK
 		// before the first re-probe. lastProbe=0 would probe the very next
@@ -103,25 +182,41 @@ func (h *Handler) recordOutcome(statusCode int) {
 	}
 }
 
-// breakerOpen reports whether the profile's circuit is open and requests
-// should route to the failover target. When open, a request whose recheck
-// interval has lapsed performs one probe (mirroring failover_effective): a
-// clean probe increments the streak, and PROBES_TO_CLOSE clean probes close
-// the circuit. The probe runs outside the lock.
-func (h *Handler) breakerOpen() bool {
+// breakerOpen reports whether the profile's circuit is open (so requests route
+// to the failover target) and, separately, whether THIS request is the armed
+// trial and should go to the profile's own upstream instead.
+//
+// A clean probe is not enough to close the circuit. The probe is a minimal
+// ping: it says the upstream accepts a connection, not that it can carry real
+// load, and a probe that passes during a lull followed by the next heavy
+// request failing is exactly the close-then-reopen flap this avoids. So a long
+// enough probe streak only ARMS a trial; the first real request the profile's
+// own upstream serves cleanly is what closes the circuit, via trialClose.
+//
+// The probe runs outside the lock.
+func (h *Handler) breakerOpen() (open, trial bool) {
 	if !failoverEnabled || h.cfg.Failover == "" {
-		return false
+		return false, false
 	}
 	h.br.mu.Lock()
 	b := &h.br
 	if !b.open {
 		h.br.mu.Unlock()
-		return false
+		return false, false
+	}
+	// An already-armed trial takes this request to the profile's own upstream.
+	// It stays armed until that request reports back, so a burst does not spend
+	// the trial on several requests at once.
+	if b.trial {
+		b.trial = false      // claimed by this request
+		b.trialActive = true // and in flight until trialClose reports back
+		h.br.mu.Unlock()
+		return true, true
 	}
 	now := time.Now()
 	if !b.lastProbe.IsZero() && now.Sub(b.lastProbe) < time.Duration(failoverRecheck)*time.Second {
 		h.br.mu.Unlock()
-		return true // within recheck window: keep failing over
+		return true, false // within recheck window: keep failing over
 	}
 	b.lastProbe = now
 	h.br.mu.Unlock()
@@ -129,10 +224,20 @@ func (h *Handler) breakerOpen() bool {
 	if h.probeUpstream(h.cfg) {
 		h.br.mu.Lock()
 		b.probes++
-		if b.probes >= failoverProbesToClose {
-			b.open = false
+		if b.probes >= failoverProbesToClose && !b.trialActive {
+			// Arm and claim in one step: this request is the trial.
+			//
+			// Not while another trial is in flight. A long streaming trial can
+			// outlast a whole recheck interval, and a second one claimed
+			// underneath it makes trialClose ambiguous: whichever finishes
+			// first clears trialActive, and the other — possibly the one served
+			// cleanly by a recovered upstream — returns early without closing
+			// the circuit.
+			b.trial = false
+			b.trialActive = true
 			b.probes = 0
-			b.outcomes = nil
+			h.br.mu.Unlock()
+			return true, true
 		}
 		h.br.mu.Unlock()
 	} else {
@@ -140,7 +245,52 @@ func (h *Handler) breakerOpen() bool {
 		b.probes = 0
 		h.br.mu.Unlock()
 	}
+	return true, false
+}
+
+// trialClose reports the outcome of a trial request served by the profile's
+// own upstream. A clean result closes the circuit; a transient one disarms the
+// trial and leaves it open, so the next recheck has to earn a fresh probe
+// streak. Returns true when the circuit closed.
+func (h *Handler) trialClose(clean bool) bool {
+	h.br.mu.Lock()
+	defer h.br.mu.Unlock()
+	b := &h.br
+	if !b.trialActive {
+		return false
+	}
+	b.trialActive = false
+	if !clean {
+		// Keep the circuit open and make the next attempt wait out a full
+		// recheck interval rather than retrying immediately.
+		b.lastProbe = time.Now()
+		return false
+	}
+	b.open = false
+	b.probes = 0
+	b.outcomes = nil
+	fmt.Printf("  [%s] failover: a real request was served cleanly, back on its own upstream\n",
+		h.cfg.Name)
 	return true
+}
+
+// releaseTrial hands a claimed trial back unclaimed, for a request that took it
+// and then answered without ever contacting the upstream.
+//
+// Routing is decided at the top of the relay, but several paths return before
+// the upstream is dialed: the ZDR 409 refusal, and the permission classifier,
+// which in auto mode is the most frequent small request there is. Those learn
+// nothing about whether the upstream recovered. Without this the streak's work
+// is spent on a request that never tested anything, probes reset to zero, and
+// the profile stays on its failover target for another full recheck interval
+// before it can even try to come home.
+func (h *Handler) releaseTrial() {
+	h.br.mu.Lock()
+	defer h.br.mu.Unlock()
+	if h.br.trialActive {
+		h.br.trialActive = false
+		h.br.trial = true
+	}
 }
 
 // probeUpstream sends a minimal POST /v1/messages to the profile's own

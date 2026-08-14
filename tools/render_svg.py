@@ -80,7 +80,7 @@ def esc(s):
 
 def main():
     lines = [capture("direct", "deepseek-v4-flash[1m]"),
-             capture("openrouter", "ds4-xhigh")]
+             capture("openrouter", "ds4-pro-xhigh")]
     parsed = [runs(l) for l in lines]
     width = max(sum(len(t) for t, _, _ in p) for p in parsed) * CW + PAD * 2
     height = len(parsed) * LH + PAD * 2

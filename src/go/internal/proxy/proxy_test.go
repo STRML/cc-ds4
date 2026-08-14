@@ -12,18 +12,18 @@ import (
 	"github.com/strml/cc-ds4/src/go/internal/profiles"
 )
 
-// TestRewriteSentinelToModel is the brief's primary parity test: a ds4-high
+// TestRewriteSentinelToModel is the brief's primary parity test: a ds4-flash-xhigh
 // sentinel becomes the profile's real model plus reasoning_effort "high", and
 // reasoning_effort appends at the end of the object — the byte output of
 // Python's json.dumps, verified against the real rewrite().
 func TestRewriteSentinelToModel(t *testing.T) {
-	cfg := profiles.Profile{Name: "nous", Model: "deepseek/deepseek-v4-flash-0731"}
-	body := []byte(`{"model": "ds4-high", "max_tokens": 32000, "thinking": {"type": "adaptive"}, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	cfg := testNous()
+	body := []byte(`{"model": "ds4-flash-xhigh", "max_tokens": 32000, "thinking": {"type": "adaptive"}, "messages": []}`)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 32000, "thinking": {"type": "adaptive"}, "messages": [], "reasoning_effort": "high"}`
+	want := `{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 32000, "thinking": {"type": "adaptive"}, "messages": [], "reasoning_effort": "xhigh"}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
 	}
@@ -34,9 +34,9 @@ func TestRewriteSentinelToModel(t *testing.T) {
 // claude-*) is remapped to the profile's model so nothing bills real Anthropic
 // rates, without adding reasoning_effort (Python adds none on this branch).
 func TestRewriteAnthropicLiteralModel(t *testing.T) {
-	cfg := profiles.Profile{Name: "nous", Model: "deepseek/deepseek-v4-flash-0731"}
+	cfg := testNous()
 	body := []byte(`{"model": "claude-sonnet-5", "max_tokens": 32000, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,31 +46,50 @@ func TestRewriteAnthropicLiteralModel(t *testing.T) {
 	}
 }
 
-// TestRewriteDoesNotRemapProfileLiteral pins the negative side of the
-// Anthropic-literal branch: the profile's own upstream model id already names
-// the target, matches no Anthropic substring, and is left untouched (and no
-// reasoning_effort is invented).
-// TestRewriteFailoverTargetStripsNitro pins that a :nitro variant suffix is
-// not a failoverModel key: a request failing over to the direct target strips
-// the variant before the flash remap, so the direct API never receives
-// "...:nitro", which 400s there. Mirrors proxy.py's failover remap.
-func TestRewriteFailoverTargetStripsNitro(t *testing.T) {
-	cfg := profiles.Profile{Name: "direct", FailoverTarget: true, Model: ""}
-	body := []byte(`{"model": "deepseek/deepseek-v4-flash-0731:nitro", "max_tokens": 32000, "messages": []}`)
-	got, err := rewrite(body, cfg)
+// TestRewriteFailoverTargetRemapsProfileID pins the failover safety net. A
+// nous request that fails over to openrouter arrives carrying nous's own
+// qualified id, which the sentinel path does not claim. The remap puts it on
+// an id the target actually serves.
+func TestRewriteFailoverTargetRemapsProfileID(t *testing.T) {
+	cfg := testOpenRouter()
+	cfg.FailoverTarget = true
+	body := []byte(`{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 32000, "messages": []}`)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model": "deepseek-v4-flash[1m]", "max_tokens": 32000, "messages": []}`
+	want := `{"model": "deepseek/deepseek-v4-flash-0731:nitro", "max_tokens": 32000, "messages": [], "provider": {"zdr": true, "data_collection": "deny", "ignore": ["Io Net"]}}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
 	}
 }
 
+// TestRewriteFailoverTargetStripsVariantSuffix pins that the remap keys on the
+// base id. A :nitro variant is not a failoverModel key, so without the strip an
+// id carrying one would ride through the remap untouched.
+func TestRewriteFailoverTargetStripsVariantSuffix(t *testing.T) {
+	cfg := testDirect()
+	cfg.FailoverTarget = true
+	body := []byte(`{"model": "deepseek/deepseek-v4-flash-0731:nitro", "max_tokens": 32000, "messages": []}`)
+	got, err := rewrite(body, cfg, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"model": "deepseek/deepseek-v4-flash-0731:nitro", "max_tokens": 32000, "messages": []}`
+	if string(got) != want {
+		t.Errorf("rewrite = %s\nwant %s", got, want)
+	}
+}
+
+// TestRewriteDoesNotRemapProfileLiteral pins the negative side of the
+// Anthropic-literal branch: the profile's own upstream model id already names
+// the target, matches no Anthropic substring, and is left untouched (and no
+// reasoning_effort is invented).
+
 func TestRewriteDoesNotRemapProfileLiteral(t *testing.T) {
-	cfg := profiles.Profile{Name: "nous", Model: "deepseek/deepseek-v4-flash-0731"}
+	cfg := testNous()
 	body := []byte(`{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 32000, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,15 +104,15 @@ func TestRewriteDoesNotRemapProfileLiteral(t *testing.T) {
 // placeholder injection does NOT run even on a direct profile (thinking is
 // off, the endpoint stops asking for the block).
 func TestRewriteThinkingDisabled(t *testing.T) {
-	cfg := profiles.Profile{Name: "direct", Model: "", Inject: true}
-	body := []byte(`{"model": "ds4-high", "max_tokens": 8192, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	cfg := testDirect()
+	body := []byte(`{"model": "ds4-flash-xhigh", "max_tokens": 8192, "messages": []}`)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// thinking is a newly-set key, so it appends at the end of the object
 	// (Python dict insertion order) — it does not jump before "messages".
-	want := `{"model": "ds4-high", "max_tokens": 8192, "messages": [], "thinking": {"type": "disabled"}}`
+	want := `{"model": "deepseek-v4-flash", "max_tokens": 8192, "messages": [], "thinking": {"type": "disabled"}}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
 	}
@@ -103,13 +122,13 @@ func TestRewriteThinkingDisabled(t *testing.T) {
 // cap is clamped down. The clamped value (65536) is still above the no-think
 // budget, so thinking is NOT disabled.
 func TestRewriteMaxOutClamp(t *testing.T) {
-	cfg := profiles.Profile{Name: "openrouter", Model: "deepseek/deepseek-v4-flash-0731", MaxOut: 65536}
-	body := []byte(`{"model": "ds4-max", "max_tokens": 131072, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	cfg := testOpenRouter()
+	body := []byte(`{"model": "ds4-pro-xhigh", "max_tokens": 131072, "messages": []}`)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 65536, "messages": [], "reasoning_effort": "max"}`
+	want := `{"model": "deepseek/deepseek-v4-flash-0731:nitro", "max_tokens": 65536, "messages": [], "reasoning_effort": "xhigh", "provider": {"zdr": true, "data_collection": "deny", "ignore": ["Io Net"]}}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
 	}
@@ -119,13 +138,13 @@ func TestRewriteMaxOutClamp(t *testing.T) {
 // profile inserts a thinking block at position 0 of an assistant message that
 // has a tool_use block and no thinking block.
 func TestRewriteThinkingInjection(t *testing.T) {
-	cfg := profiles.Profile{Name: "direct", Model: "", Inject: true}
-	body := []byte(`{"model": "ds4-high", "max_tokens": 32000, "messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}]}`)
-	got, err := rewrite(body, cfg)
+	cfg := testDirect()
+	body := []byte(`{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}]}`)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model": "ds4-high", "max_tokens": 32000, "messages": [{"role": "assistant", "content": [{"type": "thinking", "thinking": "(elided)", "signature": "ds4-proxy"}, {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}]}`
+	want := `{"model": "deepseek-v4-flash", "max_tokens": 32000, "messages": [{"role": "assistant", "content": [{"type": "thinking", "thinking": "(elided)", "signature": "ds4-proxy"}, {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}]}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
 	}
@@ -134,13 +153,13 @@ func TestRewriteThinkingInjection(t *testing.T) {
 // TestRewriteThinkingInjectionSkipsAlreadyThinking pins that a message with an
 // existing thinking block is left alone.
 func TestRewriteThinkingInjectionSkipsAlreadyThinking(t *testing.T) {
-	cfg := profiles.Profile{Name: "direct", Model: "", Inject: true}
-	body := []byte(`{"model": "ds4-high", "max_tokens": 32000, "messages": [{"role": "assistant", "content": [{"type": "thinking", "thinking": "real"}, {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}]}`)
-	got, err := rewrite(body, cfg)
+	cfg := testDirect()
+	body := []byte(`{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": [{"role": "assistant", "content": [{"type": "thinking", "thinking": "real"}, {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}]}`)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model": "ds4-high", "max_tokens": 32000, "messages": [{"role": "assistant", "content": [{"type": "thinking", "thinking": "real"}, {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}]}`
+	want := `{"model": "deepseek-v4-flash", "max_tokens": 32000, "messages": [{"role": "assistant", "content": [{"type": "thinking", "thinking": "real"}, {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}]}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
 	}
@@ -151,16 +170,16 @@ func TestRewriteThinkingInjectionSkipsAlreadyThinking(t *testing.T) {
 // key is present and an integer, so a classifier or minimal request keeps its
 // thinking block.
 func TestRewriteMissingMaxTokensKeepsThinking(t *testing.T) {
-	cfg := profiles.Profile{Name: "nous", Model: "deepseek/deepseek-v4-flash-0731"}
-	body := []byte(`{"model": "ds4-high", "messages": []}`)
-	got, err := rewrite(body, cfg)
+	cfg := testNous()
+	body := []byte(`{"model": "ds4-flash-xhigh", "messages": []}`)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(got), "disabled") {
 		t.Errorf("rewrite disabled thinking without max_tokens: %s", got)
 	}
-	if !strings.Contains(string(got), `"reasoning_effort": "high"`) {
+	if !strings.Contains(string(got), `"reasoning_effort": "xhigh"`) {
 		t.Errorf("reasoning_effort missing: %s", got)
 	}
 }
@@ -168,30 +187,31 @@ func TestRewriteMissingMaxTokensKeepsThinking(t *testing.T) {
 // TestRewriteZDR pins the OpenRouter ZDR block: provider gets zdr + deny, and
 // the low-context endpoint is pinned into ignore.
 func TestRewriteZDR(t *testing.T) {
-	cfg := profiles.Profile{Name: "openrouter", Model: "deepseek/deepseek-v4-flash-0731", ZDR: true}
-	body := []byte(`{"model": "ds4-low", "max_tokens": 32000, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	cfg := testOpenRouter()
+	body := []byte(`{"model": "ds4-flash-medium", "max_tokens": 32000, "messages": []}`)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 32000, "messages": [], "reasoning_effort": "low", "provider": {"zdr": true, "data_collection": "deny", "ignore": ["Io Net"]}}`
+	want := `{"model": "deepseek/deepseek-v4-flash-0731:nitro", "max_tokens": 32000, "messages": [], "reasoning_effort": "medium", "provider": {"zdr": true, "data_collection": "deny", "ignore": ["Io Net"]}}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
 	}
 }
 
-// TestRetryAttempts pins the retry distinction: ds4-high retries (3 attempts),
-// ds4-xhigh does not (1 attempt), and an unknown tier follows the subagent
-// default (3).
+// TestRetryAttempts pins the retry distinction: every tier retries in-proxy
+// (3 attempts) except the main loop's ds4-pro-xhigh, which runs its own
+// 10x-backoff retry and would double up (1 attempt). An unknown tier follows
+// the subagent default.
 func TestRetryAttempts(t *testing.T) {
 	cases := []struct {
 		tier string
 		want int
 	}{
-		{"ds4-high", 3},
-		{"ds4-max", 3},
-		{"ds4-low", 3},
-		{"ds4-xhigh", 1},
+		{"ds4-flash-xhigh", 3},
+		{"ds4-flash-medium", 3},
+		{"ds4-pro-medium", 1}, // opus: still the main loop, still exempt
+		{"ds4-pro-xhigh", 1},
 		{"", 3},
 		{"deepseek/deepseek-v4-flash-0731", 3},
 	}
@@ -234,13 +254,13 @@ func TestServeHTTPMethodGate(t *testing.T) {
 // profile skips the placeholder pass once thinking is disabled — otherwise
 // every small request would gain a pointless thinking block.
 func TestRewriteInjectDoesNotRunWhenThinkingDisabled(t *testing.T) {
-	cfg := profiles.Profile{Name: "direct", Model: "", Inject: true}
-	body := []byte(`{"model": "ds4-high", "max_tokens": 1000, "messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}]}`)
-	got, err := rewrite(body, cfg)
+	cfg := testDirect()
+	body := []byte(`{"model": "ds4-flash-xhigh", "max_tokens": 1000, "messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}]}`)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model": "ds4-high", "max_tokens": 1000, "messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}], "thinking": {"type": "disabled"}}`
+	want := `{"model": "deepseek-v4-flash", "max_tokens": 1000, "messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}], "thinking": {"type": "disabled"}}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
 	}
@@ -261,10 +281,14 @@ func TestRelayPreFirstByteStall(t *testing.T) {
 	defer up.Close()
 
 	t.Setenv("DS4_KEY_NOUS", "test")
-	cfg := profiles.Profile{Name: "nous", Upstream: up.URL, Model: "deepseek/deepseek-v4-flash-0731"}
+	cfg := withUpstream(testNous(), up.URL)
+	// No target: this asserts the origin\'s own behavior. With one
+	// configured the rescue path would serve the request instead, which
+	// is covered by the graceful-failover tests.
+	cfg.Failover = ""
 	h := NewHandler(cfg, 200*time.Millisecond) // short relay idle timeout
 
-	body := `{"model": "ds4-high", "max_tokens": 32000, "messages": []}`
+	body := `{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": []}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("authorization", "Bearer test")
 
@@ -299,10 +323,10 @@ func TestRelayMidStreamStall(t *testing.T) {
 	defer up.Close()
 
 	t.Setenv("DS4_KEY_NOUS", "test")
-	cfg := profiles.Profile{Name: "nous", Upstream: up.URL, Model: "deepseek/deepseek-v4-flash-0731"}
+	cfg := withUpstream(testNous(), up.URL)
 	h := NewHandler(cfg, 200*time.Millisecond)
 
-	body := `{"model": "ds4-high", "max_tokens": 32000, "messages": []}`
+	body := `{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": []}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("authorization", "Bearer test")
 
@@ -340,13 +364,12 @@ func TestRelayRewritesAndStreams(t *testing.T) {
 	defer up.Close()
 
 	t.Setenv("DS4_KEY_NOUS", "test")
-	cfg := profiles.Profile{Name: "nous", Upstream: up.URL, Model: "deepseek/deepseek-v4-flash-0731"}
+	cfg := withUpstream(testNous(), up.URL)
 	h := NewHandler(cfg, 0)
 
-	body := `{"model": "ds4-high", "max_tokens": 32000, "messages": []}`
+	body := `{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": []}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("authorization", "Bearer test")
-	req.Header.Set("x-ds4-require-zdr", "1")
 	req.Header.Set("x-custom", "stays")
 
 	rr := httptest.NewRecorder()
@@ -366,7 +389,7 @@ func TestRelayRewritesAndStreams(t *testing.T) {
 	if !strings.Contains(gotReqBody, `"model": "deepseek/deepseek-v4-flash-0731"`) {
 		t.Errorf("upstream model not rewritten: %s", gotReqBody)
 	}
-	if !strings.Contains(gotReqBody, `"reasoning_effort": "high"`) {
+	if !strings.Contains(gotReqBody, `"reasoning_effort": "xhigh"`) {
 		t.Errorf("reasoning_effort missing: %s", gotReqBody)
 	}
 	if gotZDR != "" {
@@ -380,7 +403,7 @@ func TestRelayRewritesAndStreams(t *testing.T) {
 }
 
 // TestRelayRetriesTransientForHigh pins the retry contract end-to-end: a
-// ds4-high request gets three attempts against an upstream that 503s twice
+// ds4-flash-xhigh request gets three attempts against an upstream that 503s twice
 // then succeeds, and only the final attempt is streamed to the client.
 func TestRelayRetriesTransientForHigh(t *testing.T) {
 	retryBackoff = 0.001
@@ -402,10 +425,10 @@ func TestRelayRetriesTransientForHigh(t *testing.T) {
 	defer up.Close()
 
 	t.Setenv("DS4_KEY_NOUS", "test")
-	cfg := profiles.Profile{Name: "nous", Upstream: up.URL, Model: "deepseek/deepseek-v4-flash-0731"}
+	cfg := withUpstream(testNous(), up.URL)
 	h := NewHandler(cfg, 0)
 
-	body := `{"model": "ds4-high", "max_tokens": 32000, "messages": []}`
+	body := `{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": []}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("authorization", "Bearer test")
 
@@ -418,7 +441,7 @@ func TestRelayRetriesTransientForHigh(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if attempts != 3 {
-		t.Errorf("attempts = %d, want 3 (ds4-high retries)", attempts)
+		t.Errorf("attempts = %d, want 3 (ds4-flash-xhigh retries)", attempts)
 	}
 }
 
@@ -444,10 +467,10 @@ func TestRelayRetries429ForHigh(t *testing.T) {
 	defer up.Close()
 
 	t.Setenv("DS4_KEY_NOUS", "test")
-	cfg := profiles.Profile{Name: "nous", Upstream: up.URL, Model: "deepseek/deepseek-v4-flash-0731"}
+	cfg := withUpstream(testNous(), up.URL)
 	h := NewHandler(cfg, 0)
 
-	body := `{"model": "ds4-high", "max_tokens": 32000, "messages": []}`
+	body := `{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": []}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("authorization", "Bearer test")
 
@@ -464,7 +487,7 @@ func TestRelayRetries429ForHigh(t *testing.T) {
 	}
 }
 
-// TestRelayDoesNotRetryXHigh pins that a ds4-xhigh request forwards the first
+// TestRelayDoesNotRetryXHigh pins that a ds4-pro-xhigh request forwards the first
 // transient response without retrying in-proxy (the main thread owns its own
 // backoff).
 func TestRelayDoesNotRetryXHigh(t *testing.T) {
@@ -479,10 +502,14 @@ func TestRelayDoesNotRetryXHigh(t *testing.T) {
 	defer up.Close()
 
 	t.Setenv("DS4_KEY_NOUS", "test")
-	cfg := profiles.Profile{Name: "nous", Upstream: up.URL, Model: "deepseek/deepseek-v4-flash-0731"}
+	cfg := withUpstream(testNous(), up.URL)
+	// No target: this asserts the origin\'s own behavior. With one
+	// configured the rescue path would serve the request instead, which
+	// is covered by the graceful-failover tests.
+	cfg.Failover = ""
 	h := NewHandler(cfg, 0)
 
-	body := `{"model": "ds4-xhigh", "max_tokens": 32000, "messages": []}`
+	body := `{"model": "ds4-pro-xhigh", "max_tokens": 32000, "messages": []}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("authorization", "Bearer test")
 
@@ -495,7 +522,7 @@ func TestRelayDoesNotRetryXHigh(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if attempts != 1 {
-		t.Errorf("attempts = %d, want 1 (ds4-xhigh does not retry)", attempts)
+		t.Errorf("attempts = %d, want 1 (ds4-pro-xhigh does not retry)", attempts)
 	}
 }
 
