@@ -10,7 +10,7 @@
 #   ./install.sh --profile direct --no-proxy   # status line only
 #
 # One proxy process serves every profile, each on its own port, so a profile's
-# settings.json is unchanged and unaware it is shared. src/proxy.py holds the
+# settings.json is unchanged and unaware it is shared. The proxy binary holds the
 # table and fixes the profile directories, so --dir is not accepted. On macOS
 # this also writes and loads a single launch agent that runs it.
 #
@@ -26,9 +26,10 @@ PROFILE="" DIR="" DRY=0 WANT_PROXY=1
 LABEL="com.strml.cc-ds4.proxy"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
-# The Go proxy binary, built from this checkout. install.sh builds it and the
-# plist ProgramArguments exec it. The Python proxy (src/proxy.py) is superseded
-# by the Go rewrite; the differential harness proved byte-compatibility.
+# The proxy binary, built from this checkout. install.sh builds it and the plist
+# ProgramArguments exec it. It replaced a Python implementation whose behaviour
+# it reproduces byte for byte, which tests/diff/run_diff.py asserted against the
+# Python original before that original was removed.
 GO_DIR="$REPO/src/go"
 GO_BIN="$GO_DIR/cmd/ds4-proxy/ds4-proxy"
 
@@ -63,7 +64,7 @@ build_go() {
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile)  PROFILE="${2:-}"; shift 2 ;;
-    --dir)      echo "--dir is not supported: src/proxy.py only serves the three fixed profile directories" >&2
+    --dir)      echo "--dir is not supported: the proxy only serves the three fixed profile directories" >&2
                 echo "  (~/.claude-ds4, ~/.claude-or-ds4, ~/.claude-nous)" >&2
                 echo "  use one of those profiles or pick a different machine" >&2
                 exit 2 ;;
@@ -109,9 +110,9 @@ valid_port() {
   [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
 }
 
-# DS4_PORT_<PROFILE> overrides the port and proxy.py is what honours it, so the
+# DS4_PORT_<PROFILE> overrides the port and the proxy binary is what honours it, so
 # effective value comes from there instead of a second copy of the mapping. The
-# hardcoded PORT above is the fallback for a --dir that proxy.py cannot see.
+# hardcoded PORT above is the fallback for a profile the binary cannot see.
 # Build the Go proxy BEFORE the --ports lookup and before any write: a
 # missing toolchain or a failed build leaves the profile files and plist
 # untouched, and the binary must exist for its --ports to be consulted.
@@ -145,7 +146,7 @@ echo "config:   $DIR/cship.toml  (from $(basename "$CONFIG"))"
 echo "memory:   $MEMLINK_DST -> $MEMLINK_SRC  (shares memory with ~/.claude)"
 echo "command:  $CMD_DST -> $CMD_SRC  (/ds4-effort sets effort mid-session)"
 if [ "$WANT_PROXY" = 1 ]; then
-  echo "proxy:    $REPO/src/proxy.py  (this profile on :$PORT; Go binary built, cutover awaits socket activation)"
+  echo "proxy:    $GO_BIN  (this profile on :$PORT)"
   echo "hook:     $HOOK_DST -> $HOOK_SRC  (SessionStart kickstart)"
   echo "base URL: http://127.0.0.1:$PORT"
   [ "$(uname)" = Darwin ] && echo "agent:    $PLIST"
@@ -241,10 +242,10 @@ echo "backup:   $BACKUP"
 if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   mkdir -p "$(dirname "$PLIST")"
 
-  # The plist carries the DS4_* knobs into the agent. src/proxy.py reads them at
+  # The plist carries the DS4_* knobs into the agent. The proxy reads them at
   # startup, and launchd starts the agent from its own environment, so anything
   # exported when install.sh runs is baked in. Sweep the whole DS4_* namespace so
-  # a knob proxy.py adds later works without a second edit here. Values are XML
+  # a knob the proxy adds later works without a second edit here. Values are XML
   # entities only; the rest of the heredoc body is not re-expanded.
   #
   # Vision spawns `claude` directly. Under launchd the bare name is not on PATH,
@@ -358,8 +359,8 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   done < <(env)
 
   # One Sockets entry per served profile, keyed by profile name because that is
-  # what proxy.py passes to launch_activate_socket. Ports come from proxy.py so
-  # PROFILES stays the only declaration of them.
+  # the name the binary passes to launch_activate_socket. Ports come from the
+  # binary's own --ports so its profile table stays the only declaration.
   PLIST_SOCKETS=""
   while read -r sock_name sock_port; do
     [ -n "$sock_name" ] || continue
@@ -375,10 +376,10 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
       <string>${sock_port}</string>
     </dict>
 "
-  done < <(/usr/bin/python3 "$REPO/src/proxy.py" --ports)
+  done < <("$GO_BIN" --ports)
 
   if [ -z "$PLIST_SOCKETS" ]; then
-    echo "agent:    proxy.py --ports listed no profiles; not writing plist" >&2
+    echo "agent:    ds4-proxy --ports listed no profiles; not writing plist" >&2
     exit 1
   fi
 
@@ -391,16 +392,14 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
   <key>Label</key>
   <string>$LABEL</string>
 
-  <!-- The Go proxy is built and smoke-tested above, but the PRODUCTION agent
-       stays on Python until the Go binary implements socket activation
-       (launch_activate_socket fd collection). Under the launchd Sockets
-       contract launchd owns the ports; the Go binary's plain net.Listen would
-       fail to bind and the port would hang rather than refuse. Flip this array
-       to "$GO_BIN" once that lands. -->
+  <!-- The Go binary is built and smoke-tested above. It collects the sockets
+       launchd binds below via launch_activate_socket, so it satisfies the
+       Sockets contract: launchd owns the ports and hands over already-listening
+       fds. Absent a launchd parent (a manual run, the differential harness) the
+       same code falls back to binding its own ports. -->
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
-    <string>$REPO/src/proxy.py</string>
+    <string>$GO_BIN</string>
   </array>
 
   <!-- These are the DS4_* knobs present when install.sh ran, e.g.
@@ -424,7 +423,7 @@ if [ "$WANT_PROXY" = 1 ] && [ "$(uname)" = Darwin ]; then
 $PLIST_ENV  </dict>
 
   <!-- launchd binds these itself and hands the listening fds to the process it
-       starts on the first connection; proxy.py collects them via
+       starts on the first connection; the proxy collects them via
        launch_activate_socket. Owning a socket is what makes the job on-demand,
        which is the point: a job with no demand criteria is reaped a couple of
        minutes after kickstart ("service inactive" then "removing service" in
@@ -517,6 +516,6 @@ starts it without the launcher. The '$LAUNCHER' function in profiles/$DOC still
 matters: it starts the proxy and registers a session so it is not reaped
 mid-use. A bare ccam alias is not enough. To start it by hand right now:
 
-  launchctl kickstart gui/$(id -u)/$LABEL     # or: python3 $REPO/src/proxy.py &
+  launchctl kickstart gui/$(id -u)/$LABEL     # or run $GO_BIN directly
 EOF
 fi
