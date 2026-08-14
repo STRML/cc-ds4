@@ -83,13 +83,22 @@ func classifierBody(data []byte, model string) ([]byte, error) {
 // matching classifier.py's ANTHROPIC_VERSION.
 const anthropicVersion = "2023-06-01"
 
-// classifierTiers is the set of sentinels the classifier can arrive under:
-// the flash family, whichever slot Claude Code maps its small fast model to.
+// classifierTiers is the set of sentinels the classifier can arrive under.
+//
+// ONE slot, not both flash tiers. Python matched "ds4-high" alone, which the
+// profile settings mapped to ANTHROPIC_DEFAULT_SONNET_MODEL — so the gate rode
+// the sonnet slot and the haiku slot was never routed off-profile. Adding the
+// haiku slot here silently widened that: Claude Code's other small fast calls
+// (conversation titles, topic-change checks, summaries) all arrive on haiku
+// under 8192 max_tokens, so every one of them would be rebuilt through the
+// whitelist and POSTed to api.anthropic.com — user content leaving a ZDR
+// upstream on or-ds4, and subscription quota spent at Sonnet rates for work
+// that was meant to run on DeepSeek.
+//
 // The pro family is the main loop and is never the gate, so excluding it keeps
 // a small pro request from ever being mistaken for one.
 var classifierTiers = map[string]bool{
-	"ds4-flash-xhigh":  true,
-	"ds4-flash-medium": true,
+	"ds4-flash-xhigh": true,
 }
 
 // isClassifier reports whether a request body is the auto-mode permission
@@ -259,12 +268,16 @@ func classifierRoute() string {
 }
 
 // ordsClassifierKeys is the whitelist the or-ds4 classifier body is rebuilt
-// from. OpenRouter's /v1/messages takes the Anthropic shape, so this is the
-// same set the Anthropic relay uses; everything ds4-specific stays behind.
-var ordsClassifierKeys = map[string]bool{
-	"max_tokens": true, "messages": true, "system": true,
-	"tools": true, "tool_choice": true, "temperature": true,
-}
+// from. OpenRouter's /v1/messages takes the Anthropic shape, so it is literally
+// the Anthropic set (Python: _ORDS4_KEYS = _ANTHROPIC_KEYS); model and thinking
+// are re-set explicitly below, exactly as Python did.
+//
+// Written as an alias rather than a copy because the narrowed copy dropped
+// "stream", and nothing caught it: a classifier that arrived streaming was
+// forwarded without it, OpenRouter answered with a single JSON message instead
+// of SSE, and the 2xx meant the relay reported success — so the gate broke with
+// no fail-open to ds4. Two lists that must agree should not be two lists.
+var ordsClassifierKeys = anthropicKeys
 
 // ORDS4Path is the messages path on the or-ds4 upstream. The profile's base
 // already ends in /api, so a leading /api here would double up.

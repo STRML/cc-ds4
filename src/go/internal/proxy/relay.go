@@ -244,6 +244,29 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	// The client-sent tier is captured before the rewrite remaps payload["model"]
 	// to the target's literal id, so a failed-over main-loop request does not
 	// look retryable.
+	// Vision replaces image blocks with text before anything else touches the
+	// body, so no image-shaped block can reach an endpoint that cannot read
+	// one. It fails open internally: every leaf failure becomes a text
+	// placeholder, and the only error it returns is a JSON parse failure, which
+	// leaves the body untouched exactly as a failed rewrite does.
+	//
+	// It runs ONCE per client request, here, ahead of the rewrite. Python ran
+	// it after, which is equivalent — swapping an image block for a text block
+	// changes nothing the rewrite looks at — but the rescue path also rebuilds
+	// from the client body, and a second applyVision there got a fresh budget
+	// and a fresh deadline. A request whose describers fail caches nothing, so
+	// that doubled both bounds this branch set out to establish: up to sixteen
+	// billed children and six minutes of held request before either upstream
+	// was contacted.
+	//
+	// Vision uses the ORIGIN profile, not the effective one: the cache lives
+	// under the profile's dir, and following the failover target would miss
+	// every cached image, re-spawn a billed child for each, and orphan the new
+	// entries when the circuit closes.
+	if visioned, verr := applyVision(body, h.cfg); verr == nil {
+		body = visioned
+	}
+
 	origTier := modelFromJSON(body)
 	// Kept for the rescue path. rewrite() below swaps the sentinel for the
 	// EFFECTIVE profile's literal model id, and a rescue re-runs the rewrite
@@ -263,19 +286,6 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 		body = rewritten
 	}
 
-	// Vision runs after the rewrite and before the body is serialized upstream,
-	// the same position as Python's call site, so no image-shaped block ever
-	// reaches an endpoint that cannot read one. It fails open internally: every
-	// leaf failure becomes a text placeholder, and the only error it returns is
-	// a JSON parse failure, which leaves the body untouched exactly as a failed
-	// rewrite does.
-	// Vision uses the ORIGIN profile, not the effective one: the cache lives
-	// under the profile's dir, and following the failover target would miss
-	// every cached image, re-spawn a billed child for each, and orphan the new
-	// entries when the circuit closes.
-	if visioned, verr := applyVision(body, h.cfg); verr == nil {
-		body = visioned
-	}
 	effURL := strings.TrimRight(effUpstream, "/") + strings.TrimPrefix(upstreamURL, strings.TrimRight(h.cfg.Upstream, "/"))
 
 	attempts := retryAttempts(origTier)
@@ -297,7 +307,12 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 			// Cloudflare rarely returns a clean 503, it just stops answering —
 			// so skipping the record here would leave the circuit shut for the
 			// one outage shape it most needs to catch.
-			h.recordConnFailure()
+			// Same rule as the status-code path below: only this profile's own
+			// upstream feeds its breaker. While failed over the dial that just
+			// failed was the target's.
+			if !failedOver {
+				h.recordConnFailure()
+			}
 			if trial {
 				h.trialClose(false)
 			}
@@ -434,9 +449,8 @@ func (h *Handler) rescueViaFailover(w http.ResponseWriter, r *http.Request, body
 	if rewritten, err := rewrite(body, target, effortOverride(h.cfg)); err == nil {
 		out = rewritten
 	}
-	if visioned, verr := applyVision(out, h.cfg); verr == nil {
-		out = visioned
-	}
+	// No applyVision here: the caller already ran it once on this body, and a
+	// second pass would hand a failed describer a fresh budget and deadline.
 	url := strings.TrimRight(target.Upstream, "/") +
 		strings.TrimPrefix(upstreamURL, strings.TrimRight(h.cfg.Upstream, "/"))
 

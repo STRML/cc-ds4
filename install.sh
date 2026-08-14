@@ -50,16 +50,28 @@ build_go() {
     echo "go $go_version is too old; need >= 1.26 (go.mod pins 1.26.5)" >&2
     exit 1
   fi
-  # CGO_ENABLED=1 is not optional on macOS. launch_activate_socket lives in
+  # CGO_ENABLED=1 is not optional where launchd is. launch_activate_socket lives in
   # libSystem and is reached through cgo; with cgo off the build silently picks
   # the stub, and because the plist sets DS4_REQUIRE_OWNED_SOCKET=1 the agent
   # then refuses to bind and exits 1 on every launch. Install would still report
   # success, since the --ports smoke check below never touches socket
   # activation. Forcing it here turns a silent three-dead-profiles outcome into
   # a build error naming the cause.
-  ( cd "$GO_DIR" && CGO_ENABLED=1 go build -o "$GO_BIN" ./cmd/ds4-proxy ) || {
+  # ...on macOS only. Linux has no launchd, so the build selects the stub
+  # regardless and cgo buys nothing — while forcing it there drags in the
+  # stdlib's cgo resolver, which needs a C compiler. A Linux user without gcc
+  # went from a working install to a build failure whose advice was to run
+  # xcode-select, a command that does not exist on their machine.
+  if [ "$(uname)" = Darwin ]; then
+    BUILD_CGO=1
+    CGO_HINT="  (needs a working C toolchain: xcode-select --install)"
+  else
+    BUILD_CGO=0
+    CGO_HINT="  (needs a working Go toolchain)"
+  fi
+  ( cd "$GO_DIR" && CGO_ENABLED="$BUILD_CGO" go build -o "$GO_BIN" ./cmd/ds4-proxy ) || {
     echo "go build of the ds4-proxy binary failed" >&2
-    echo "  (needs a working C toolchain: xcode-select --install)" >&2
+    echo "$CGO_HINT" >&2
     exit 1
   }
   # Verify the binary serves --ports before writing anything that depends on it.

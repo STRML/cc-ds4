@@ -202,7 +202,7 @@ func TestClassifierThresholdIsNotTheNoThinkKnob(t *testing.T) {
 	defer func() { nothinkBelow, classifierMaxTokens = oldNoThink, oldClassifier }()
 
 	h := &Handler{cfg: testNous()}
-	big := []byte(`{"model":"ds4-flash-medium","max_tokens":32000,"messages":[]}`)
+	big := []byte(`{"model":"ds4-flash-xhigh","max_tokens":32000,"messages":[]}`)
 
 	// A user widens the no-think window and nothing else.
 	nothinkBelow, classifierMaxTokens = 65536, 8192
@@ -249,9 +249,9 @@ func TestClassifierRouteReleasesTheTrial(t *testing.T) {
 	h := NewHandler(cfg, time.Minute)
 	armTrial(h)
 
-	// A classifier-shaped request: flash sentinel, small max_tokens.
+	// A classifier-shaped request: the sonnet-slot sentinel, small max_tokens.
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
-		strings.NewReader(`{"model":"ds4-flash-medium","max_tokens":512,"messages":[]}`))
+		strings.NewReader(`{"model":"ds4-flash-xhigh","max_tokens":512,"messages":[]}`))
 	req.Header.Set("authorization", "Bearer k")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -578,5 +578,83 @@ func TestRescueResolvesTheSentinelForTheTarget(t *testing.T) {
 	}
 	if strings.HasPrefix(gotModel, "nous/") {
 		t.Errorf("the target was sent the ORIGIN's model id %q, which it does not serve", gotModel)
+	}
+}
+
+// TestHaikuSlotIsNotTheClassifier pins the boundary back where Python had it.
+//
+// Python matched "ds4-high", which the profile settings mapped to
+// ANTHROPIC_DEFAULT_SONNET_MODEL. The haiku slot was never routed off-profile.
+// Claude Code sends its other small fast calls there — conversation titles,
+// topic-change checks, summaries — all well under the size ceiling, so treating
+// the haiku slot as the gate ships user content to api.anthropic.com: off a ZDR
+// upstream on or-ds4, and at Sonnet rates on the subscription for work that was
+// supposed to run on DeepSeek.
+func TestHaikuSlotIsNotTheClassifier(t *testing.T) {
+	h := &Handler{cfg: testNous()}
+	small := []byte(`{"model":"ds4-flash-medium","max_tokens":512,"messages":[]}`)
+	if h.isClassifier(small) {
+		t.Error("a haiku-slot request was classified as the permission gate")
+	}
+	// The slot that IS the gate still matches, or the gate would stop working.
+	if !h.isClassifier([]byte(`{"model":"ds4-flash-xhigh","max_tokens":512,"messages":[]}`)) {
+		t.Error("the sonnet-slot classifier stopped being detected")
+	}
+}
+
+// TestORDS4ClassifierKeepsStream pins the or-ds4 whitelist against the Anthropic
+// one. Dropping "stream" meant a streaming classifier was forwarded without it,
+// OpenRouter answered with a single JSON message instead of SSE, and the 2xx
+// read as success — so DS4_CLASSIFIER=zdr broke the gate with no fail-open.
+func TestORDS4ClassifierKeepsStream(t *testing.T) {
+	for k := range anthropicKeys {
+		if !ordsClassifierKeys[k] {
+			t.Errorf("or-ds4 classifier drops %q, which the Anthropic route keeps", k)
+		}
+	}
+	if !ordsClassifierKeys["stream"] {
+		t.Error(`"stream" is missing: a streaming classifier would get a non-SSE reply`)
+	}
+}
+
+// TestVisionRunsOnceAcrossARescue pins the per-request bounds against the
+// rescue path. The rescue rebuilds from the client body, so a second
+// applyVision there started a fresh budget and a fresh deadline. Describers
+// that fail cache nothing, so the same images were re-described from scratch —
+// doubling both the billed children and the wall-clock this branch set out to
+// bound, before either upstream had answered.
+func TestVisionRunsOnceAcrossARescue(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
+	bin, calls := failingClaudeBin(t)
+	t.Setenv("DS4_CLAUDE_BIN", bin)
+	t.Setenv("DS4_VISION", "1")
+
+	broke := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503) // transient: the rescue fires
+	}))
+	defer broke.Close()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"served"}`))
+	}))
+	defer target.Close()
+
+	t.Setenv("DS4_KEY_NOUS", "k")
+	t.Setenv("DS4_KEY_OPENROUTER", "ok")
+	t.Setenv("DS4_UPSTREAM_OPENROUTER", target.URL)
+
+	cfg := withUpstream(testNous(), broke.URL)
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "openrouter"
+	h := NewHandler(cfg, time.Minute)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(imageBody(maxImagesPerRequest)))
+	req.Header.Set("authorization", "Bearer k")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if n := calls(); n > maxImagesPerRequest {
+		t.Errorf("spawned %d describers for one client request, want at most the %d-image budget",
+			n, maxImagesPerRequest)
 	}
 }
