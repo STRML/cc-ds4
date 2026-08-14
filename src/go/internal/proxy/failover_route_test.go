@@ -21,6 +21,7 @@ func tripBreaker(h *Handler) {
 // TestEffectiveProfileClosedBreakerStaysHome pins the default: with the
 // circuit closed a profile serves its own upstream and nothing is remapped.
 func TestEffectiveProfileClosedBreakerStaysHome(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
 	cfg := testNous()
 	cfg.Dir = t.TempDir()
 	h := NewHandler(cfg, time.Minute)
@@ -38,6 +39,7 @@ func TestEffectiveProfileClosedBreakerStaysHome(t *testing.T) {
 // fails over to openrouter, and the returned profile must be openrouter's own
 // row, marked as a target so the remap in rewrite runs.
 func TestEffectiveProfileOpenBreakerRoutesToTarget(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
 	cfg := testNous()
 	cfg.Dir = t.TempDir()
 	cfg.Failover = "openrouter"
@@ -67,6 +69,7 @@ func TestEffectiveProfileOpenBreakerRoutesToTarget(t *testing.T) {
 // "no failover"; silently serving a zero-value Profile would point the request
 // at an empty upstream instead.
 func TestEffectiveProfileUnknownTargetStaysHome(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
 	cfg := testNous()
 	cfg.Dir = t.TempDir()
 	cfg.Failover = "no-such-profile"
@@ -86,6 +89,7 @@ func TestEffectiveProfileUnknownTargetStaysHome(t *testing.T) {
 // TestEffectiveProfileNoTargetStaysHome pins that a profile with no failover
 // configured never leaves home even with its circuit open.
 func TestEffectiveProfileNoTargetStaysHome(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
 	cfg := testOpenRouter()
 	cfg.Dir = t.TempDir()
 	cfg.Failover = ""
@@ -103,6 +107,7 @@ func TestEffectiveProfileNoTargetStaysHome(t *testing.T) {
 // profile's key would 401 every request the moment the breaker trips, turning
 // a partial outage into a total one.
 func TestFailoverUsesTargetKeyNotOwn(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
 	t.Setenv("DS4_KEY_NOUS", "key-for-nous")
 	t.Setenv("DS4_KEY_OPENROUTER", "key-for-openrouter")
 
@@ -125,6 +130,7 @@ func TestFailoverUsesTargetKeyNotOwn(t *testing.T) {
 // actually received. The unit tests above check the routing decision; this
 // checks that the decision survives the whole relay path.
 func TestFailoverEndToEndRemapsModelAndHitsTarget(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
 	var gotBody, gotAuth string
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b := make([]byte, r.ContentLength)
@@ -179,6 +185,7 @@ func TestFailoverEndToEndRemapsModelAndHitsTarget(t *testing.T) {
 // failed-over request look like a retryable subagent call, doubling up with
 // the main loop's own backoff exactly when the upstream is already struggling.
 func TestFailoverDoesNotRetryTheMainLoop(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
 	var attempts int
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts++
@@ -225,6 +232,7 @@ func breakerIsOpen(h *Handler) bool {
 // would measure the target's health and close the circuit on evidence about
 // the wrong server.
 func TestTrialRoutesToOwnUpstream(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
 	cfg := testNous()
 	cfg.Dir = t.TempDir()
 	cfg.Upstream = "https://nous.example"
@@ -322,6 +330,7 @@ func TestFailedTrialResetsTheProbeClock(t *testing.T) {
 // circuit the moment the probe streak was long enough, and a probe passing
 // during a lull is not evidence the upstream can carry load.
 func TestCleanProbeArmsButDoesNotClose(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
 	own := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
@@ -366,6 +375,7 @@ func TestCleanProbeArmsButDoesNotClose(t *testing.T) {
 // deliberately supplies none: the request must go out unauthenticated and fail,
 // never authenticated with a credential issued by someone else.
 func TestFailoverNeverLeaksTheOriginKey(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
 	var gotAuth string
 	var seen bool
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

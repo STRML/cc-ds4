@@ -44,6 +44,12 @@ type goldenCase struct {
 // bytes changed. That deserves a deliberate decision and a regenerated golden,
 // not a quiet edit to make the test pass.
 func TestRewriteMatchesPythonGolden(t *testing.T) {
+	// Hermetic: profiles.All() expands "~" against HOME, and rewrite consults
+	// <profile dir>/effort-override. Against a real home this test fails for
+	// anyone who has used /ds4-effort, reporting a drift from Python that is
+	// really just the developer's own pinned effort level.
+	installProfiles(t, "direct", "openrouter", "nous")
+
 	raw, err := os.ReadFile(filepath.Join("testdata", "rewrite_golden.json"))
 	if err != nil {
 		t.Fatalf("golden missing: %v", err)
