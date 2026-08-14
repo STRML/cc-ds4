@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -213,11 +214,24 @@ func TestFailoverDoesNotRetryTheMainLoop(t *testing.T) {
 	}
 }
 
-// armTrial puts the breaker in the state a clean probe streak leaves it in.
+// armTrial puts the breaker where a clean probe streak leaves it: a trial is
+// available but no request has taken it yet.
 func armTrial(h *Handler) {
 	h.br.mu.Lock()
 	h.br.open = true
 	h.br.trial = true
+	h.br.trialActive = false
+	h.br.mu.Unlock()
+}
+
+// claimTrial puts the breaker where effectiveProfile leaves it once a request
+// HAS taken the trial: nothing left to hand out, one request in flight whose
+// outcome decides the circuit. trialClose acts on this state, not on armTrial's.
+func claimTrial(h *Handler) {
+	h.br.mu.Lock()
+	h.br.open = true
+	h.br.trial = false
+	h.br.trialActive = true
 	h.br.mu.Unlock()
 }
 
@@ -261,7 +275,7 @@ func TestTrialCloseOnlyOnCleanRequest(t *testing.T) {
 
 	t.Run("transient trial keeps it open", func(t *testing.T) {
 		h := NewHandler(cfg, time.Minute)
-		armTrial(h)
+		claimTrial(h)
 		if closed := h.trialClose(false); closed {
 			t.Error("a failed trial closed the circuit")
 		}
@@ -272,7 +286,7 @@ func TestTrialCloseOnlyOnCleanRequest(t *testing.T) {
 
 	t.Run("clean trial closes it", func(t *testing.T) {
 		h := NewHandler(cfg, time.Minute)
-		armTrial(h)
+		claimTrial(h)
 		if closed := h.trialClose(true); !closed {
 			t.Error("a clean trial did not close the circuit")
 		}
@@ -290,7 +304,7 @@ func TestTrialIsSpentOnce(t *testing.T) {
 	cfg.Dir = t.TempDir()
 	cfg.Failover = "openrouter"
 	h := NewHandler(cfg, time.Minute)
-	armTrial(h)
+	claimTrial(h)
 
 	if !h.trialClose(true) {
 		t.Fatal("first report did not close the circuit")
@@ -309,7 +323,7 @@ func TestFailedTrialResetsTheProbeClock(t *testing.T) {
 	cfg.Dir = t.TempDir()
 	cfg.Failover = "openrouter"
 	h := NewHandler(cfg, time.Minute)
-	armTrial(h)
+	claimTrial(h)
 	h.br.mu.Lock()
 	h.br.lastProbe = time.Time{} // as if a probe were due right now
 	h.br.mu.Unlock()
@@ -454,4 +468,252 @@ func TestPrepareUpstreamHeadersDropsOriginKeyOnFailover(t *testing.T) {
 			t.Errorf("user-agent = %q, want the curl identity Cloudflare accepts", got)
 		}
 	})
+}
+
+// TestTrialIsHandedOutToExactlyOneRequest pins the reservation. During an
+// outage a burst can arrive in the window where the trial is armed. If they all
+// take it, they all bypass failover and hit the upstream that is still down,
+// each returning a hard error to its caller instead of being served by the
+// target. Only one may be spent that way.
+func TestTrialIsHandedOutToExactlyOneRequest(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
+	cfg := testNous()
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "openrouter"
+	h := NewHandler(cfg, time.Minute)
+	armTrial(h)
+
+	const n = 25
+	var mu sync.Mutex
+	trials := 0
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, _, trial := h.effectiveProfile(); trial {
+				mu.Lock()
+				trials++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if trials != 1 {
+		t.Errorf("%d of %d concurrent requests took the trial, want exactly 1", trials, n)
+	}
+}
+
+// TestFailoverIsGracefulEndToEnd pins the property that matters to whoever is
+// typing: while the profile's upstream is down, requests keep being answered.
+//
+// The breaker still learns — it trips, it probes, it arms trials — but none of
+// that is allowed to surface as a failed turn. Before this, the window before
+// the circuit tripped and every trial afterwards handed the caller a hard
+// error while a healthy target sat idle.
+func TestFailoverIsGracefulEndToEnd(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
+
+	var nousHits int
+	var mu sync.Mutex
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		nousHits++
+		mu.Unlock()
+		w.WriteHeader(503) // the profile's own upstream is down throughout
+	}))
+	defer dead.Close()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"served"}`))
+	}))
+	defer target.Close()
+
+	t.Setenv("DS4_KEY_NOUS", "k")
+	t.Setenv("DS4_KEY_OPENROUTER", "ok")
+	t.Setenv("DS4_UPSTREAM_OPENROUTER", target.URL)
+
+	cfg := withUpstream(testNous(), dead.URL)
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "openrouter"
+	h := NewHandler(cfg, time.Minute)
+
+	fire := func() (int, string) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+			strings.NewReader(`{"model":"ds4-pro-xhigh","max_tokens":32000,"messages":[]}`))
+		req.Header.Set("authorization", "Bearer k")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr.Code, rr.Body.String()
+	}
+
+	// Before the circuit trips: the origin is failing every request, and the
+	// caller must not see it.
+	for i := 0; i < 6; i++ {
+		if code, body := fire(); code != 200 {
+			t.Fatalf("request %d before trip: status %d (%s)", i, code, body)
+		}
+	}
+	if !breakerIsOpen(h) {
+		t.Fatal("the breaker never tripped; it must still learn from the failures")
+	}
+
+	// An armed trial goes back to the dead origin. It must still be answered.
+	armTrial(h)
+	before := func() int { mu.Lock(); defer mu.Unlock(); return nousHits }()
+	code, body := fire()
+	if code != 200 {
+		t.Errorf("the trial request surfaced a failure to the caller: %d (%s)", code, body)
+	}
+	after := func() int { mu.Lock(); defer mu.Unlock(); return nousHits }()
+	if after == before {
+		t.Error("the trial never reached the origin upstream, so it measured nothing")
+	}
+	if breakerIsOpen(h) != true {
+		t.Error("a failed trial closed the circuit")
+	}
+}
+
+// TestRescueDoesNotMaskATargetOutage pins the limit of the rescue. When the
+// target is failing too there is nothing to fall back to, and the caller should
+// see the origin's own error rather than a second, more confusing one.
+func TestRescueDoesNotMaskATargetOutage(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503)
+	}))
+	defer dead.Close()
+	alsoDead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(529)
+	}))
+	defer alsoDead.Close()
+
+	t.Setenv("DS4_KEY_NOUS", "k")
+	t.Setenv("DS4_KEY_OPENROUTER", "ok")
+	t.Setenv("DS4_UPSTREAM_OPENROUTER", alsoDead.URL)
+
+	cfg := withUpstream(testNous(), dead.URL)
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "openrouter"
+	h := NewHandler(cfg, time.Minute)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"ds4-pro-xhigh","max_tokens":32000,"messages":[]}`))
+	req.Header.Set("authorization", "Bearer k")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != 503 {
+		t.Errorf("status = %d, want the origin's own 503 when both are down", rr.Code)
+	}
+}
+
+// TestDrainedBalanceFailsOverInsteadOfErroring pins the case that actually bit.
+//
+// Nous refuses a paid model with a 404 whose body says the balance is too low.
+// A 404 is not transient, so before this the breaker never tripped, the request
+// never failed over, and every turn failed — while Claude Code reported it as
+// "that model may not exist", which points at the wrong thing entirely.
+func TestDrainedBalanceFailsOverInsteadOfErroring(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
+	const drained = `{"type":"error","error":{"type":"not_found_error","message":` +
+		`"Model 'deepseek/deepseek-v4-flash-0731' requires available credits. ` +
+		`Your account balance is too low to use paid models."}}`
+
+	broke := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(404)
+		_, _ = w.Write([]byte(drained))
+	}))
+	defer broke.Close()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"served"}`))
+	}))
+	defer target.Close()
+
+	t.Setenv("DS4_KEY_NOUS", "k")
+	t.Setenv("DS4_KEY_OPENROUTER", "ok")
+	t.Setenv("DS4_UPSTREAM_OPENROUTER", target.URL)
+
+	cfg := withUpstream(testNous(), broke.URL)
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "openrouter"
+	h := NewHandler(cfg, time.Minute)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"ds4-pro-xhigh","max_tokens":32000,"messages":[]}`))
+	req.Header.Set("authorization", "Bearer k")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want the target to serve it (%s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "served") {
+		t.Errorf("body = %s, want the target's reply", rr.Body.String())
+	}
+}
+
+// TestCreditExhausted pins the detection itself, including the negatives: an
+// ordinary 404 for a genuinely unknown model must NOT route away, or a typo in
+// a model name would silently spend the failover target's credits instead of
+// telling the user their model does not exist.
+func TestCreditExhausted(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{"nous drained", 404, `{"error":{"message":"requires available credits, balance too low"}}`, true},
+		{"openrouter 402", 402, `{"error":"payment required"}`, true},
+		{"403 insufficient funds", 403, `{"error":"insufficient funds"}`, true},
+		{"genuine unknown model", 404, `{"error":{"message":"model not found"}}`, false},
+		{"ordinary 400", 400, `{"error":{"message":"bad request"}}`, false},
+		{"transient 503", 503, ``, false},
+		{"success", 200, `{"ok":true}`, false},
+	} {
+		if got := creditExhausted(c.status, []byte(c.body)); got != c.want {
+			t.Errorf("%s: creditExhausted = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestDrainedBalanceWithNoTargetExplainsItself pins the message. With no
+// failover target the request cannot be served, and the reason the caller sees
+// has to be the real one: a 404 from the upstream reaches the CLI as "that
+// model may not exist", which sends the reader to check model names and keys
+// while the actual problem is an empty account.
+func TestDrainedBalanceWithNoTargetExplainsItself(t *testing.T) {
+	installProfiles(t, "nous")
+	broke := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(404)
+		_, _ = w.Write([]byte(`{"error":{"message":"requires available credits, balance too low"}}`))
+	}))
+	defer broke.Close()
+
+	t.Setenv("DS4_KEY_NOUS", "k")
+	cfg := withUpstream(testNous(), broke.URL)
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "" // nothing to fall back to
+	h := NewHandler(cfg, time.Minute)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"ds4-pro-xhigh","max_tokens":32000,"messages":[]}`))
+	req.Header.Set("authorization", "Bearer k")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != 402 {
+		t.Errorf("status = %d, want 402 (404 reads as a missing model)", rr.Code)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{"out of credit", "billing problem", "nous"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("message does not mention %q: %s", want, body)
+		}
+	}
 }

@@ -265,6 +265,19 @@ if os.environ["WANT_PROXY"] == "1":
                else OLD_SENTINELS[value])
         s["env"][key] = new
         print(f"migrated: {key} {value} -> {new}")
+
+    # The env block is not the only place a sentinel lives. The profile setup
+    # also writes a TOP-LEVEL "model" (and Claude Code writes "fallbackModel"
+    # when the picker is used), which is the session default the main loop
+    # actually sends. Migrating only env leaves that default naming a sentinel
+    # the proxy no longer knows, so the main loop 400s on every request while
+    # the subagent tiers work — which reads as a broken account, not a stale
+    # config.
+    for key in ("model", "fallbackModel"):
+        value = s.get(key)
+        if value in OLD_SENTINELS:
+            s[key] = OLD_SENTINELS[value]
+            print(f"migrated: {key} {value} -> {s[key]}")
 with open(p, "w") as fh:
     json.dump(s, fh, indent=2)
 os.chmod(p, 0o600)

@@ -26,7 +26,7 @@ func TestSentinelFamilySelectsTheModel(t *testing.T) {
 		"ds4-flash-medium": directFlash,
 	}
 	for tier, want := range cases {
-		got, err := rewrite([]byte(`{"model": "`+tier+`", "max_tokens": 32000, "messages": []}`), cfg)
+		got, err := rewrite([]byte(`{"model": "`+tier+`", "max_tokens": 32000, "messages": []}`), cfg, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -47,7 +47,7 @@ func TestSentinelEffortSetsTheDefault(t *testing.T) {
 		"ds4-flash-medium": "medium",
 	}
 	for tier, want := range cases {
-		got, err := rewrite([]byte(`{"model": "`+tier+`", "max_tokens": 32000, "messages": []}`), cfg)
+		got, err := rewrite([]byte(`{"model": "`+tier+`", "max_tokens": 32000, "messages": []}`), cfg, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -63,7 +63,7 @@ func TestSentinelEffortSetsTheDefault(t *testing.T) {
 func TestClientEffortWinsOverSentinelDefault(t *testing.T) {
 	cfg := testOpenRouter()
 	body := []byte(`{"model": "ds4-flash-medium", "reasoning_effort": "max", "max_tokens": 32000, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestClientEffortWinsOverSentinelDefault(t *testing.T) {
 func TestInvalidClientEffortFallsBackToDefault(t *testing.T) {
 	cfg := testOpenRouter()
 	body := []byte(`{"model": "ds4-flash-medium", "reasoning_effort": "banana", "max_tokens": 32000, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestInvalidClientEffortFallsBackToDefault(t *testing.T) {
 // without error, so an injected level would look like it worked.
 func TestDirectInjectsNoEffort(t *testing.T) {
 	cfg := testDirect()
-	got, err := rewrite([]byte(`{"model": "ds4-pro-xhigh", "max_tokens": 32000, "messages": []}`), cfg)
+	got, err := rewrite([]byte(`{"model": "ds4-pro-xhigh", "max_tokens": 32000, "messages": []}`), cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestZDRSkipModels(t *testing.T) {
 	cfg := testOpenRouter()
 	cfg.FamilyModels["pro"] = "deepseek/deepseek-v4-pro-0813"
 
-	skipped, err := rewrite([]byte(`{"model": "ds4-pro-xhigh", "max_tokens": 32000, "messages": []}`), cfg)
+	skipped, err := rewrite([]byte(`{"model": "ds4-pro-xhigh", "max_tokens": 32000, "messages": []}`), cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestZDRSkipModels(t *testing.T) {
 		t.Errorf("pro-0813 got a ZDR block, which its only host rejects: %s", skipped)
 	}
 
-	kept, err := rewrite([]byte(`{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": []}`), cfg)
+	kept, err := rewrite([]byte(`{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": []}`), cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestEffortOverrideFile(t *testing.T) {
 	path := filepath.Join(dir, "effort-override")
 
 	// Absent file: the sentinel default stands.
-	got, err := rewrite([]byte(`{"model": "ds4-flash-medium", "max_tokens": 32000, "messages": []}`), cfg)
+	got, err := rewrite([]byte(`{"model": "ds4-flash-medium", "max_tokens": 32000, "messages": []}`), cfg, effortOverride(cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,9 @@ func TestEffortOverrideFile(t *testing.T) {
 		{"max\n", "max"},       // picked up without a restart
 	} {
 		write(tc.file)
-		got, err := rewrite([]byte(`{"model": "ds4-flash-medium", "max_tokens": 32000, "messages": []}`), cfg)
+		// The relay resolves the pin from the origin profile and passes it in;
+		// rewrite does not read the file itself.
+		got, err := rewrite([]byte(`{"model": "ds4-flash-medium", "max_tokens": 32000, "messages": []}`), cfg, effortOverride(cfg))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -194,7 +196,7 @@ func TestEffortOverrideIsPerProfile(t *testing.T) {
 	other := testNous()
 	other.Dir = t.TempDir()
 
-	got, err := rewrite([]byte(`{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": []}`), other)
+	got, err := rewrite([]byte(`{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": []}`), other, effortOverride(other))
 	if err != nil {
 		t.Fatal(err)
 	}

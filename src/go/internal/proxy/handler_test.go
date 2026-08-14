@@ -361,7 +361,7 @@ func TestZDRDisableKnob(t *testing.T) {
 	cfg := testOpenRouter()
 	body := []byte(`{"model":"ds4-flash-xhigh","max_tokens":32000,"messages":[]}`)
 
-	on, err := rewrite(body, cfg)
+	on, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +370,7 @@ func TestZDRDisableKnob(t *testing.T) {
 	}
 
 	t.Setenv("DS4_ZDR", "0")
-	off, err := rewrite(body, cfg)
+	off, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestZDRDisableKnob(t *testing.T) {
 
 	// It never enables: nous has no ZDR support in its row.
 	t.Setenv("DS4_ZDR", "1")
-	nous, err := rewrite(body, testNous())
+	nous, err := rewrite(body, testNous(), "")
 	if err != nil {
 		t.Fatal(err)
 	}

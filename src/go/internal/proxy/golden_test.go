@@ -73,7 +73,7 @@ func TestRewriteMatchesPythonGolden(t *testing.T) {
 			t.Errorf("%s/%s: unknown profile", c.Case, c.Profile)
 			continue
 		}
-		got, err := rewrite([]byte(c.Body), cfg)
+		got, err := rewrite([]byte(c.Body), cfg, "")
 		if err != nil {
 			t.Errorf("%s/%s: rewrite: %v", c.Case, c.Profile, err)
 			continue

@@ -196,7 +196,16 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	// would break the caller's privacy contract silently, which is worse than
 	// an error they can see.
 	requires, body := requiresZDR(r, body)
-	if requires && (!h.cfg.ZDR || os.Getenv("DS4_ZDR") == "0") {
+
+	// Routing is decided before the gate, because the gate has to ask about the
+	// profile that will actually serve the request. A ZDR-capable profile with
+	// a failover target could otherwise pass the gate and then be relayed to a
+	// target that enforces nothing.
+	effCfg, effKey, trial := h.effectiveProfile()
+	failedOver := effCfg.Name != h.cfg.Name
+	effUpstream := effCfg.Upstream
+
+	if requires && (!effCfg.ZDR || !zdrEnabled()) {
 		w.Header().Set("content-type", "application/json")
 		w.WriteHeader(409)
 		io.WriteString(w, `{"error": {"message": "request requires ZDR, but this route cannot enforce it"}}`)
@@ -244,12 +253,7 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	// when the breaker is open. The rewrite uses the EFFECTIVE config so a
 	// failed-over request is remapped for the target (FAILOVER_MODEL, no
 	// reasoning_effort), exactly like Python's failover routing.
-	effCfg, effKey, trial := h.effectiveProfile()
-	// A failed-over request is being served by a different provider than the
-	// client authenticated to. That changes what may ride outbound.
-	failedOver := effCfg.Name != h.cfg.Name
-	effUpstream := effCfg.Upstream
-	rewritten, err := rewrite(body, effCfg)
+	rewritten, err := rewrite(body, effCfg, effortOverride(h.cfg))
 	if err == nil {
 		body = rewritten
 	}
@@ -303,11 +307,45 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 		// Breaker-before-stream: the outcome is recorded while the upstream
 		// is still being read. A mid-stream stall therefore counts the
 		// request as a HIT (the upstream served a response), not a strike.
-		h.recordOutcome(resp.StatusCode)
+		// A non-2xx small enough to be an error body is read so the failover
+		// decision can look at it: some refusals carry the reason in the body
+		// rather than the status (a drained balance arrives as a 404).
+		var errBody []byte
+		if resp.StatusCode >= 400 && resp.ContentLength >= 0 && resp.ContentLength < 8192 {
+			errBody, _ = io.ReadAll(io.LimitReader(resp.Body, 8192))
+			resp.Body = io.NopCloser(bytes.NewReader(errBody))
+		}
+		drained := creditExhausted(resp.StatusCode, errBody)
+		if drained {
+			// Not transient, but the upstream is unusable until someone pays.
+			h.recordConnFailure()
+		} else {
+			h.recordOutcome(resp.StatusCode)
+		}
 		if trial {
 			// This request went to the profile's own upstream to prove it can
 			// carry real load. Its result, not the probe's, closes the circuit.
-			h.trialClose(!isTransient(resp.StatusCode))
+			h.trialClose(!isTransient(resp.StatusCode) && !drained)
+		}
+		if (isTransient(resp.StatusCode) || drained) && !failedOver {
+			// The profile's own upstream is failing and a target may be able to
+			// serve this. Learning that the upstream is still down is the point
+			// of a trial, but the client should not pay for the lesson, and the
+			// same applies to the window before the breaker has tripped.
+			if h.rescueViaFailover(w, r, body, upstreamURL, origTier) {
+				resp.Body.Close()
+				return
+			}
+		}
+		if drained {
+			// Nothing could serve it. Say what is actually wrong rather than
+			// letting a 404 reach the CLI, which renders any 404 naming a model
+			// as "that model may not exist or you may not have access to it" —
+			// and sends the reader off to check model names and API keys when
+			// the real answer is that the account is out of money.
+			resp.Body.Close()
+			writeDrainedBalance(w, h.cfg.Name)
+			return
 		}
 		streamResponse(w, resp, effUpstream)
 		return
@@ -316,6 +354,9 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	// connect is the clearest possible evidence the upstream is still down.
 	if trial {
 		h.trialClose(false)
+	}
+	if !failedOver && h.rescueViaFailover(w, r, body, upstreamURL, origTier) {
+		return
 	}
 	// Pre-first-byte failure: 502 "proxy upstream failure".
 	w.Header().Set("content-type", "application/json")
@@ -326,6 +367,95 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	w.Header().Set("connection", "close")
 	w.WriteHeader(502)
 	fmt.Fprintf(w, `{"error": {"message": "proxy upstream failure: %v"}}`, lastErr)
+}
+
+// rescueViaFailover re-sends a request to the profile's failover target after
+// the profile's own upstream failed it.
+//
+// Without this, two situations hand the caller a hard error while a working
+// target sits idle: the window before the breaker has tripped, and every trial
+// request afterwards. The trial exists to find out whether the upstream
+// recovered, which is worth doing, but the answer should cost a retry rather
+// than a failed session turn.
+//
+// Returns true when the target served the request. The breaker is deliberately
+// NOT told about the outcome here: these attempts measure the target, and only
+// the profile's own upstream decides whether its circuit opens or closes.
+func (h *Handler) rescueViaFailover(w http.ResponseWriter, r *http.Request, body []byte, upstreamURL, origTier string) bool {
+	if h.cfg.Failover == "" {
+		return false
+	}
+	target, key, ok := h.failoverTarget()
+	if !ok {
+		return false
+	}
+	// Re-run the rewrite for the target: its family map, its ZDR policy, and
+	// the model remap all differ from the origin's.
+	out := body
+	if rewritten, err := rewrite(body, target, effortOverride(h.cfg)); err == nil {
+		out = rewritten
+	}
+	if visioned, verr := applyVision(out, h.cfg); verr == nil {
+		out = visioned
+	}
+	url := strings.TrimRight(target.Upstream, "/") +
+		strings.TrimPrefix(upstreamURL, strings.TrimRight(h.cfg.Upstream, "/"))
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(out))
+	if err != nil {
+		return false
+	}
+	prepareUpstreamHeaders(req.Header, r.Header, true, key, len(out))
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return false
+	}
+	if isTransient(resp.StatusCode) {
+		// The target is failing too. Let the caller surface the origin's own
+		// error rather than swapping in a second, more confusing one.
+		resp.Body.Close()
+		return false
+	}
+	streamResponse(w, resp, target.Upstream)
+	return true
+}
+
+// failoverTarget resolves this profile's failover target and key, or ok=false
+// when there is none installed.
+func (h *Handler) failoverTarget() (profiles.Profile, string, bool) {
+	for _, p := range profiles.All() {
+		if p.Name != h.cfg.Failover {
+			continue
+		}
+		if info, err := os.Stat(p.Dir); err != nil || !info.IsDir() {
+			return profiles.Profile{}, "", false
+		}
+		p.FailoverTarget = true
+		if o := os.Getenv("DS4_UPSTREAM_" + strings.ToUpper(p.Name)); o != "" {
+			p.Upstream = o
+		}
+		key := os.Getenv("DS4_KEY_" + strings.ToUpper(p.Name))
+		if key == "" {
+			key = readKeyFromDir(p.Dir)
+		}
+		return p, key, true
+	}
+	return profiles.Profile{}, "", false
+}
+
+// writeDrainedBalance answers with the reason, in the Anthropic error shape the
+// CLI already parses.
+//
+// The status is 402 rather than the upstream's 404 on purpose: 402 is what
+// "you are out of credit" means, and it does not collide with the CLI's
+// model-not-found handling.
+func writeDrainedBalance(w http.ResponseWriter, profile string) {
+	w.Header().Set("content-type", "application/json")
+	w.WriteHeader(402)
+	fmt.Fprintf(w, `{"type": "error", "error": {"type": "insufficient_credit", "message": `+
+		`"The %s profile's account is out of credit, and no failover target could serve this `+
+		`request. This is a billing problem, not a bad model name. Top up the provider account, `+
+		`or switch profiles."}}`, profile)
 }
 
 func backoff(attempt int) time.Duration {

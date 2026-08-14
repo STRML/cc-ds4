@@ -19,7 +19,7 @@ import (
 func TestRewriteSentinelToModel(t *testing.T) {
 	cfg := testNous()
 	body := []byte(`{"model": "ds4-flash-xhigh", "max_tokens": 32000, "thinking": {"type": "adaptive"}, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,7 @@ func TestRewriteSentinelToModel(t *testing.T) {
 func TestRewriteAnthropicLiteralModel(t *testing.T) {
 	cfg := testNous()
 	body := []byte(`{"model": "claude-sonnet-5", "max_tokens": 32000, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestRewriteFailoverTargetRemapsProfileID(t *testing.T) {
 	cfg := testOpenRouter()
 	cfg.FailoverTarget = true
 	body := []byte(`{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 32000, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestRewriteFailoverTargetStripsVariantSuffix(t *testing.T) {
 	cfg := testDirect()
 	cfg.FailoverTarget = true
 	body := []byte(`{"model": "deepseek/deepseek-v4-flash-0731:nitro", "max_tokens": 32000, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestRewriteFailoverTargetStripsVariantSuffix(t *testing.T) {
 func TestRewriteDoesNotRemapProfileLiteral(t *testing.T) {
 	cfg := testNous()
 	body := []byte(`{"model": "deepseek/deepseek-v4-flash-0731", "max_tokens": 32000, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestRewriteDoesNotRemapProfileLiteral(t *testing.T) {
 func TestRewriteThinkingDisabled(t *testing.T) {
 	cfg := testDirect()
 	body := []byte(`{"model": "ds4-flash-xhigh", "max_tokens": 8192, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestRewriteThinkingDisabled(t *testing.T) {
 func TestRewriteMaxOutClamp(t *testing.T) {
 	cfg := testOpenRouter()
 	body := []byte(`{"model": "ds4-pro-xhigh", "max_tokens": 131072, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestRewriteMaxOutClamp(t *testing.T) {
 func TestRewriteThinkingInjection(t *testing.T) {
 	cfg := testDirect()
 	body := []byte(`{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}]}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestRewriteThinkingInjection(t *testing.T) {
 func TestRewriteThinkingInjectionSkipsAlreadyThinking(t *testing.T) {
 	cfg := testDirect()
 	body := []byte(`{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": [{"role": "assistant", "content": [{"type": "thinking", "thinking": "real"}, {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}]}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestRewriteThinkingInjectionSkipsAlreadyThinking(t *testing.T) {
 func TestRewriteMissingMaxTokensKeepsThinking(t *testing.T) {
 	cfg := testNous()
 	body := []byte(`{"model": "ds4-flash-xhigh", "messages": []}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestRewriteMissingMaxTokensKeepsThinking(t *testing.T) {
 func TestRewriteZDR(t *testing.T) {
 	cfg := testOpenRouter()
 	body := []byte(`{"model": "ds4-flash-medium", "max_tokens": 32000, "messages": []}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestServeHTTPMethodGate(t *testing.T) {
 func TestRewriteInjectDoesNotRunWhenThinkingDisabled(t *testing.T) {
 	cfg := testDirect()
 	body := []byte(`{"model": "ds4-flash-xhigh", "max_tokens": 1000, "messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}]}`)
-	got, err := rewrite(body, cfg)
+	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,6 +282,10 @@ func TestRelayPreFirstByteStall(t *testing.T) {
 
 	t.Setenv("DS4_KEY_NOUS", "test")
 	cfg := withUpstream(testNous(), up.URL)
+	// No target: this asserts the origin\'s own behavior. With one
+	// configured the rescue path would serve the request instead, which
+	// is covered by the graceful-failover tests.
+	cfg.Failover = ""
 	h := NewHandler(cfg, 200*time.Millisecond) // short relay idle timeout
 
 	body := `{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": []}`
@@ -499,6 +503,10 @@ func TestRelayDoesNotRetryXHigh(t *testing.T) {
 
 	t.Setenv("DS4_KEY_NOUS", "test")
 	cfg := withUpstream(testNous(), up.URL)
+	// No target: this asserts the origin\'s own behavior. With one
+	// configured the rescue path would serve the request instead, which
+	// is covered by the graceful-failover tests.
+	cfg.Failover = ""
 	h := NewHandler(cfg, 0)
 
 	body := `{"model": "ds4-pro-xhigh", "max_tokens": 32000, "messages": []}`

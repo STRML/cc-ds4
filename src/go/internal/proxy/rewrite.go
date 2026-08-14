@@ -102,10 +102,15 @@ var placeholder = jsonpy.MustObj(
 	"signature", "ds4-proxy",
 )
 
-// rewrite edits a request body for one profile, mirroring rewrite() in
-// src/proxy.py. The tree is mutated through jsonpy's exported accessors and
-// re-emitted with Python-identical spacing and escaping.
-func rewrite(body []byte, cfg profiles.Profile) ([]byte, error) {
+// rewrite edits a request body for one profile. The tree is mutated through
+// jsonpy's exported accessors and re-emitted with Python-identical spacing and
+// escaping.
+//
+// effortPin is passed in rather than read from cfg because the two belong to
+// different profiles on a failed-over request: the model comes from the target,
+// but /ds4-effort pinned the ORIGIN. Reading it from cfg silently dropped a
+// user's pin the moment their profile failed over.
+func rewrite(body []byte, cfg profiles.Profile, effortPin string) ([]byte, error) {
 	return jsonpy.Marshal(body, func(root *jsonpy.OrderedValue) {
 		// Sentinel -> real model (+ reasoning_effort where the upstream honors
 		// it). The sentinel's family half selects the model from this
@@ -130,8 +135,8 @@ func rewrite(body []byte, cfg profiles.Profile) ([]byte, error) {
 			case isSentinel && cfg.Effort:
 				root.SetString("model", model)
 				effort := sen.effort
-				if pin := effortOverride(cfg); pin != "" {
-					effort = pin
+				if effortPin != "" {
+					effort = effortPin
 				}
 				// Set appends, matching Python's dict insertion order:
 				// json.dumps places reasoning_effort at the end of the object,

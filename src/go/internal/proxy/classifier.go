@@ -248,9 +248,13 @@ const ORDS4Path = "/v1/messages"
 // orDS4Endpoint builds the or-ds4 (OpenRouter ZDR) classifier request.
 //
 // It returns an empty url when the route cannot serve: the profile is not
-// installed, has no key, or its own breaker is open. That last one matters —
-// sending a security gate to an upstream already known to be failing would
-// trade a working boundary for a dead one.
+// installed, or has no key.
+//
+// Python also skipped this route when openrouter's own breaker was open. That
+// check could never fire in either implementation: the breaker is keyed on a
+// profile having a failover target, openrouter has none, so its circuit is
+// permanently closed. It is left out rather than reproduced as decoration. If
+// openrouter ever gains a target, add it back with a test that proves it fires.
 func (h *Handler) orDS4Endpoint(body []byte) (out []byte, url, key string) {
 	var ocfg profiles.Profile
 	for _, p := range profiles.All() {
@@ -271,11 +275,6 @@ func (h *Handler) orDS4Endpoint(body []byte) (out []byte, url, key string) {
 	if key == "" {
 		return nil, "", ""
 	}
-	oh := &Handler{cfg: ocfg, client: h.client}
-	if open, _ := oh.breakerOpen(); open {
-		return nil, "", ""
-	}
-
 	model := os.Getenv("DS4_ORDS4_CLASSIFIER_MODEL")
 	if model == "" {
 		model = ocfg.Model

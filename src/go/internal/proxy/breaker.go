@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -52,6 +53,29 @@ func envFloat(k string, def float64) float64 {
 	return def
 }
 
+// creditExhausted reports an upstream refusing service because the account is
+// out of money. Nous spells this as a 404 not_found_error whose message is
+// about credits, and OpenRouter as a 402.
+//
+// It is deliberately NOT treated as transient: retrying does not help, and the
+// in-proxy retry would just burn the request three times. But it IS a reason to
+// route elsewhere, and it is permanent until someone tops up — so it counts as
+// a breaker strike and triggers the failover rescue. Without this a drained
+// balance is a total outage with a healthy target sitting idle, and the CLI
+// reports it as "that model may not exist", which sends you looking in
+// completely the wrong place.
+func creditExhausted(status int, body []byte) bool {
+	if status == 402 {
+		return true
+	}
+	if status != 404 && status != 403 {
+		return false
+	}
+	b := strings.ToLower(string(body))
+	return strings.Contains(b, "credit") || strings.Contains(b, "balance") ||
+		strings.Contains(b, "insufficient funds")
+}
+
 func failoverThreshold() int {
 	t := int(float64(failoverWindow) * failoverRate)
 	if t < 1 {
@@ -68,10 +92,15 @@ type breaker struct {
 	probes    int
 	lastProbe time.Time
 	// trial is armed once the probe streak is long enough to believe the
-	// upstream is back. It routes ONE request to the profile's own upstream;
-	// that request's outcome, not the probe's, decides whether the circuit
-	// closes. See trialClose.
+	// upstream is back, and cleared the moment one request claims it. Exactly
+	// one request goes to the profile's own upstream; its outcome, not the
+	// probe's, decides whether the circuit closes. See trialClose.
 	trial bool
+	// trialActive is set while that claimed request is in flight. Without the
+	// split, every request arriving during the arm window would take the trial
+	// together, and a burst would all hit an upstream that is still down —
+	// each failing hard instead of being served by the target.
+	trialActive bool
 }
 
 // recordOutcome feeds one relay's outcome into the failover breaker. It runs
@@ -112,6 +141,11 @@ func (h *Handler) recordStrike(bad bool) {
 	if !b.open && strikes >= failoverThreshold() {
 		b.open = true
 		b.probes = 0
+		// Say so. Python printed this and Go did not, which meant a profile
+		// could silently spend an entire session on its failover target with
+		// nothing in the log to explain the change in latency or cost.
+		fmt.Printf("  [%s] failover: %d transient errors in the last %d requests, routing to %s\n",
+			h.cfg.Name, strikes, len(b.outcomes), h.cfg.Failover)
 		// Tripping resets the probe clock to now (mirroring failover_record's
 		// probed_at = time.time()): the target gets a quiet FAILOVER_RECHECK
 		// before the first re-probe. lastProbe=0 would probe the very next
@@ -146,6 +180,8 @@ func (h *Handler) breakerOpen() (open, trial bool) {
 	// It stays armed until that request reports back, so a burst does not spend
 	// the trial on several requests at once.
 	if b.trial {
+		b.trial = false      // claimed by this request
+		b.trialActive = true // and in flight until trialClose reports back
 		h.br.mu.Unlock()
 		return true, true
 	}
@@ -161,12 +197,12 @@ func (h *Handler) breakerOpen() (open, trial bool) {
 		h.br.mu.Lock()
 		b.probes++
 		if b.probes >= failoverProbesToClose {
-			// Arm, do not close. The next request proves it for real.
-			b.trial = true
+			// Arm and claim in one step: this request is the trial.
+			b.trial = false
+			b.trialActive = true
 			b.probes = 0
-			armed := b.trial
 			h.br.mu.Unlock()
-			return true, armed
+			return true, true
 		}
 		h.br.mu.Unlock()
 	} else {
@@ -185,10 +221,10 @@ func (h *Handler) trialClose(clean bool) bool {
 	h.br.mu.Lock()
 	defer h.br.mu.Unlock()
 	b := &h.br
-	if !b.trial {
+	if !b.trialActive {
 		return false
 	}
-	b.trial = false
+	b.trialActive = false
 	if !clean {
 		// Keep the circuit open and make the next attempt wait out a full
 		// recheck interval rather than retrying immediately.
@@ -198,6 +234,8 @@ func (h *Handler) trialClose(clean bool) bool {
 	b.open = false
 	b.probes = 0
 	b.outcomes = nil
+	fmt.Printf("  [%s] failover: a real request was served cleanly, back on its own upstream\n",
+		h.cfg.Name)
 	return true
 }
 
