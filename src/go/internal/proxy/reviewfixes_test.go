@@ -917,3 +917,45 @@ func TestXAPIKeyNeverReachesAnyUpstream(t *testing.T) {
 		}
 	}
 }
+
+// TestVisionDeadlineBoundsTheChild pins the deadline as a bound on the work,
+// not just a gate before it.
+//
+// exhausted() is consulted before an image is described, so the last describe
+// permitted at deadline-ε could still run for the full childTimeout — or
+// singleFlightWait as a waiter — putting the real ceiling at visionWallClock
+// plus 130s. A failing describer caches nothing, so that repeated every turn.
+func TestVisionDeadlineBoundsTheChild(t *testing.T) {
+	// A describer that hangs far longer than the budget it will be given.
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "claude")
+	// exec, so the process the context kills IS the sleeping one. Without it
+	// the shell is killed and the orphaned sleep keeps the stdout pipe open,
+	// which makes this test measure a shell artifact rather than the deadline.
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexec sleep 60\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DS4_CLAUDE_BIN", bin)
+	t.Setenv("DS4_VISION", "1")
+
+	cfg := testNous()
+	cfg.Dir = t.TempDir()
+
+	// Put the deadline two seconds out, so the child's own 120s timeout is not
+	// what stops it.
+	base := time.Now()
+	old := visionNow
+	visionNow = func() time.Time { return base }
+	defer func() { visionNow = old }()
+	oldWall := visionWallClock
+	visionWallClock = 2 * time.Second
+	defer func() { visionWallClock = oldWall }()
+
+	start := time.Now()
+	if _, err := applyVision([]byte(imageBody(1)), cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Errorf("applyVision took %v; the deadline did not bound the child", elapsed)
+	}
+}

@@ -284,7 +284,7 @@ func TestPricingBothAttemptsFail(t *testing.T) {
 // deliberately preserves: proxy.py's cache read is `if _cache.get(...)`,
 // which is falsy for an empty dict, so a successful-but-empty pricing
 // result is never treated as a cache hit. Every call re-fetches.
-func TestPricingEmptyResultNeverCached(t *testing.T) {
+func TestPricingEmptyResultIsRetriedButNotHammered(t *testing.T) {
 	up := newSpendUpstream(t, nousModel)
 	defer up.Close()
 	// A pricing block that carries none of the three tracked keys: found,
@@ -293,10 +293,31 @@ func TestPricingEmptyResultNeverCached(t *testing.T) {
 	cfg := spendTestCfg(t, up)
 	h := NewHandler(cfg, time.Minute)
 
+	// Python re-fetched an empty result on every call, because its cache read
+	// was `if _cache.get(...)` and an empty dict is falsy. Ported verbatim,
+	// that meant two upstream GETs at a 6s timeout each on EVERY status-line
+	// render, inside a 1.5s budget — so an endpoints API answering without
+	// rates showed the (proxy?) marker forever rather than once. Parity with a
+	// deleted implementation is not worth that.
 	h.pricing()
+	h.pricing()
+	h.pricing()
+	if up.endpointsHits != 1 {
+		t.Errorf("endpoints hits = %d, want 1 (an empty result must not re-fetch every render)",
+			up.endpointsHits)
+	}
+
+	// It is a hold-off, not a giveup: once the interval lapses the next call
+	// tries again, so a provider that starts answering with real rates is
+	// picked up within the TTL.
+	sc := h.spendState()
+	sc.mu.Lock()
+	sc.pricingFailedAt = time.Now().Add(-2 * creditsTTL)
+	sc.mu.Unlock()
+
 	h.pricing()
 	if up.endpointsHits != 2 {
-		t.Errorf("endpoints hits = %d, want 2 (an empty result must never cache)", up.endpointsHits)
+		t.Errorf("endpoints hits = %d, want 2 (the hold-off must expire)", up.endpointsHits)
 	}
 }
 

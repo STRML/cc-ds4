@@ -36,13 +36,7 @@ const (
 	// must not hold the request for minutes.
 	maxImagesPerRequest = 8
 	childTimeout        = 120 * time.Second
-	// A count cap alone does not bound time: the walk is serial, so the
-	// budget's worth of children each burning childTimeout is
-	// maxImagesPerRequest * childTimeout of held request — far past any client
-	// timeout, and a broken describer hits that ceiling every turn while
-	// producing nothing. The deadline is what actually bounds the wait; the
-	// count bounds the spend.
-	visionWallClock = 3 * time.Minute
+
 	// A single-flight waiter gives the winning child a little longer than its
 	// own timeout to finish and write the cache before giving up, matching
 	// Python's waiter.wait(timeout=130).
@@ -143,6 +137,38 @@ func rewriteImages(root *jsonpy.OrderedValue, cacheDir string, allowDescribe boo
 	}
 }
 
+// remaining is how long a piece of vision work may run: its own timeout, or
+// whatever is left of the request's wall-clock budget, whichever is smaller.
+//
+// Checking the deadline only before starting made the bound its comment claims
+// untrue. The last describe permitted at deadline-ε could still block for the
+// full childTimeout, or singleFlightWait as a waiter — so a hanging describer
+// held a request for visionWallClock PLUS 130s, every turn, since a failing
+// child caches nothing. A deadline that does not bound the work is a deadline
+// in name only.
+//
+// Never returns <= 0: a zero timeout would make the context expire before the
+// child is even spawned, turning "almost out of time" into "guaranteed
+// failure". The caller has already decided this attempt is worth making.
+func remaining(deadline time.Time, cap time.Duration) time.Duration {
+	left := deadline.Sub(visionNow())
+	if left <= 0 {
+		return time.Second
+	}
+	if left < cap {
+		return left
+	}
+	return cap
+}
+
+// visionWallClock bounds how long one request may spend describing images. A
+// count cap alone does not bound time: the walk is serial, so a budget's worth
+// of children each burning childTimeout is maxImagesPerRequest * childTimeout
+// of held request, far past any client timeout, and a broken describer hits
+// that ceiling every turn while producing nothing. The count bounds the spend;
+// this bounds the wait. A var so a test can prove it without waiting minutes.
+var visionWallClock = 3 * time.Minute
+
 // visionNow is time.Now, swappable so a test can prove the deadline stops the
 // walk without waiting out a real one.
 var visionNow = time.Now
@@ -192,7 +218,7 @@ func (w *visionWalk) blocks(content *jsonpy.OrderedValue) {
 			// limits out here placeholdered images the proxy already had
 			// descriptions for, which is what exhausted's own comment says
 			// must not happen.
-			replacement, spent := swapImage(block, w.cacheDir, !w.exhausted())
+			replacement, spent := swapImage(block, w.cacheDir, !w.exhausted(), w.deadline)
 			items[i] = replacement
 			// Budget is charged for time spent, not for descriptions
 			// obtained. A cache hit costs nothing and is exempt — charging it
@@ -221,7 +247,7 @@ func (w *visionWalk) blocks(content *jsonpy.OrderedValue) {
 // reference is not followed: the proxy must never open a path from the
 // request body, which would be a local arbitrary-file-read primitive on an
 // unauthenticated loopback listener. Such blocks become the placeholder.
-func swapImage(block *jsonpy.OrderedValue, cacheDir string, maySpend bool) (*jsonpy.OrderedValue, bool) {
+func swapImage(block *jsonpy.OrderedValue, cacheDir string, maySpend bool, deadline time.Time) (*jsonpy.OrderedValue, bool) {
 	src := block.Get("source")
 	if !src.IsObject() || src.Get("type").String() != "base64" {
 		return placeholderBlock(), false
@@ -235,15 +261,15 @@ func swapImage(block *jsonpy.OrderedValue, cacheDir string, maySpend bool) (*jso
 	if err != nil || len(imageBytes) == 0 {
 		return placeholderBlock(), false
 	}
-	return transcribeBytes(imageBytes, mediaType.String(), cacheDir, maySpend)
+	return transcribeBytes(imageBytes, mediaType.String(), cacheDir, maySpend, deadline)
 }
 
 // transcribeBytes describes raw image bytes and wraps the result, or falls
 // back to the placeholder. The "[image transcribed by ...]" prefix appears
 // ONLY on a real description, so nothing claims a transcription that never
 // happened.
-func transcribeBytes(imageBytes []byte, mediaType, cacheDir string, maySpend bool) (*jsonpy.OrderedValue, bool) {
-	text, spent := transcribe(imageBytes, mediaType, cacheDir, maySpend)
+func transcribeBytes(imageBytes []byte, mediaType, cacheDir string, maySpend bool, deadline time.Time) (*jsonpy.OrderedValue, bool) {
+	text, spent := transcribe(imageBytes, mediaType, cacheDir, maySpend, deadline)
 	if text == "" {
 		// transcribe never returns a real description as "": _parse_result
 		// requires the trimmed result to be non-empty, so an empty string
@@ -313,7 +339,7 @@ var (
 // entered, false for a cache hit or a reject that ran nothing. Never spawns two
 // billed children for the same (cacheDir, key): concurrent callers that miss
 // the same key wait on the winner instead of a stampede.
-func transcribe(imageBytes []byte, mediaType, cacheDir string, maySpend bool) (text string, spent bool) {
+func transcribe(imageBytes []byte, mediaType, cacheDir string, maySpend bool, deadline time.Time) (text string, spent bool) {
 	key := hashKey(imageBytes, mediaType)
 	if hit, ok := cacheGet(cacheDir, key); ok {
 		return hit, false
@@ -347,7 +373,7 @@ func transcribe(imageBytes []byte, mediaType, cacheDir string, maySpend bool) (t
 	if waiting {
 		select {
 		case <-ch:
-		case <-time.After(singleFlightWait):
+		case <-time.After(remaining(deadline, singleFlightWait)):
 		}
 		// Blocking on another request's child costs up to singleFlightWait
 		// whether or not it produced anything, so both outcomes are charged.
@@ -366,7 +392,7 @@ func transcribe(imageBytes []byte, mediaType, cacheDir string, maySpend bool) (t
 
 	// From here a child has run. Whatever it returned, the wall-clock is
 	// already spent, so every path below charges the budget.
-	result := runChild(bin, imageBytes, mediaType)
+	result := runChild(bin, imageBytes, mediaType, deadline)
 	if result == "" {
 		return "", true
 	}
@@ -381,7 +407,7 @@ func transcribe(imageBytes []byte, mediaType, cacheDir string, maySpend bool) (t
 // one file; Stdin left nil connects the child to the null device, so an
 // expired OAuth session crashes the child instead of hanging the proxy on an
 // interactive login prompt.
-func runChild(bin string, imageBytes []byte, mediaType string) string {
+func runChild(bin string, imageBytes []byte, mediaType string, deadline time.Time) string {
 	tmp, err := os.MkdirTemp("", "ds4-vision-")
 	if err != nil {
 		return ""
@@ -393,7 +419,7 @@ func runChild(bin string, imageBytes []byte, mediaType string) string {
 		return ""
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), childTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), remaining(deadline, childTimeout))
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, childArgs(imgPath)...)
 	cmd.Env = scrubbedEnv()

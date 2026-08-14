@@ -186,24 +186,40 @@ func toFloat(v any) (float64, bool) {
 // answering with real rates.
 func (h *Handler) pricing() map[string]float64 {
 	sc := h.spendState()
+	now := time.Now()
 	sc.mu.Lock()
 	if sc.hasPricing {
 		p := sc.pricing
 		sc.mu.Unlock()
 		return p
 	}
+	// A failed or empty lookup is held off for the same interval a credits
+	// failure is. Caching only success meant an endpoints-API outage re-issued
+	// BOTH lookups on every status-line render — two 6s timeouts inside a 1.5s
+	// budget — so one upstream hiccup showed the (proxy?) marker on every
+	// render instead of one. Same bug as the credits half of this handler, and
+	// the parity argument for leaving it only held while Python still existed.
+	if !sc.pricingFailedAt.IsZero() && now.Sub(sc.pricingFailedAt) < creditsTTL {
+		sc.mu.Unlock()
+		return nil
+	}
 	sc.mu.Unlock()
 
 	out, found := h.fetchPricing(h.cfg, baseModel(h.cfg))
-	if !found {
-		return nil
-	}
-	if len(out) > 0 {
+	if !found || len(out) == 0 {
 		sc.mu.Lock()
-		sc.pricing = out
-		sc.hasPricing = true
+		sc.pricingFailedAt = now
 		sc.mu.Unlock()
+		if !found {
+			return nil
+		}
+		return out
 	}
+	sc.mu.Lock()
+	sc.pricing = out
+	sc.hasPricing = true
+	sc.pricingFailedAt = time.Time{}
+	sc.mu.Unlock()
 	return out
 }
 
@@ -384,6 +400,9 @@ type spendCache struct {
 	// creditsFailedAt is when the last lookup failed, so a profile with no
 	// credits endpoint is not re-probed on every status-line render.
 	creditsFailedAt time.Time
+	// pricingFailedAt is the same guard for the pricing lookup, which costs two
+	// upstream GETs rather than one.
+	pricingFailedAt time.Time
 }
 
 // spendState returns this profile's cache. It is a Handler field: one Handler

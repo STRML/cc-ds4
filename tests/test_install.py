@@ -397,3 +397,47 @@ class MemoryLinkTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BackupModeTest(unittest.TestCase):
+    """The migration backup carries the profile's API key."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = os.path.join(self.tmp.name, "home")
+        os.makedirs(self.home)
+        self.bindir = os.path.join(self.tmp.name, "bin")
+        os.makedirs(self.bindir)
+        _write_stub(self.bindir, "launchctl", "#!/bin/sh\nexit 0\n")
+
+    def test_other_profile_backup_is_not_world_readable(self):
+        # settings.json holds env.ANTHROPIC_AUTH_TOKEN. A plain open(w) creates
+        # the backup at 0644 on a default umask, so the key was left readable
+        # by every user on the box, permanently.
+        named = os.path.join(self.home, PROFILE_DIRS["direct"])
+        other = os.path.join(self.home, PROFILE_DIRS["nous"])
+        for d in (named, other):
+            os.makedirs(d, exist_ok=True)
+        with open(os.path.join(named, "settings.json"), "w") as fh:
+            json.dump({"env": {}}, fh)
+        opath = os.path.join(other, "settings.json")
+        with open(opath, "w") as fh:
+            json.dump({"model": "ds4-xhigh",
+                       "env": {"ANTHROPIC_AUTH_TOKEN": "sk-secret"}}, fh)
+        os.chmod(opath, 0o600)
+
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env["PATH"] = self.bindir + os.pathsep + env["PATH"]
+        proc = subprocess.run(
+            ["bash", INSTALL, "--profile", "direct"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        backups = [f for f in os.listdir(other) if f.startswith("settings.json.bak-")]
+        self.assertTrue(backups, "the swept profile was rewritten with no backup")
+        for b in backups:
+            mode = os.stat(os.path.join(other, b)).st_mode & 0o777
+            self.assertEqual(mode, 0o600, f"{b} is {oct(mode)}; it holds an API key")

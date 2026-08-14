@@ -350,8 +350,14 @@ for other in os.environ.get("OTHER_SETTINGS", "").split("\n"):
         # Same backup the named profile gets. This script is rewriting a file
         # the user owns and did not ask it to touch on this run.
         try:
-            with open(other) as fh:
-                shutil.copyfileobj(fh, open(other + ".bak-" + stamp, "w"))
+            # copy2, not a plain open(w): settings.json holds the profile's
+            # provider API key, the original is 0600, and a bare open() creates
+            # the backup at 0666 & ~umask — 0644 on a default umask, so the key
+            # landed world-readable and stayed that way. copy2 carries the mode
+            # across; the chmod makes it explicit rather than inherited.
+            backup = other + ".bak-" + stamp
+            shutil.copy2(other, backup)
+            os.chmod(backup, 0o600)
         except OSError as exc:
             print(f"warning: could not back up {other}: {exc}")
             continue

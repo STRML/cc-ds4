@@ -92,15 +92,24 @@ var lowContext = []string{"Io Net"}
 // whether the placeholder-injection pass runs.
 var thinkingDisabled = jsonpy.MustObj("type", "disabled")
 
-// placeholder is proxy.py's PLACEHOLDER: a fabricated thinking block that
-// satisfies DeepSeek's history validation. DeepSeek 400s on an assistant
-// tool_use message with no thinking block, and does not validate the
-// signature, so the placeholder is enough.
-var placeholder = jsonpy.MustObj(
-	"type", "thinking",
-	"thinking", "(elided)",
-	"signature", "ds4-proxy",
-)
+// disabledThinking returns a FRESH node for insertion. thinkingDisabled above
+// is the comparison template and is never inserted: sharing one pointer across
+// every request's tree means three profiles served concurrently all hold the
+// same node, and the first Get(...).Set(...) anywhere downstream of it corrupts
+// unrelated in-flight requests and races. Nothing does that today, which is
+// exactly why it would be found late.
+func disabledThinking() *jsonpy.OrderedValue {
+	return jsonpy.MustObj("type", "disabled")
+}
+
+// placeholderThinking is the same, for the fabricated thinking block.
+func placeholderThinking() *jsonpy.OrderedValue {
+	return jsonpy.MustObj(
+		"type", "thinking",
+		"thinking", "(elided)",
+		"signature", "ds4-proxy",
+	)
+}
 
 // rewrite edits a request body for one profile. The tree is mutated through
 // jsonpy's exported accessors and re-emitted with Python-identical spacing and
@@ -216,7 +225,7 @@ func rewrite(body []byte, cfg profiles.Profile, effortPin string) ([]byte, error
 				mt = cfg.MaxOut
 			}
 			if mt <= nothinkBelow {
-				root.Set("thinking", thinkingDisabled)
+				root.Set("thinking", disabledThinking())
 			}
 		}
 
@@ -259,7 +268,7 @@ func injectMissingThinking(root *jsonpy.OrderedValue) int {
 			}
 		}
 		if hasToolUse && !hasThinking {
-			blocks.Insert(0, placeholder)
+			blocks.Insert(0, placeholderThinking())
 			n++
 		}
 	}
