@@ -1,8 +1,7 @@
-// Package profiles mirrors the PROFILES table in src/proxy.py: name, port,
-// config dir, upstream, and the per-profile rewriting flags. The table values
-// are generated into profiles_gen.go; this file holds the types and the
-// runtime pieces that resolve them against the host (home dir, directory
-// existence).
+// Package profiles owns the profile table: name, port, config dir, upstream,
+// and the per-profile rewriting flags. The values live in table.go; this file
+// holds the types and the runtime pieces that resolve them against the host
+// (home dir, directory existence).
 package profiles
 
 import (
@@ -11,37 +10,66 @@ import (
 	"strings"
 )
 
-// Profile is one entry in the PROFILES table. Python's None values become Go
-// zero values: empty strings, false, and 0 for max_out.
+// Profile is one entry in the profile table.
 type Profile struct {
 	Name     string
 	Port     int
 	Dir      string
 	Upstream string
-	Model    string
-	ZDR      bool
-	Spend    bool
-	Inject   bool
-	MaxOut   int
-	Failover string
+	// Model is the profile's single default model, used when a request
+	// carries no recognized sentinel. Empty means the endpoint takes real
+	// model names and there is nothing to fall back to.
+	Model string
+	// Effort reports whether the upstream honors reasoning_effort. The direct
+	// endpoint ignores it, so the proxy must not inject one there.
+	Effort bool
+	// FamilyModels maps a sentinel's model family ("pro"/"flash") to the model
+	// id this profile serves it with. A profile with no pro model points both
+	// families at the same id.
+	FamilyModels map[string]string
+	// ZDRSkipModels lists model-id prefixes that must not carry the ZDR
+	// provider block, for models whose only host rejects it.
+	ZDRSkipModels []string
+	ZDR           bool
+	Spend         bool
+	Inject        bool
+	MaxOut        int
+	Failover      string
 	// FailoverTarget marks a profile being used as a failover target (its
-	// requests get the FAILOVER_MODEL remap, not the profile's own rewrite).
+	// requests get the failover model remap, not the profile's own rewrite).
 	FailoverTarget bool
 }
 
 // All returns every profile with a leading "~" in Dir expanded to the user's
-// home directory. src/proxy.py sets HOME = os.path.expanduser("~") once and
-// the dir fields embed it via f-strings; we keep "~" in the generated table
-// and expand here so the table stays host-independent.
+// home directory. The table keeps a literal "~" so it stays host-independent;
+// expansion happens here.
+//
+// FamilyModels and ZDRSkipModels are copied per call. A Profile is passed by
+// value everywhere else, which makes it look immutable, but a map and a slice
+// inside it are shared references — one caller writing through either would
+// silently repoint every future request on that profile.
 func All() []Profile {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = "~"
 	}
-	out := make([]Profile, len(generatedProfiles))
-	for i, p := range generatedProfiles {
+	out := make([]Profile, len(table))
+	for i, p := range table {
 		p.Dir = expandHome(p.Dir, home)
+		p.FamilyModels = copyMap(p.FamilyModels)
+		p.ZDRSkipModels = append([]string(nil), p.ZDRSkipModels...)
 		out[i] = p
+	}
+	return out
+}
+
+func copyMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
 	}
 	return out
 }

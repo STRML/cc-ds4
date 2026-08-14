@@ -21,7 +21,7 @@ never routes lower than `high`.
 ```bash
 ~/.claude/skills/ds4-skill-family/bin/ds4-run \
   --profile {nous|openrouter} \
-  --tier {high|xhigh|max} \
+  --tier {flash-xhigh|pro-xhigh} \
   --role verify \
   --prompt-text '<claim to verify; be specific>'
 ```

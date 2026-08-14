@@ -26,12 +26,12 @@ import (
 // FAILOVER_RATE=1.0, FAILOVER_PROBES_TO_CLOSE=1 for its failover case.
 
 var (
-	failoverEnabled        = os.Getenv("DS4_FAILOVER") != "0"
-	failoverWindow         = envInt("DS4_FAILOVER_WINDOW", 12)
-	failoverRate           = envFloat("DS4_FAILOVER_RATE", 0.25)
-	failoverRecheck        = envInt("DS4_FAILOVER_RECHECK", 60)
-	failoverProbesToClose  = envInt("DS4_FAILOVER_PROBES_TO_CLOSE", 3)
-	failoverProbeTimeout   = envInt("DS4_FAILOVER_PROBE_TIMEOUT", 6)
+	failoverEnabled       = os.Getenv("DS4_FAILOVER") != "0"
+	failoverWindow        = envInt("DS4_FAILOVER_WINDOW", 12)
+	failoverRate          = envFloat("DS4_FAILOVER_RATE", 0.25)
+	failoverRecheck       = envInt("DS4_FAILOVER_RECHECK", 60)
+	failoverProbesToClose = envInt("DS4_FAILOVER_PROBES_TO_CLOSE", 3)
+	failoverProbeTimeout  = envInt("DS4_FAILOVER_PROBE_TIMEOUT", 6)
 )
 
 func envInt(k string, def int) int {

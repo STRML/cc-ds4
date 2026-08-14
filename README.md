@@ -425,7 +425,7 @@ coordinator shells out via Bash:
 ```bash
 ~/.claude/skills/ds4-skill-family/bin/ds4-run \
   --profile {nous|openrouter|direct} \
-  --tier {xhigh|max} \
+  --tier {pro-xhigh|pro-medium} \
   --role plan \
   --prompt-text 'propose an approach to X; do not write files'
 ```

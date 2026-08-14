@@ -16,7 +16,7 @@ Shells out via Bash. Read-only; no `dangerouslyDisableSandbox` needed.
 ```bash
 ~/.claude/skills/ds4-skill-family/bin/ds4-run \
   --profile {nous|openrouter} \
-  --tier {xhigh|max} \
+  --tier {pro-xhigh|pro-medium} \
   --role review \
   --timeout 300 \
   --prompt-text '<diff or review prompt>'

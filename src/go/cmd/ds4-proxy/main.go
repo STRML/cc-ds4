@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/strml/cc-ds4/src/go/internal/profiles"
 	"github.com/strml/cc-ds4/src/go/internal/proxy"
+	"github.com/strml/cc-ds4/src/go/internal/sockets"
 )
 
 func main() {
@@ -65,13 +67,42 @@ func main() {
 			}
 		}
 	}
+	// Socket activation: launchd binds the ports and hands us the listening
+	// fds, so the process can exit when idle and be restarted on the next
+	// connection without dropping it. Absent a launchd parent this falls back
+	// to plain binds, which is what the differential harness and a manual run
+	// get. The harness needs a per-profile upstream override, so it takes the
+	// plain path either way.
+	names := make([]string, 0, len(serveList))
+	ports := make(map[string]int, len(serveList))
 	for _, p := range serveList {
-		if err := serve(p); err != nil {
+		names = append(names, p.Name)
+		ports[p.Name] = p.Port
+	}
+	inherited, err := sockets.Listeners(names, ports)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "listeners: %v\n", err)
+		os.Exit(1)
+	}
+
+	for _, p := range serveList {
+		if err := serve(p, inherited[p.Name]); err != nil {
 			fmt.Fprintf(os.Stderr, "  %s FAILED to bind: %v\n", p.Name, err)
 		}
 	}
 
-	select {} // run forever; the harness kills us
+	// Idle exit. The watch reads process-wide traffic, so a request on any
+	// profile keeps every profile alive; they are one process and exit as one.
+	timeout := proxy.IdleExitFromEnv()
+	if timeout > 0 {
+		ticker := time.NewTicker(proxy.IdlePollInterval(timeout))
+		defer ticker.Stop()
+		proxy.WatchIdle(context.Background(), serveList, timeout,
+			proxy.DefaultTraffic.Activity(), time.Now, ticker.C,
+			func() { os.Exit(0) })
+		return
+	}
+	select {} // idle exit disabled: run until killed
 }
 
 func up(s string) string {
@@ -84,7 +115,10 @@ func up(s string) string {
 	return string(b)
 }
 
-func serve(p profiles.Profile) error {
+// serve starts one profile's listener. ln is the launchd-inherited listener
+// when there is one; otherwise serve binds its own, which is also the path the
+// differential harness takes because it needs a DS4_PORT_* of 0.
+func serve(p profiles.Profile, ln net.Listener) error {
 	// DS4_UPSTREAM_<NAME> overrides the upstream for the differential harness
 	// (proxy.py has no such knob; the harness points both sides at fakes).
 	upstream := p.Upstream
@@ -108,10 +142,6 @@ func serve(p profiles.Profile) error {
 		p.Failover = v
 	}
 
-	port, err := strconv.Atoi(os.Getenv("DS4_PORT_" + up(p.Name)))
-	if err != nil {
-		port = p.Port
-	}
 	// DS4_RELAY_TIMEOUT mirrors proxy.py's RELAY_TIMEOUT (idle socket timeout,
 	// default 60s; 0 disables).
 	relayTimeout := 60 * time.Second
@@ -126,9 +156,8 @@ func serve(p profiles.Profile) error {
 	pc := p
 	pc.Upstream = upstream
 
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		return err
+	if ln == nil {
+		return fmt.Errorf("no listener for %s", p.Name)
 	}
 	// The harness needs the ACTUAL bound port (a DS4_PORT_* of 0 means "pick
 	// one"); report it in Python's banner shape.

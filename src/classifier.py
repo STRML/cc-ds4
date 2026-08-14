@@ -1,6 +1,6 @@
 """Route the auto-mode permission classifier to a trusted boundary.
 
-The classifier is the small `ds4-high` + small-max_tokens + thinking-off call
+The classifier is the small flash-tier + small-max_tokens + thinking-off call
 that gates every tool call in auto mode. It is already a valid Anthropic
 Messages request, so the proxy forwards it to a provider that understands that
 shape. Two routes are offered:
@@ -38,20 +38,30 @@ def classifier_token():
     return tok or None
 
 
+# The sentinels the classifier can arrive under: the flash family, whichever
+# slot Claude Code maps its small fast model to. The pro family is the main
+# loop and is never the classifier, so excluding it here costs nothing and
+# keeps a 200k-token main-loop request from ever being mistaken for the gate.
+# tests/test_classifier.py pins this against proxy.EFFORT so a future sentinel
+# rename cannot silently orphan the detector.
+CLASSIFIER_TIERS = ("ds4-flash-xhigh", "ds4-flash-medium")
+
+
 def is_classifier(payload, nothink_below):
     """True when the request is the auto-mode permission classifier.
 
-    The classifier is ds4-high + a small max_tokens. It arrives with adaptive
-    thinking (the proxy's own rewrite disables thinking at small max_tokens,
-    so requiring thinking-off here would never match — the relay runs before
-    that rewrite). Subagents also run at ds4-high but at a much larger
-    max_tokens, so the size threshold separates them. The threshold is passed
-    in (proxy's NOTHINK_BELOW) so the detector stays config-independent.
+    The classifier is a flash-family sentinel + a small max_tokens. It arrives
+    with adaptive thinking (the proxy's own rewrite disables thinking at small
+    max_tokens, so requiring thinking-off here would never match — the relay
+    runs before that rewrite). Subagents ride the same flash sentinel but at a
+    much larger max_tokens, so the size threshold separates them. The threshold
+    is passed in (proxy's NOTHINK_BELOW) so the detector stays
+    config-independent.
     """
     if not isinstance(payload, dict):
         return False
     mt = payload.get("max_tokens")
-    return (payload.get("model") == "ds4-high"
+    return (payload.get("model") in CLASSIFIER_TIERS
             and isinstance(mt, int)
             and mt <= nothink_below)
 

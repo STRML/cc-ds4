@@ -437,7 +437,15 @@ def _go_boot_error():
 
     The harness execs a prebuilt binary (GO_BIN) rather than `go run` per case
     — `go run`'s compile/link contending across repeated boots (and after a
-    cache clean) is what made the Go boot hang. Build it once here.
+    cache clean) is what made the Go boot hang. Build it once here, per run.
+
+    The build is unconditional. It used to be skipped when GO_BIN already
+    existed, which meant every edit to the Go proxy after the first run was
+    compared as if it had never been made: the harness reported GREEN against a
+    stale binary. A differential harness that cannot notice the change you just
+    made is worse than no harness, because it is trusted. `go build` is
+    incremental, so rebuilding every run costs almost nothing when nothing
+    changed.
     """
     if not GO_ACCEPTS_FAKE_UPSTREAMS:
         return "the Go proxy is not yet wired to accept fake upstreams (Task 9)"
@@ -445,12 +453,11 @@ def _go_boot_error():
         return f"no Go cmd dir at {GO_MAIN}"
     if not shutil.which("go"):
         return "no 'go' on PATH to build the binary"
-    if not os.path.exists(GO_BIN):
-        _log(f"  building Go binary: {GO_BIN}")
-        r = subprocess.run(["go", "build", "-o", GO_BIN, "."],
-                           cwd=GO_MAIN, capture_output=True)
-        if r.returncode != 0:
-            return f"go build failed: {r.stderr.decode(errors='replace')}"
+    _log(f"  building Go binary: {GO_BIN}")
+    r = subprocess.run(["go", "build", "-o", GO_BIN, "."],
+                       cwd=GO_MAIN, capture_output=True)
+    if r.returncode != 0:
+        return f"go build failed: {r.stderr.decode(errors='replace')}"
     return None
 
 

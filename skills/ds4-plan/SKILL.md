@@ -16,7 +16,7 @@ Run the CLI via a Bash call (read-only; the sandbox is fine):
 ```bash
 ~/.claude/skills/ds4-skill-family/bin/ds4-run \
   --profile {nous|openrouter|direct} \
-  --tier {xhigh|max} \
+  --tier {pro-xhigh|pro-medium} \
   --role plan \
   [--model <id>] [--timeout <secs>] \
   --prompt-text '<what to plan>'

@@ -44,13 +44,13 @@ class TokenTest(unittest.TestCase):
 
 
 class DetectTest(unittest.TestCase):
-    """The classifier signature is ds4-high + small max_tokens + thinking off."""
+    """The classifier signature is a flash sentinel + small max_tokens."""
 
     def payload(self, **kw):
         # The classifier arrives with adaptive thinking (Claude Code sends it
         # on every request); the proxy's rewrite disables it at small
         # max_tokens, so the real inbound shape has thinking adaptive.
-        p = {"model": "ds4-high", "max_tokens": 2112,
+        p = {"model": "ds4-flash-xhigh", "max_tokens": 2112,
              "thinking": {"type": "adaptive", "display": "omitted"},
              "messages": [{"role": "user", "content": "hi"}]}
         p.update(kw)
@@ -58,9 +58,24 @@ class DetectTest(unittest.TestCase):
 
     def test_classifier_signature_is_detected(self):
         # The classifier arrives with adaptive thinking; the proxy's rewrite
-        # disables it at small max_tokens. So the detector keys on ds4-high +
-        # small max_tokens, NOT on thinking-off.
+        # disables it at small max_tokens. So the detector keys on the flash
+        # sentinel + small max_tokens, NOT on thinking-off.
         self.assertTrue(c.is_classifier(self.payload(), 8192))
+
+    def test_either_flash_sentinel_is_detected(self):
+        """Claude Code maps its small fast model to the sonnet or the haiku
+        slot depending on build; both are flash, so both must match."""
+        for tier in ("ds4-flash-xhigh", "ds4-flash-medium"):
+            self.assertTrue(c.is_classifier(self.payload(model=tier), 8192), tier)
+
+    def test_detector_tiers_track_the_proxy_sentinel_table(self):
+        """A sentinel rename that misses this module silently disables the
+        gate — the classifier stops being detected and every tool call is
+        judged on ds4 instead of the trusted route. Pin the names."""
+        import proxy
+        for tier in c.CLASSIFIER_TIERS:
+            self.assertIn(tier, proxy.EFFORT, tier)
+            self.assertEqual(proxy.EFFORT[tier][0], "flash", tier)
 
     def test_classifier_with_adaptive_thinking_is_detected(self):
         self.assertTrue(c.is_classifier(
@@ -69,12 +84,17 @@ class DetectTest(unittest.TestCase):
 
     def test_main_loop_is_not_classifier(self):
         self.assertFalse(c.is_classifier(
-            self.payload(model="ds4-xhigh", max_tokens=32000,
+            self.payload(model="ds4-pro-xhigh", max_tokens=32000,
                          thinking={"type": "adaptive", "display": "omitted"}),
             8192))
 
+    def test_pro_family_is_never_the_classifier(self):
+        """Even a small pro request is the main loop, not the gate."""
+        for tier in ("ds4-pro-xhigh", "ds4-pro-medium"):
+            self.assertFalse(c.is_classifier(self.payload(model=tier), 8192), tier)
+
     def test_subagent_is_not_classifier(self):
-        # ds4-high but large max_tokens — the subagent tier
+        # the same flash sentinel but large max_tokens — the subagent tier
         self.assertFalse(c.is_classifier(
             self.payload(max_tokens=32000, thinking={"type": "adaptive"}), 8192))
 

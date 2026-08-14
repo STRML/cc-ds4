@@ -12,7 +12,7 @@ Effort: `ds4-max`→max, `ds4-xhigh`→xhigh, `ds4-high`→high, `ds4-low`→low
 
 The `direct` profile takes no sentinel tier and no effort override: the endpoint
 exposes only `deepseek-v4-flash[1m]`/`deepseek-v4-pro[1m]` and ignores
-`reasoning_effort`. A `--tier max` on direct silently runs flash with thinking on.
+`reasoning_effort`. A `--tier pro-xhigh` on direct silently runs flash with thinking on.
 Use or-ds4/nous when the task needs effort control or a verify floor.
 
 When `nous` fails over to `direct`, every tier runs `deepseek-v4-flash[1m]` —

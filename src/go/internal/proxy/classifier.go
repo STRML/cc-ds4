@@ -82,15 +82,28 @@ func classifierBody(data []byte, model string) ([]byte, error) {
 // matching classifier.py's ANTHROPIC_VERSION.
 const anthropicVersion = "2023-06-01"
 
+// classifierTiers is the set of sentinels the classifier can arrive under:
+// the flash family, whichever slot Claude Code maps its small fast model to.
+// The pro family is the main loop and is never the gate, so excluding it keeps
+// a small pro request from ever being mistaken for one.
+var classifierTiers = map[string]bool{
+	"ds4-flash-xhigh":  true,
+	"ds4-flash-medium": true,
+}
+
 // isClassifier reports whether a request body is the auto-mode permission
-// classifier: model ds4-high with a max_tokens at or below the no-think
-// budget. Subagents also run at ds4-high but at a much larger max_tokens, so
-// the size threshold separates them. The ok return from PeekModelMaxTokens
-// enforces Python's isinstance(mt, int) guard — a request with NO max_tokens
-// is not a classifier, even though a missing value would be 0.
+// classifier: a flash-family sentinel with a max_tokens at or below the
+// no-think budget. Subagents ride the same sentinel but at a much larger
+// max_tokens, so the size threshold separates them. The ok return from
+// PeekModelMaxTokens enforces the integer guard — a request with NO max_tokens
+// is not a classifier, even though a missing value would read as 0.
+//
+// Getting this wrong fails silently in the dangerous direction: an undetected
+// classifier is judged on ds4 instead of the trusted route, with nothing in
+// the log to say so. TestClassifierTiersAreFlashSentinels pins the names.
 func (h *Handler) isClassifier(body []byte) bool {
 	model, mt, ok := jsonpy.PeekModelMaxTokens(body)
-	return ok && model == "ds4-high" && mt <= nothinkBelow
+	return ok && classifierTiers[model] && mt <= nothinkBelow
 }
 
 // isZDRRequest mirrors request_requires_zdr in proxy.py: the proxy-local

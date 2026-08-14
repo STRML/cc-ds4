@@ -13,7 +13,7 @@ import urllib.request
 # realpath, not abspath: install.sh symlinks this into the profile directory and
 # abspath would resolve the bootstrap against the profile instead of the checkout.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-from statusline.common import Statusline, base_model, effort_override, selftest_payload  # noqa: E402
+from statusline.common import Statusline, base_model, effort_override, selftest_payload, sentinel_effort  # noqa: E402
 
 # deepseek/deepseek-v4-flash-0731 list prices, USD per token. Only a fallback —
 # the proxy serves live figures pulled from OpenRouter's endpoints API.
@@ -61,7 +61,7 @@ class OpenRouterStatusline(Statusline):
         if not isinstance(m, dict):
             return
         sentinel = m.get("id") or ""
-        tier = sentinel[4:] if sentinel.startswith("ds4-") else ""
+        tier = sentinel_effort(sentinel)
         override = effort_override(self.profile)
         if override and tier and override != tier:
             tier = f"{tier}->{override}"
@@ -75,7 +75,7 @@ class OpenRouterStatusline(Statusline):
 
 def main():
     sl = OpenRouterStatusline()
-    sl.run(selftest_payload("ds4-xhigh") if sys.stdin.isatty() else None)
+    sl.run(selftest_payload("ds4-pro-xhigh") if sys.stdin.isatty() else None)
 
 
 if __name__ == "__main__":

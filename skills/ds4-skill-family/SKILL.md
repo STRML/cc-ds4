@@ -24,7 +24,7 @@ If running from inside the cc-ds4 checkout the repo-relative path works:
 ```bash
 ~/.claude/skills/ds4-skill-family/bin/ds4-run \
   --profile {direct|openrouter|nous} \
-  --tier {max|xhigh|high|low} \
+  --tier {pro-xhigh|pro-medium|flash-xhigh|flash-medium} \
   --role {plan|implement|verify|review} \
   [--model <id>] [--timeout <secs>] \
   --prompt-text '<prompt>'

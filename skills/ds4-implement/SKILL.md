@@ -22,7 +22,7 @@ writes and auto-denies anything outside `--add-dir`.
 ```bash
 ~/.claude/skills/ds4-skill-family/bin/ds4-run \
   --profile {nous|openrouter} \
-  --tier high \
+  --tier flash-xhigh \
   --role implement \
   --prompt-text '<task description>'
 ```

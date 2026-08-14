@@ -77,3 +77,76 @@ func TestEffectivePortJunkOverride(t *testing.T) {
 		}
 	}
 }
+
+// TestFamilyModelsAreDeclaredForEveryProfile pins that every profile can
+// resolve both sentinel families. A missing key would fall through to Model,
+// which on direct is empty — the sentinel would then reach the upstream
+// verbatim and 400.
+func TestFamilyModelsAreDeclaredForEveryProfile(t *testing.T) {
+	for _, p := range All() {
+		for _, fam := range []string{"pro", "flash"} {
+			if p.FamilyModels[fam] == "" {
+				t.Fatalf("%s: no model for the %q family", p.Name, fam)
+			}
+		}
+	}
+}
+
+// TestOnlyDirectServesPro pins the asymmetry that keeps biting: OpenRouter has
+// no working host for pro-0813 and Nous lists no deepseek pro at all, so both
+// point the pro family at their flash id. Only direct actually serves pro.
+func TestOnlyDirectServesPro(t *testing.T) {
+	for _, p := range All() {
+		pro, flash := p.FamilyModels["pro"], p.FamilyModels["flash"]
+		if p.Name == "direct" {
+			if pro == flash {
+				t.Fatalf("direct: pro and flash resolve to the same id %q", pro)
+			}
+			continue
+		}
+		if pro != flash {
+			t.Fatalf("%s: pro = %q, flash = %q; neither upstream serves pro",
+				p.Name, pro, flash)
+		}
+	}
+}
+
+// TestNousFailsOverToOpenRouter pins the target. Failing over to direct bills
+// per-token on api.deepseek.com and is what drained the balance; openrouter's
+// flash is the cheap target.
+func TestNousFailsOverToOpenRouter(t *testing.T) {
+	for _, p := range All() {
+		switch p.Name {
+		case "nous":
+			if p.Failover != "openrouter" {
+				t.Fatalf("nous failover = %q, want openrouter", p.Failover)
+			}
+		default:
+			if p.Failover != "" {
+				t.Fatalf("%s failover = %q, want none", p.Name, p.Failover)
+			}
+		}
+	}
+}
+
+// TestAllReturnsIndependentCopies pins the defensive copy in All(). Profile is
+// passed by value, which reads as immutable, but FamilyModels and
+// ZDRSkipModels are reference types — a caller writing through either would
+// repoint every later request on that profile.
+func TestAllReturnsIndependentCopies(t *testing.T) {
+	first := All()
+	for i := range first {
+		first[i].FamilyModels["pro"] = "poisoned"
+		first[i].ZDRSkipModels = append(first[i].ZDRSkipModels, "poisoned")
+	}
+	for _, p := range All() {
+		if p.FamilyModels["pro"] == "poisoned" {
+			t.Fatalf("%s: FamilyModels leaked a mutation from a prior All()", p.Name)
+		}
+		for _, s := range p.ZDRSkipModels {
+			if s == "poisoned" {
+				t.Fatalf("%s: ZDRSkipModels leaked a mutation", p.Name)
+			}
+		}
+	}
+}

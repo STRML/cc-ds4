@@ -52,16 +52,23 @@ var skipRelayHeaders = map[string]bool{
 }
 
 // retryAttempts returns how many upstream attempts a request gets. It mirrors
-// should_retry in proxy.py: only subagent tiers (anything but ds4-xhigh)
-// retry in-proxy. The main thread (ds4-xhigh) has its own 10x-backoff retry,
-// so retrying here would double up. A non-sentinel model (a failed-over
-// request, or a raw Anthropic model) is treated as retryable by the same
-// rule.
+// mainLoopTier is the sentinel the main thread sends (ANTHROPIC_MODEL). It
+// runs its own 10x-backoff retry, so an in-proxy retry would double up.
+const mainLoopTier = "ds4-pro-xhigh"
+
+// retryAttempts decides how hard to retry a transient upstream error. Subagent
+// tiers die with "Execution error" on a raw forward, so the proxy absorbs the
+// error for them; the main loop retries itself. A non-sentinel model (a
+// failed-over request, or a raw Anthropic model) is retryable by the same rule.
+//
+// origTier is the client-sent model captured before any failover remap: the
+// remap rewrites the body's model to the target's literal id, which would
+// otherwise make every failed-over request look like a subagent call.
 func retryAttempts(origTier string) int {
 	if retryAttemptsOverride > 0 {
 		return retryAttemptsOverride
 	}
-	if origTier != "ds4-xhigh" {
+	if origTier != mainLoopTier {
 		return 3
 	}
 	return 1
@@ -155,6 +162,16 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	rewritten, err := rewrite(body, effCfg)
 	if err == nil {
 		body = rewritten
+	}
+
+	// Vision runs after the rewrite and before the body is serialized upstream,
+	// the same position as Python's call site, so no image-shaped block ever
+	// reaches an endpoint that cannot read one. It fails open internally: every
+	// leaf failure becomes a text placeholder, and the only error it returns is
+	// a JSON parse failure, which leaves the body untouched exactly as a failed
+	// rewrite does.
+	if visioned, verr := applyVision(body, effCfg); verr == nil {
+		body = visioned
 	}
 	effURL := strings.TrimRight(effUpstream, "/") + strings.TrimPrefix(upstreamURL, strings.TrimRight(h.cfg.Upstream, "/"))
 

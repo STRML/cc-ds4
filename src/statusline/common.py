@@ -49,6 +49,22 @@ def base_model(name):
     return re.sub(r"\[[^\]]*\]$", "", name or "").strip()
 
 
+def sentinel_effort(sentinel):
+    """'ds4-flash-xhigh' -> 'xhigh'. Anything else -> ''.
+
+    The sentinel encodes family and effort (ds4-<family>-<effort>). Only the
+    effort belongs in the label: the family is already visible in the resolved
+    model name the proxy reports, and on a profile with no pro model the family
+    half of the sentinel is a lie (nous serves flash for both). Keeping the
+    effort alone also makes the '->override' comparison below compare like
+    with like.
+    """
+    if not isinstance(sentinel, str) or not sentinel.startswith("ds4-"):
+        return ""
+    effort = sentinel.rsplit("-", 1)[-1]
+    return effort if effort in EFFORT_LEVELS else ""
+
+
 def effort_override(profile):
     """Return the proxy's effective per-profile effort override, if valid."""
     try:

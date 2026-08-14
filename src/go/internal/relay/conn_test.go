@@ -166,11 +166,12 @@ func TestIdleConnTimesOutWhenIdle(t *testing.T) {
 // absolute deadline armed at dial, the second read would time out.
 //
 // Timing (timeout = 1s):
-//   t=0s    deadline armed -> t=1s
-//   t=800ms server writes "a" (just inside the initial deadline)
-//   t=800ms first read completes, deadline reset -> t=1.8s
-//   t=1.4s  server writes "b" (past the initial 1s deadline)
-//   t=1.4s  second read succeeds (within the reset 1.8s deadline)
+//
+//	t=0s    deadline armed -> t=1s
+//	t=800ms server writes "a" (just inside the initial deadline)
+//	t=800ms first read completes, deadline reset -> t=1.8s
+//	t=1.4s  server writes "b" (past the initial 1s deadline)
+//	t=1.4s  second read succeeds (within the reset 1.8s deadline)
 //
 // Margins are 200-400ms so the test is not timing-flaky.
 func TestIdleConnKeepsAliveAcrossIdleGap(t *testing.T) {

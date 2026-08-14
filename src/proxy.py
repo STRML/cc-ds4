@@ -79,7 +79,18 @@ IDLE_EXIT = int(os.environ.get("DS4_IDLE_EXIT", "900"))
 # pass, and is harmless on the endpoints that never cared.
 UA = os.environ.get("DS4_UA", "curl/8.4.0")
 
-EFFORT = {"ds4-max": "max", "ds4-xhigh": "xhigh", "ds4-high": "high", "ds4-low": "low"}
+# Sentinel -> (model family, default effort). The family selects the model
+# (pro vs flash); the default effort applies only when neither /effort nor the
+# per-profile effort-override says otherwise — /effort is meant to actually
+# change how hard the model thinks, not be clobbered by the sentinel.
+#   fable -> ds4-pro-xhigh   opus -> ds4-pro-medium
+#   sonnet -> ds4-flash-xhigh   haiku -> ds4-flash-medium
+EFFORT = {
+    "ds4-pro-xhigh": ("pro", "xhigh"),
+    "ds4-pro-medium": ("pro", "medium"),
+    "ds4-flash-xhigh": ("flash", "xhigh"),
+    "ds4-flash-medium": ("flash", "medium"),
+}
 
 # Transient upstream statuses to retry in the relay. A raw forward of any of
 # these kills the whole claude -p process ("Execution error") and loses the
@@ -120,15 +131,16 @@ def _is_anthropic_model(name):
 def should_retry(tier):
     """True when a transient error on this request should be retried in-proxy.
 
-    The main thread (ds4-xhigh) has its own 10x-backoff retry, so retrying here
-    would double up. Subagent tiers (ds4-high/max/low via CLAUDE_CODE_SUBAGENT_MODEL)
-    die with "Execution error" on a raw forward, so they need the proxy guard.
+    The main thread (ds4-pro-xhigh) has its own 10x-backoff retry, so retrying
+    here would double up. Subagent tiers (everything else via
+    CLAUDE_CODE_SUBAGENT_MODEL) die with "Execution error" on a raw forward, so
+    they need the proxy guard.
 
     tier is the client-sent model, captured before any failover remap: the
     remap rewrites payload['model'] to the target's literal id, which would
     make every failed-over request look like a retryable subagent call.
     """
-    return isinstance(tier, str) and tier != "ds4-xhigh"
+    return isinstance(tier, str) and tier != "ds4-pro-xhigh"
 
 
 # ── circuit-breaker failover ────────────────────────────────────────────────
@@ -167,11 +179,16 @@ FAILOVER_PROBES_TO_CLOSE = int(os.environ.get("DS4_FAILOVER_PROBES_TO_CLOSE", "3
 # it — a pro main-loop request on the target would bill more than the nous
 # trip it is trying to ride out (observed: 121 trips in 25h).
 FAILOVER_MODEL = {
-    "ds4-max": "deepseek-v4-flash[1m]",
-    "ds4-xhigh": "deepseek-v4-flash[1m]",
-    "ds4-high": "deepseek-v4-flash[1m]",
-    "ds4-low": "deepseek-v4-flash[1m]",
-    "deepseek/deepseek-v4-flash-0731": "deepseek-v4-flash[1m]",
+    # The failover target is openrouter (nous -> openrouter). This is the
+    # safety net when rewrite() left a sentinel untouched on a failed-over
+    # request. It mirrors the family split but pro has no usable OR host, so
+    # both families resolve to flash here. Keep the base id: the suffix is
+    # stripped before this lookup.
+    "ds4-pro-xhigh": "deepseek/deepseek-v4-flash-0731:nitro",
+    "ds4-pro-medium": "deepseek/deepseek-v4-flash-0731:nitro",
+    "ds4-flash-xhigh": "deepseek/deepseek-v4-flash-0731:nitro",
+    "ds4-flash-medium": "deepseek/deepseek-v4-flash-0731:nitro",
+    "deepseek/deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash-0731:nitro",
 }
 
 # name -> {"outcomes": deque(bool, maxlen=window), "open": bool,
@@ -301,6 +318,12 @@ def failover_record(name, cfg, eff_cfg, up, last_err):
     with _lock:
         st = _failover_state(name)
         st["outcomes"].append(bad)
+        if os.environ.get("DS4_FAILOVER_DEBUG") == "1":
+            st_extra = (f"up={up.status if up else None} "
+                        f"err={type(last_err).__name__ if last_err else None} "
+                        f"code={last_err.code if isinstance(last_err, urllib.error.HTTPError) else '-'} "
+                        f"bad={bad} window={sum(st['outcomes'])}/{len(st['outcomes'])}")
+            print(f"  [{name}] failover-record: {st_extra}", flush=True)
         if not st["open"] and sum(st["outcomes"]) >= _failover_threshold():
             st["open"] = True
             st["opened_at"] = time.time()
@@ -354,8 +377,18 @@ PROFILES = {
         "dir": f"{HOME}/.claude-ds4",
         "upstream": "https://api.deepseek.com/anthropic",
         # DeepSeek's own endpoint takes real model names and ignores
-        # reasoning_effort, so no sentinel rewriting here.
+        # reasoning_effort, so no sentinel rewriting here. The tier map still
+        # applies: opus/fable ride pro, sonnet/haiku ride flash.
         "model": None,
+        # api.deepseek.com only accepts the bare ids — the versioned -0813/-0731
+        # names are an OpenRouter convention and 400 here. Opus/fable ride pro,
+        # sonnet/haiku ride flash. It ignores reasoning_effort, so effort=False.
+        "effort": False,
+        "family_models": {
+            "pro": "deepseek-v4-pro",
+            "flash": "deepseek-v4-flash",
+        },
+        "zdr_skip_models": [],
         "zdr": False,
         "spend": False,
         # The direct profile is the failover target for the 1M profiles. Its
@@ -379,7 +412,21 @@ PROFILES = {
         # suffix rides the model id into every request; exact-id consumers
         # (pricing, failover remap) strip it back to the base id first.
         "model": "deepseek/deepseek-v4-flash-0731:nitro",
+        # Opus/fable ride the pinned pro-0813, sonnet/haiku stay on flash-0731.
+        # The :nitro suffix floats to the fastest provider for each. Never the
+        # unversioned originals — OR has them but they'd bill differently.
+        "effort": True,
+        # pro-0813 has no usable host on OR (404), so the pro family falls back
+        # to flash here; direct is the only place pro actually serves.
+        "family_models": {
+            "pro": "deepseek/deepseek-v4-flash-0731:nitro",
+            "flash": "deepseek/deepseek-v4-flash-0731:nitro",
+        },
         "zdr": True,
+        # pro-0813's only host is DeepSeek itself, which rejects the ZDR block
+        # (404 "no endpoints matching data policy"). Skip ZDR for it so the pro
+        # tier can serve; the flash tiers keep ZDR. Env-overridable at install.
+        "zdr_skip_models": ["deepseek/deepseek-v4-pro-0813"],
         "spend": True,
         # Smallest max_completion_tokens in the ZDR pool (DeepInfra, Io Net).
         "max_out": 65536,
@@ -391,6 +438,15 @@ PROFILES = {
         "dir": f"{HOME}/.claude-nous",
         "upstream": "https://inference-api.nousresearch.com",
         "model": "deepseek/deepseek-v4-flash-0731",
+        # Nous has no pro model (its /v1/models lists no deepseek at all), so
+        # every tier falls back to the flash model above. A failed-over nous
+        # request rides openrouter's tier_models (pro for opus/fable).
+        "effort": True,
+        "family_models": {
+            "pro": "deepseek/deepseek-v4-flash-0731",
+            "flash": "deepseek/deepseek-v4-flash-0731",
+        },
+        "zdr_skip_models": [],
         # Nous 403s any provider block, zdr or otherwise.
         "zdr": False,
         "spend": True,
@@ -398,9 +454,10 @@ PROFILES = {
         "inject": False,
         # Nous sits behind Cloudflare and has real bad stretches (524/503).
         # When its transient errors pass the breaker threshold, its requests
-        # are served by the direct profile until a probe recovers. See the
-        # failover section below.
-        "failover": "direct",
+        # are served by the openrouter profile (cheap flash) until a probe
+        # recovers, not direct (billed per-token on api.deepseek.com and the
+        # thing that emptied the balance). See the failover section below.
+        "failover": "openrouter",
     },
 }
 
@@ -475,24 +532,46 @@ def rewrite(payload, cfg):
     """Edit payload in place for one profile. Returns a log line, or None."""
     notes = []
 
-    if cfg["model"]:
-        tier = payload.get("model")
-        effort = EFFORT.get(tier)
-        if effort:
-            payload["model"] = cfg["model"]
-            payload["reasoning_effort"] = effort_override(cfg) or effort
-            notes.append(f"{tier} -> {cfg['model']} effort={payload['reasoning_effort']}")
+    tier = payload.get("model")
+    # Sentinel encodes (model family, default effort): ds4-pro-* / ds4-flash-*.
+    # The family picks the model (pro vs flash) on this profile; the default
+    # effort only applies when the client didn't send one. /effort sends
+    # reasoning_effort in the body — honor it so the knob actually changes how
+    # hard the model thinks instead of being clobbered by the sentinel.
+    family, default_effort = EFFORT.get(tier, (None, None)) if isinstance(tier, str) else (None, None)
+    model = (cfg.get("family_models") or {}).get(family) or cfg["model"]
+    if model:
+        client_effort = payload.get("reasoning_effort")
+        if client_effort in EFFORT_LEVELS:
+            # /effort or an explicit request — it wins over the sentinel default.
+            payload["model"] = model
+            payload["reasoning_effort"] = client_effort
+            notes.append(f"{tier} -> {model} effort={client_effort}")
+        elif default_effort and cfg.get("effort", True):
+            payload["model"] = model
+            payload["reasoning_effort"] = effort_override(cfg) or default_effort
+            notes.append(f"{tier} -> {model} effort={payload['reasoning_effort']}")
+        elif default_effort:
+            # The profile injects no effort (direct ignores reasoning_effort);
+            # just swap the sentinel for the model id.
+            payload["model"] = model
+            notes.append(f"{tier} -> {model}")
         elif isinstance(tier, str) and _is_anthropic_model(tier):
             # A literal Anthropic model (sonnet, claude-sonnet-4-5, opus, ...)
             # bypassed the sentinel system and would bill real Anthropic rates on
             # this profile's upstream. The /model picker can expose these via
             # gateway discovery; rewrite defensively so nothing leaks.
-            payload["model"] = cfg["model"]
-            notes.append(f"{tier} -> {cfg['model']} (literal Anthropic model)")
+            payload["model"] = model
+            notes.append(f"{tier} -> {model} (literal Anthropic model)")
 
     # DS4_ZDR only ever disables ZDR, never enables it on a profile whose table
-    # row does not support it (Nous 403s any provider block at all).
-    if cfg["zdr"] and os.environ.get("DS4_ZDR", "1") != "0":
+    # row does not support it (Nous 403s any provider block at all). Some
+    # models have no ZDR-capable host (pro-0813's only endpoint is DeepSeek
+    # itself, which rejects the block), so a profile can list model prefixes to
+    # skip ZDR for — a configurable escape hatch, not a silent default.
+    skip_zdr = cfg.get("zdr_skip_models") or ()
+    if (cfg["zdr"] and os.environ.get("DS4_ZDR", "1") != "0"
+            and not any(payload.get("model", "").startswith(p) for p in skip_zdr)):
         prov = payload.get("provider")
         if not isinstance(prov, dict):
             prov = {}
