@@ -36,7 +36,19 @@ type OrderedValue struct {
 func parseOrdered(data []byte) (*OrderedValue, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
-	return parseValue(dec)
+	v, err := parseValue(dec)
+	if err != nil {
+		return nil, err
+	}
+	// Reject anything after the top-level value. Go's decoder stops at the end
+	// of the first value and ignores the rest, so `{"a":1} junk` would parse,
+	// re-emit as `{"a":1}`, and silently forward a body the client did not
+	// send. CPython raises "Extra data" here, and an error is the safer answer
+	// anyway: the caller leaves the original bytes alone when Marshal fails.
+	if dec.More() {
+		return nil, fmt.Errorf("unexpected data after top-level JSON value")
+	}
+	return v, nil
 }
 
 func parseValue(dec *json.Decoder) (*OrderedValue, error) {
