@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"fmt"
+	"github.com/strml/cc-ds4/src/go/internal/profiles"
 	"net/http"
 	"os"
 	"strings"
@@ -106,12 +107,40 @@ func (h *Handler) isClassifier(body []byte) bool {
 	return ok && classifierTiers[model] && mt <= nothinkBelow
 }
 
-// isZDRRequest mirrors request_requires_zdr in proxy.py: the proxy-local
-// per-request ZDR demand arrives in the x-ds4-require-zdr header. A
-// ZDR-demanding request must stay on a route that can enforce the block; the
-// classifier relay's whitelist cannot carry it, so such a request is excluded
-// from the classifier path (proxy.py:828-835). The body-field variant
-// (ds4_require_zdr) is handled by a later task.
+// requiresZDR reports the proxy-local per-request ZDR demand and strips it from
+// the body.
+//
+// The demand arrives either as the x-ds4-require-zdr header or as a
+// ds4_require_zdr body field. Both are proxy-local: the field is not part of
+// the Messages API, so it is removed before the body goes upstream rather than
+// forwarded as an unknown key.
+//
+// The returned body is the one to forward. On a parse failure the original is
+// returned unchanged, and the header alone decides.
+func requiresZDR(r *http.Request, body []byte) (bool, []byte) {
+	hdr := strings.ToLower(strings.TrimSpace(r.Header.Get("x-ds4-require-zdr")))
+	required := hdr == "1" || hdr == "true" || hdr == "yes"
+
+	var sawField bool
+	stripped, err := jsonpy.Marshal(body, func(root *jsonpy.OrderedValue) {
+		if v := root.Get(zdrRequireField); v != nil {
+			// Python used `payload.pop(field, False) is True`, so only a real
+			// boolean true counts. Raw() is the literal as written, which keeps
+			// the string "true" and the number 1 from passing as a demand.
+			sawField = v.Raw() == "true"
+			root.Delete(zdrRequireField)
+		}
+	})
+	if err != nil {
+		return required, body
+	}
+	return required || sawField, stripped
+}
+
+// zdrRequireField is the body-field spelling of the per-request ZDR demand.
+const zdrRequireField = "ds4_require_zdr"
+
+// isZDRRequest is the header-only check, used where the body is not in hand.
 func isZDRRequest(r *http.Request) bool {
 	hdr := strings.ToLower(strings.TrimSpace(r.Header.Get("x-ds4-require-zdr")))
 	return hdr == "1" || hdr == "true" || hdr == "yes"
@@ -143,6 +172,14 @@ func (h *Handler) relayClassifier(body []byte, endpoint string, token string, w 
 	if err != nil {
 		return false
 	}
+	return h.sendClassifier(raw, endpoint, token, w)
+}
+
+// sendClassifier ships an already-built classifier body. The or-ds4 route
+// builds its own (different whitelist, its own model, and a ZDR block that the
+// Anthropic rebuild would strip), so the send half is shared and the body half
+// is not.
+func (h *Handler) sendClassifier(raw []byte, endpoint string, token string, w http.ResponseWriter) bool {
 	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(raw))
 	if err != nil {
 		return false
@@ -176,4 +213,89 @@ func (h *Handler) relayClassifier(body []byte, endpoint string, token string, w 
 		resp.Body.Close()
 		return false
 	}
+}
+
+// classifierRoute is DS4_CLASSIFIER: which boundary the auto-mode permission
+// gate is judged at. "anthropic" (default) sends it to the subscription, "zdr"
+// to the or-ds4 OpenRouter route with the ZDR block forced on, and "ds4" keeps
+// it on the profile's own upstream.
+//
+// This is a trust-boundary knob, not a performance one: "ds4" is an explicit
+// decision to let DeepSeek judge whether a tool call is safe, and "zdr" an
+// explicit decision to avoid both DeepSeek and the subscription. Ignoring it
+// would silently override the user on the one setting where that matters most.
+func classifierRoute() string {
+	switch r := os.Getenv("DS4_CLASSIFIER"); r {
+	case "zdr", "ds4", "anthropic":
+		return r
+	default:
+		return "anthropic"
+	}
+}
+
+// ordsClassifierKeys is the whitelist the or-ds4 classifier body is rebuilt
+// from. OpenRouter's /v1/messages takes the Anthropic shape, so this is the
+// same set the Anthropic relay uses; everything ds4-specific stays behind.
+var ordsClassifierKeys = map[string]bool{
+	"max_tokens": true, "messages": true, "system": true,
+	"tools": true, "tool_choice": true, "temperature": true,
+}
+
+// ORDS4Path is the messages path on the or-ds4 upstream. The profile's base
+// already ends in /api, so a leading /api here would double up.
+const ORDS4Path = "/v1/messages"
+
+// orDS4Endpoint builds the or-ds4 (OpenRouter ZDR) classifier request.
+//
+// It returns an empty url when the route cannot serve: the profile is not
+// installed, has no key, or its own breaker is open. That last one matters —
+// sending a security gate to an upstream already known to be failing would
+// trade a working boundary for a dead one.
+func (h *Handler) orDS4Endpoint(body []byte) (out []byte, url, key string) {
+	var ocfg profiles.Profile
+	for _, p := range profiles.All() {
+		if p.Name == "openrouter" {
+			ocfg = p
+		}
+	}
+	if ocfg.Name == "" {
+		return nil, "", ""
+	}
+	if info, err := os.Stat(ocfg.Dir); err != nil || !info.IsDir() {
+		return nil, "", ""
+	}
+	key = os.Getenv("DS4_KEY_OPENROUTER")
+	if key == "" {
+		key = readKeyFromDir(ocfg.Dir)
+	}
+	if key == "" {
+		return nil, "", ""
+	}
+	oh := &Handler{cfg: ocfg, client: h.client}
+	if open, _ := oh.breakerOpen(); open {
+		return nil, "", ""
+	}
+
+	model := os.Getenv("DS4_ORDS4_CLASSIFIER_MODEL")
+	if model == "" {
+		model = ocfg.Model
+	}
+	rebuilt, err := jsonpy.Marshal(body, func(root *jsonpy.OrderedValue) {
+		for _, k := range root.Keys() {
+			if !ordsClassifierKeys[k] {
+				root.Delete(k)
+			}
+		}
+		root.SetString("model", model)
+		// Thinking is forced off: the classifier is always small and no
+		// provider serving V4 implements Claude Code's adaptive thinking.
+		root.Set("thinking", jsonpy.MustObj("type", "disabled"))
+		// The ZDR block is the reason this route exists, so it is not optional
+		// here the way the per-profile DS4_ZDR gate is.
+		root.Set("provider", jsonpy.MustObj("zdr", true, "data_collection", "deny"))
+	})
+	if err != nil {
+		return nil, "", ""
+	}
+	return rebuilt, strings.TrimRight(ocfg.Upstream, "/") + ORDS4Path, key
 }

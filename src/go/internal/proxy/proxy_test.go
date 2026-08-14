@@ -366,7 +366,6 @@ func TestRelayRewritesAndStreams(t *testing.T) {
 	body := `{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": []}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	req.Header.Set("authorization", "Bearer test")
-	req.Header.Set("x-ds4-require-zdr", "1")
 	req.Header.Set("x-custom", "stays")
 
 	rr := httptest.NewRecorder()

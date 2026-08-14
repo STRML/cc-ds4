@@ -48,8 +48,8 @@ class Esc(unittest.TestCase):
 
 class Payload(unittest.TestCase):
     def test_payload_shape(self):
-        p = json.loads(render_svg.payload("ds4-xhigh"))
-        self.assertEqual(p["model"]["id"], "ds4-xhigh")
+        p = json.loads(render_svg.payload("ds4-pro-xhigh"))
+        self.assertEqual(p["model"]["id"], "ds4-pro-xhigh")
         self.assertEqual(p["session_id"], "readme")
 
 

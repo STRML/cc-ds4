@@ -356,3 +356,92 @@ func TestCleanProbeArmsButDoesNotClose(t *testing.T) {
 		t.Fatal("probes alone closed the circuit; only a real request may do that")
 	}
 }
+
+// TestFailoverNeverLeaksTheOriginKey pins the credential boundary in the case
+// that actually leaks: the failover target has NO key of its own.
+//
+// The client authenticates to the proxy with the origin profile's key. When the
+// proxy then talks to a different provider, that credential must not ride
+// along. With a target key present the override masks the bug, so this test
+// deliberately supplies none: the request must go out unauthenticated and fail,
+// never authenticated with a credential issued by someone else.
+func TestFailoverNeverLeaksTheOriginKey(t *testing.T) {
+	var gotAuth string
+	var seen bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth, seen = r.Header.Get("authorization"), true
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer target.Close()
+
+	t.Setenv("DS4_UPSTREAM_OPENROUTER", target.URL)
+	t.Setenv("DS4_KEY_NOUS", "origin-secret")
+	t.Setenv("DS4_KEY_OPENROUTER", "") // the target has no key here
+
+	cfg := testNous()
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "openrouter"
+	h := NewHandler(cfg, time.Minute)
+	tripBreaker(h)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model": "ds4-flash-xhigh", "max_tokens": 32000, "messages": []}`))
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("authorization", "Bearer origin-secret")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if !seen {
+		t.Fatal("the failover target never received the request")
+	}
+	if strings.Contains(gotAuth, "origin-secret") {
+		t.Errorf("the origin profile's key was sent to another provider: %q", gotAuth)
+	}
+}
+
+// TestPrepareUpstreamHeadersDropsOriginKeyOnFailover pins the credential
+// boundary at the level it is decided. End-to-end this is masked whenever the
+// failover target has a key of its own, which it usually does; the leak is the
+// case where it does not, and that is what this covers.
+func TestPrepareUpstreamHeadersDropsOriginKeyOnFailover(t *testing.T) {
+	client := http.Header{}
+	client.Set("authorization", "Bearer origin-secret")
+	client.Set("x-custom", "keep me")
+
+	t.Run("failed over with no target key", func(t *testing.T) {
+		out := http.Header{}
+		prepareUpstreamHeaders(out, client, true, "", 3)
+		if got := out.Get("authorization"); got != "" {
+			t.Errorf("authorization = %q, want it dropped", got)
+		}
+		if out.Get("x-custom") != "keep me" {
+			t.Error("an unrelated client header was dropped")
+		}
+	})
+
+	t.Run("failed over with a target key", func(t *testing.T) {
+		out := http.Header{}
+		prepareUpstreamHeaders(out, client, true, "target-key", 3)
+		if got := out.Get("authorization"); got != "Bearer target-key" {
+			t.Errorf("authorization = %q, want the target's own key", got)
+		}
+	})
+
+	t.Run("not failed over keeps the profile key", func(t *testing.T) {
+		out := http.Header{}
+		prepareUpstreamHeaders(out, client, false, "own-key", 3)
+		if got := out.Get("authorization"); got != "Bearer own-key" {
+			t.Errorf("authorization = %q, want the profile's own key", got)
+		}
+	})
+
+	t.Run("user agent always overrides the client", func(t *testing.T) {
+		withUA := http.Header{}
+		withUA.Set("user-agent", "claude-cli/2.0")
+		out := http.Header{}
+		prepareUpstreamHeaders(out, withUA, false, "k", 3)
+		if got := out.Get("user-agent"); got != "curl/8.4.0" {
+			t.Errorf("user-agent = %q, want the curl identity Cloudflare accepts", got)
+		}
+	})
+}

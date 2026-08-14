@@ -363,10 +363,18 @@ func TestWatchIdle_ActivityResetsTimerAcrossTicks(t *testing.T) {
 		close(done)
 	}()
 
-	// Several ticks with activity staying fresh: never exits, even though
-	// the clock keeps advancing past the timeout.
+	// Several ticks with activity staying fresh: never exits, even though the
+	// clock keeps advancing past the timeout.
+	//
+	// State is advanced BEFORE each send, never after. Advancing after the
+	// rendezvous races WatchIdle's evaluation of the tick it just accepted:
+	// the two reads of clock and last-seen are separate, so a write landing
+	// between them can make one tick look stale and trip an exit the test then
+	// reports as a stuck loop.
 	for i := 0; i < 3; i++ {
 		mu.Lock()
+		now = now.Add(90 * time.Second) // clock past the timeout
+		lastSeen = now                  // but activity is just as recent
 		sendAt := now
 		mu.Unlock()
 		select {
@@ -374,10 +382,6 @@ func TestWatchIdle_ActivityResetsTimerAcrossTicks(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("WatchIdle did not accept a tick (loop appears stuck)")
 		}
-		mu.Lock()
-		now = now.Add(90 * time.Second) // advance the clock past the timeout
-		lastSeen = now                  // activity stays fresh
-		mu.Unlock()
 	}
 	select {
 	case <-shutdownCalled:
@@ -385,20 +389,26 @@ func TestWatchIdle_ActivityResetsTimerAcrossTicks(t *testing.T) {
 	default:
 	}
 
-	// Now activity goes stale: the next tick should exit.
+	// Now activity goes stale: an exit is due.
+	//
+	// The send and the shutdown are raced deliberately rather than sequenced.
+	// Going stale can be observed by the tick still being evaluated from the
+	// loop above, in which case WatchIdle exits without ever reading another
+	// tick and a plain send would block forever. Either ordering is correct
+	// behavior; only "no shutdown at all" is a failure.
 	mu.Lock()
 	lastSeen = now.Add(-2 * time.Minute)
 	sendAt := now
 	mu.Unlock()
-	select {
-	case tick <- sendAt:
-	case <-time.After(5 * time.Second):
-		t.Fatal("WatchIdle did not accept the final tick")
-	}
-	select {
-	case <-shutdownCalled:
-	case <-time.After(5 * time.Second):
-		t.Fatal("shutdown did not run once activity went stale")
+	deadline := time.After(5 * time.Second)
+	for shutdown := false; !shutdown; {
+		select {
+		case tick <- sendAt:
+		case <-shutdownCalled:
+			shutdown = true
+		case <-deadline:
+			t.Fatal("shutdown did not run once activity went stale")
+		}
 	}
 	select {
 	case <-done:

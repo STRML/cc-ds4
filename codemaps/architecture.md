@@ -54,8 +54,8 @@ output from `internal/proxy/testdata/rewrite_golden.json`.
   (direct only).
 - **Relay** (`relay.go`): forwards upstream, retries transient statuses, streams
   back. Only the main-loop tier is exempt from in-proxy retry.
-- **Classifier routing** (`classifier.go`): the auto-mode permission classifier
-  is forwarded to the Anthropic subscription by default. `DS4_CLASSIFIER=zdr`
+- **Classifier routing** (`classifier.go`): `DS4_CLASSIFIER` picks where the
+  auto-mode permission gate is judged. The classifier `DS4_CLASSIFIER=zdr`
   routes it to the or-ds4 OpenRouter route; `DS4_CLASSIFIER=ds4` keeps it on the
   profile's own upstream. zdr fails open to Anthropic, then ds4. Detection keys
   on the flash-family sentinels plus a small `max_tokens`.
@@ -119,9 +119,10 @@ into this proxy. Only `source.type == base64` is transcribed; `file` and `url`
 become placeholders, so a request body can never make the proxy open a path.
 Cached by content hash. `DS4_VISION=0` restores pass-through.
 
-The per-request image budget is declared but does not gate anything; see
-STRML/cc-ds4#42. The Go port reproduces that deliberately rather than diverging
-from the behavior that shipped.
+The per-request image budget is enforced: past the cap an image becomes a
+placeholder without spawning a child. Cache hits do not spend budget, or a
+cached prefix would permanently placeholder everything after it. The Python
+original declared the cap and never consulted it (STRML/cc-ds4#42).
 
 ## Statusline (src/statusline/)
 

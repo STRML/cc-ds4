@@ -80,6 +80,43 @@ func retryAttempts(origTier string) int {
 	return 3
 }
 
+// relayUserAgent is the User-Agent every relayed request carries. Python sent
+// this unconditionally for the same reason: Cloudflare 403s Claude Code's own
+// agent string in front of some upstreams.
+func relayUserAgent() string {
+	if ua := os.Getenv("DS4_UA"); ua != "" {
+		return ua
+	}
+	return "curl/8.4.0"
+}
+
+// prepareUpstreamHeaders builds the outbound header set from the client's.
+//
+// failedOver is the security-relevant input. The client authenticated to this
+// proxy with the ORIGIN profile's key, and on a failed-over request the proxy
+// is talking to a different provider. That credential must not ride along, so
+// it is dropped before the target's own key (if any) is applied. Dropping it
+// unconditionally means a target with no key sends an unauthenticated request
+// that fails, rather than one authenticated with someone else's secret.
+func prepareUpstreamHeaders(dst, src http.Header, failedOver bool, key string, bodyLen int) {
+	copyHeaders(dst, src)
+	if failedOver {
+		dst.Del("authorization")
+	}
+	dst.Set("content-length", strconv.Itoa(bodyLen))
+	if dst.Get("content-type") == "" {
+		dst.Set("content-type", "application/json")
+	}
+	// Unconditional, overriding the client's. Claude Code always sends its own
+	// User-Agent and Cloudflare 403s it in front of Nous Portal and
+	// intermittently OpenRouter, so setting this only when absent would never
+	// actually apply.
+	dst.Set("user-agent", relayUserAgent())
+	if key != "" {
+		dst.Set("authorization", "Bearer "+key)
+	}
+}
+
 // modelFromJSON extracts the top-level "model" string from a request body
 // without rewriting it. Marshal runs the closure between parse and emit with
 // the tree intact, so it sees the client-sent tier before any rewrite remaps
@@ -121,6 +158,14 @@ func (h *Handler) effectiveProfile() (profiles.Profile, string, bool) {
 	target := h.cfg.Failover
 	for _, p := range profiles.All() {
 		if p.Name == target {
+			// A target that is not installed here has no key and no config.
+			// Routing to it turns the profile's own recoverable transient
+			// errors into an unauthenticated 401 storm against another
+			// provider, so failover is moot: stay home and keep failing in the
+			// way the caller can actually understand.
+			if info, err := os.Stat(p.Dir); err != nil || !info.IsDir() {
+				return h.cfg, key, false
+			}
 			eff = p
 			eff.FailoverTarget = true
 			if o := os.Getenv("DS4_UPSTREAM_" + strings.ToUpper(p.Name)); o != "" {
@@ -145,11 +190,48 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	// is excluded: its ZDR provider block is injected by rewrite() on the ZDR
 	// route, and the classifier relay's whitelist cannot carry it — the marker
 	// is a routing demand, so the request stays on its ZDR route.
-	if !isZDRRequest(r) && h.isClassifier(body) {
-		if tok := classifierToken(); tok != "" {
-			if h.relayClassifier(body, classifierUpstream, tok, w) {
-				return
+	// The per-request ZDR demand is proxy-local: read it, strip it from the
+	// body, and refuse outright if this route cannot honor it. Failing closed
+	// is the whole point. Forwarding such a request to an upstream with no ZDR
+	// would break the caller's privacy contract silently, which is worse than
+	// an error they can see.
+	requires, body := requiresZDR(r, body)
+	if requires && (!h.cfg.ZDR || os.Getenv("DS4_ZDR") == "0") {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(409)
+		io.WriteString(w, `{"error": {"message": "request requires ZDR, but this route cannot enforce it"}}`)
+		return
+	}
+
+	// The classifier gates every tool call in auto mode. It is already an
+	// Anthropic-shaped request, so it is forwarded BEFORE the ds4 rewrite
+	// touches it. DS4_CLASSIFIER picks the route: anthropic (default) sends it
+	// to the subscription, zdr sends it to the or-ds4 OpenRouter route with the
+	// ZDR block on, and ds4 keeps it on this profile's own upstream. Every
+	// route fails open to ds4 so auto mode never bricks.
+	//
+	// A request that demands ZDR is excluded: the classifier relay rebuilds the
+	// body from a whitelist that cannot carry the provider block, and the
+	// marker is a routing demand, so it stays on its ZDR route.
+	if !requires && h.isClassifier(body) {
+		switch classifierRoute() {
+		case "zdr":
+			if body2, url, key := h.orDS4Endpoint(body); url != "" {
+				if h.sendClassifier(body2, url, key, w) {
+					return
+				}
 			}
+			// zdr falls open to anthropic, then ds4 (Python's order).
+			fallthrough
+		case "anthropic":
+			if tok := classifierToken(); tok != "" {
+				if h.relayClassifier(body, classifierUpstream, tok, w) {
+					return
+				}
+			}
+		case "ds4":
+			// Explicit opt-out: the gate stays on this profile's own upstream
+			// even when a subscription token is present.
 		}
 	}
 
@@ -163,6 +245,9 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	// failed-over request is remapped for the target (FAILOVER_MODEL, no
 	// reasoning_effort), exactly like Python's failover routing.
 	effCfg, effKey, trial := h.effectiveProfile()
+	// A failed-over request is being served by a different provider than the
+	// client authenticated to. That changes what may ride outbound.
+	failedOver := effCfg.Name != h.cfg.Name
 	effUpstream := effCfg.Upstream
 	rewritten, err := rewrite(body, effCfg)
 	if err == nil {
@@ -175,7 +260,11 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	// leaf failure becomes a text placeholder, and the only error it returns is
 	// a JSON parse failure, which leaves the body untouched exactly as a failed
 	// rewrite does.
-	if visioned, verr := applyVision(body, effCfg); verr == nil {
+	// Vision uses the ORIGIN profile, not the effective one: the cache lives
+	// under the profile's dir, and following the failover target would miss
+	// every cached image, re-spawn a billed child for each, and orphan the new
+	// entries when the circuit closes.
+	if visioned, verr := applyVision(body, h.cfg); verr == nil {
 		body = visioned
 	}
 	effURL := strings.TrimRight(effUpstream, "/") + strings.TrimPrefix(upstreamURL, strings.TrimRight(h.cfg.Upstream, "/"))
@@ -190,20 +279,19 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 			lastErr = err
 			break
 		}
-		copyHeaders(req.Header, r.Header)
-		req.Header.Set("content-length", strconv.Itoa(len(body)))
-		if req.Header.Get("content-type") == "" {
-			req.Header.Set("content-type", "application/json")
-		}
-		if req.Header.Get("user-agent") == "" {
-			req.Header.Set("user-agent", "curl/8.4.0")
-		}
-		if effKey != "" {
-			req.Header.Set("authorization", "Bearer "+effKey)
-		}
+		prepareUpstreamHeaders(req.Header, r.Header, failedOver, effKey, len(body))
 		resp, err := h.client.Do(req)
 		if err != nil {
-			// Connection-level failure: never retried (proxy.py breaks).
+			// Connection-level failure: never retried (Python breaks too).
+			// It still counts as a strike. A refused connection or a stalled
+			// read is the failure mode the breaker exists for — nous behind
+			// Cloudflare rarely returns a clean 503, it just stops answering —
+			// so skipping the record here would leave the circuit shut for the
+			// one outage shape it most needs to catch.
+			h.recordConnFailure()
+			if trial {
+				h.trialClose(false)
+			}
 			lastErr = err
 			break
 		}
@@ -231,7 +319,10 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	}
 	// Pre-first-byte failure: 502 "proxy upstream failure".
 	w.Header().Set("content-type", "application/json")
-	w.Header().Set("x-ds4-upstream", h.cfg.Upstream)
+	// Name the upstream that was actually contacted, not the profile's own:
+	// a 502 while failed over otherwise points an operator at a host the
+	// request never reached.
+	w.Header().Set("x-ds4-upstream", effUpstream)
 	w.Header().Set("connection", "close")
 	w.WriteHeader(502)
 	fmt.Fprintf(w, `{"error": {"message": "proxy upstream failure: %v"}}`, lastErr)

@@ -362,9 +362,13 @@ func TestRelayZDRDemandSkipsClassifier(t *testing.T) {
 	classifierUpstream = classUp.URL
 	t.Cleanup(func() { classifierUpstream = oldUpstream })
 
-	t.Setenv("DS4_KEY_NOUS", "test")
+	// The profile must be ZDR-capable, or the demand is refused outright by
+	// the 409 gate before the classifier question ever arises. or-ds4 is the
+	// route that can actually honor it.
+	t.Setenv("DS4_KEY_OPENROUTER", "test")
 	t.Setenv("DS4_CLASSIFIER_TOKEN", "sk-ant-oat01-test")
-	cfg := withUpstream(testNous(), profileUp.URL)
+	cfg := withUpstream(testOpenRouter(), profileUp.URL)
+	cfg.Dir = t.TempDir()
 	h := NewHandler(cfg, time.Minute)
 
 	body := `{"model": "ds4-flash-xhigh", "max_tokens": 2048, "messages": []}`

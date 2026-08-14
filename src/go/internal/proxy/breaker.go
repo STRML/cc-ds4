@@ -80,10 +80,22 @@ type breaker struct {
 // anything else is a hit — the same classification failover_record applies.
 // Only the profile's own upstream outcomes count (not the failover target's).
 func (h *Handler) recordOutcome(statusCode int) {
+	h.recordStrike(isTransient(statusCode))
+}
+
+// recordConnFailure records a failure that never produced a status at all: a
+// refused connection, a DNS failure, or a read that stalled past the deadline.
+// It is a strike. Nous behind Cloudflare rarely returns a clean 503 during an
+// outage, it simply stops answering, so a breaker that only counted statuses
+// would sit closed through the exact event it exists for.
+func (h *Handler) recordConnFailure() {
+	h.recordStrike(true)
+}
+
+func (h *Handler) recordStrike(bad bool) {
 	if !failoverEnabled || h.cfg.Failover == "" {
 		return
 	}
-	bad := isTransient(statusCode)
 	h.br.mu.Lock()
 	defer h.br.mu.Unlock()
 	b := &h.br

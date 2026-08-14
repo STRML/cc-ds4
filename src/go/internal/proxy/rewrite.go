@@ -7,6 +7,7 @@
 package proxy
 
 import (
+	"os"
 	"strings"
 
 	"github.com/strml/cc-ds4/src/go/internal/jsonpy"
@@ -64,8 +65,21 @@ var effortLevels = map[string]bool{
 }
 
 // nothinkBelow is the max_tokens threshold at or below which thinking is
-// disabled (DS4_NOTHINK_BELOW, default 8192 in proxy.py).
-const nothinkBelow = 8192
+// disabled. DS4_NOTHINK_BELOW moves it; README and every profile doc tell users
+// so, and install.sh sweeps the whole DS4_* namespace into the plist, so a
+// hardcoded constant made a documented knob silently inert.
+//
+// Read once at init, matching Python's import-time binding: the value must not
+// change under a running process mid-session.
+var nothinkBelow = envInt("DS4_NOTHINK_BELOW", 8192)
+
+// zdrEnabled reports whether the ZDR provider block may be injected at all.
+// DS4_ZDR=0 is the documented escape hatch for a provider-blocked build (a 403
+// with "error code: 1010" from OpenRouter). It only ever DISABLES: a profile
+// whose table row has no ZDR support never gains it from this.
+func zdrEnabled() bool {
+	return os.Getenv("DS4_ZDR") != "0"
+}
 
 // lowContext is proxy.py's LOW_CONTEXT: OpenRouter endpoints whose context is
 // smaller than the 1M the profile advertises. The ZDR block pins their names
@@ -161,7 +175,7 @@ func rewrite(body []byte, cfg profiles.Profile) ([]byte, error) {
 		// DeepSeek itself, which rejects the block with a 404 ("no endpoints
 		// matching data policy"). Such models are listed per profile so the
 		// escape hatch is configuration, not a silent special case.
-		if cfg.ZDR && !skipZDR(root.Get("model").String(), cfg.ZDRSkipModels) {
+		if cfg.ZDR && zdrEnabled() && !skipZDR(root.Get("model").String(), cfg.ZDRSkipModels) {
 			prov := root.Get("provider")
 			if !prov.IsObject() {
 				prov = jsonpy.MustObj()
