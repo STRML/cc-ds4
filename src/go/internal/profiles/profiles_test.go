@@ -1,14 +1,16 @@
 package profiles
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
-// TestAllNames asserts the generated table holds exactly the three profiles,
-// so a generator regression that drops or renames one fails here instead of
-// only surfacing as a missing line in --ports output. All() is asserted rather
-// than Ports()/Served() because the latter filter on config-directory
-// existence, which varies by host (CI has none).
+// TestAllNames asserts the table holds exactly the three profiles, so an edit
+// that drops or renames one fails here instead of only surfacing as a missing
+// line in --ports output. All() is asserted rather than Ports()/Served()
+// because those filter on config-directory existence; the tests below drive
+// that filtering with a synthetic HOME.
 func TestAllNames(t *testing.T) {
 	got := make(map[string]bool)
 	for _, p := range All() {
@@ -147,6 +149,86 @@ func TestAllReturnsIndependentCopies(t *testing.T) {
 			if s == "poisoned" {
 				t.Fatalf("%s: ZDRSkipModels leaked a mutation", p.Name)
 			}
+		}
+	}
+}
+
+// TestServedFiltersOnDirectoryExistence pins the rule that decides which ports
+// get bound at all. A profile whose config dir is absent is not installed here,
+// and binding its port anyway would lie to anyone checking with nc.
+func TestServedFiltersOnDirectoryExistence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude-nous"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	served := Served()
+	if len(served) != 1 || served[0].Name != "nous" {
+		var names []string
+		for _, p := range served {
+			names = append(names, p.Name)
+		}
+		t.Fatalf("Served() = %v, want just nous", names)
+	}
+}
+
+// TestServedEmptyWhenNothingInstalled pins that Served is genuinely filtering
+// rather than always returning the table.
+func TestServedEmptyWhenNothingInstalled(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if got := Served(); len(got) != 0 {
+		t.Fatalf("Served() returned %d profiles with no config dirs present", len(got))
+	}
+}
+
+// TestPortsRendersTheInstallScriptFormat pins the exact shape install.sh
+// parses to build the launchd plist: one "name port" line per served profile.
+// A change here writes a malformed plist rather than failing loudly.
+func TestPortsRendersTheInstallScriptFormat(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, d := range []string{".claude-ds4", ".claude-nous"} {
+		if err := os.MkdirAll(filepath.Join(home, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := Ports()
+	want := "direct 31500\nnous 31502\n"
+	if got != want {
+		t.Fatalf("Ports() = %q, want %q", got, want)
+	}
+}
+
+// TestPortsHonorsThePortOverride pins that a DS4_PORT_* override reaches the
+// plist. Without it launchd binds the table port while settings.json points at
+// the override, and Claude talks to a port nothing listens on.
+func TestPortsHonorsThePortOverride(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("DS4_PORT_NOUS", "31599")
+	if err := os.MkdirAll(filepath.Join(home, ".claude-nous"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := Ports(), "nous 31599\n"; got != want {
+		t.Fatalf("Ports() = %q, want %q", got, want)
+	}
+}
+
+// TestExpandHome covers the tilde forms the table can hold. A bare "~" and a
+// "~/..." path expand; anything else is already absolute and must be left
+// alone, including a path that merely starts with the same letters.
+func TestExpandHome(t *testing.T) {
+	for _, tc := range []struct{ in, home, want string }{
+		{"~", "/Users/x", "/Users/x"},
+		{"~/.claude-nous", "/Users/x", "/Users/x/.claude-nous"},
+		{"/absolute/path", "/Users/x", "/absolute/path"},
+		{"~notahome/dir", "/Users/x", "~notahome/dir"},
+		{"", "/Users/x", ""},
+	} {
+		if got := expandHome(tc.in, tc.home); got != tc.want {
+			t.Errorf("expandHome(%q, %q) = %q, want %q", tc.in, tc.home, got, tc.want)
 		}
 	}
 }

@@ -217,8 +217,16 @@ func claudeRunningPS(dir string) bool {
 // work around: the proxy only cares about sessions belonging to the user who
 // started it, and those are readable.
 func claudeRunningProc(dir string) bool {
+	return claudeRunningProcIn("/proc", dir)
+}
+
+// claudeRunningProcIn is claudeRunningProc against an arbitrary proc root, so
+// the Linux scan can be tested on any platform against a fake tree. Without
+// this the path is only ever exercised on a Linux CI runner, which is how it
+// shipped broken in the first place.
+func claudeRunningProcIn(procRoot, dir string) bool {
 	want := "CLAUDE_CONFIG_DIR=" + dir
-	entries, err := os.ReadDir("/proc")
+	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		return false
 	}
@@ -229,7 +237,7 @@ func claudeRunningProc(dir string) bool {
 		if _, err := strconv.Atoi(e.Name()); err != nil {
 			continue // not a pid
 		}
-		raw, err := os.ReadFile(filepath.Join("/proc", e.Name(), "environ"))
+		raw, err := os.ReadFile(filepath.Join(procRoot, e.Name(), "environ"))
 		if err != nil {
 			continue // exited between readdir and read, or not ours
 		}
