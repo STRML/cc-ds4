@@ -318,23 +318,43 @@ func (h *Handler) credits() (total, usage float64, ok bool) {
 		sc.mu.Unlock()
 		return c.total, c.usage, true
 	}
+	if !sc.creditsFailedAt.IsZero() && now.Sub(sc.creditsFailedAt) < creditsTTL {
+		sc.mu.Unlock()
+		return 0, 0, false
+	}
 	sc.mu.Unlock()
 
+	// A failure is cached too, for the same TTL.
+	//
+	// Only success used to populate the cache, so a profile whose upstream has
+	// no credits endpoint re-fetched on every single /__spend render — a doomed
+	// GET with a getJSONTimeout of 6s, inside a status line whose whole budget
+	// is 1.5s. That is the "(proxy?)" marker: not a broken proxy, a status line
+	// waiting on a request that was never going to succeed. Nous is exactly
+	// this case; it has Spend: true and no public credits endpoint.
+	fail := func() (float64, float64, bool) {
+		sc.mu.Lock()
+		sc.credits = nil
+		sc.creditsFailedAt = now
+		sc.mu.Unlock()
+		return 0, 0, false
+	}
 	doc, err := h.getJSON(h.cfg, "/v1/credits", getJSONTimeout)
 	if err != nil {
-		return 0, 0, false
+		return fail()
 	}
 	data, isObj := doc["data"].(map[string]any)
 	if !isObj {
-		return 0, 0, false
+		return fail()
 	}
 	tc, ok1 := toFloat(data["total_credits"])
 	tu, ok2 := toFloat(data["total_usage"])
 	if !ok1 || !ok2 {
-		return 0, 0, false
+		return fail()
 	}
 	sc.mu.Lock()
 	sc.credits = &credEntry{at: now, total: tc, usage: tu}
+	sc.creditsFailedAt = time.Time{}
 	sc.mu.Unlock()
 	return tc, tu, true
 }
@@ -361,6 +381,9 @@ type spendCache struct {
 	pricing    map[string]float64
 	hasPricing bool
 	credits    *credEntry
+	// creditsFailedAt is when the last lookup failed, so a profile with no
+	// credits endpoint is not re-probed on every status-line render.
+	creditsFailedAt time.Time
 }
 
 // spendState returns this profile's cache. It is a Handler field: one Handler

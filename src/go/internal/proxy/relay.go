@@ -128,15 +128,19 @@ func relayUserAgent() string {
 // that fails, rather than one authenticated with someone else's secret.
 func prepareUpstreamHeaders(dst, src http.Header, failedOver bool, key string, bodyLen int) {
 	copyHeaders(dst, src)
+	// x-api-key is dropped on EVERY request, not only on failover.
+	//
+	// The proxy always supplies its own credential below, so a client-sent
+	// x-api-key has no job here — and it was being forwarded verbatim to
+	// api.deepseek.com, openrouter.ai and nousresearch.com on the normal path.
+	// The profile docs set ANTHROPIC_API_KEY to "" precisely because Claude Code
+	// sends it when populated, but a user with a real key exported in their
+	// shell authenticates on authorization, passes the gate, and ships an
+	// Anthropic key to three other providers on every turn. Scoping the strip
+	// to failover treated the wrong thing as the boundary.
+	dst.Del("x-api-key")
 	if failedOver {
 		dst.Del("authorization")
-		// x-api-key too. The profile docs set ANTHROPIC_API_KEY to "" precisely
-		// because Claude Code sends it when populated, but a user who leaves it
-		// set authenticates on authorization, passes authOK, and would then
-		// ship this profile's key to another provider in a header nobody
-		// looked at. The credential boundary is about the credential, not about
-		// one spelling of it.
-		dst.Del("x-api-key")
 	}
 	dst.Set("content-length", strconv.Itoa(bodyLen))
 	if dst.Get("content-type") == "" {
@@ -290,7 +294,14 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	// under the profile's dir, and following the failover target would miss
 	// every cached image, re-spawn a billed child for each, and orphan the new
 	// entries when the circuit closes.
-	if visioned, verr := applyVision(body, h.cfg); verr == nil {
+	// A ZDR demand covers the describer too. The child reaches real Anthropic
+	// Haiku on the machine's own subscription, so describing an image on such a
+	// request would ship that image — a screenshot, most often — to a party the
+	// caller's gate never considered, after the gate had passed. The classifier
+	// branch is excluded from ZDR requests for exactly this reason and the
+	// rescue re-checks for it; vision was the path nobody had carried it to.
+	// Cached descriptions are still served, because reading one sends nothing.
+	if visioned, verr := applyVision(body, h.cfg, !requires); verr == nil {
 		body = visioned
 	}
 

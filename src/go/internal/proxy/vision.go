@@ -69,7 +69,10 @@ var scrubExact = map[string]bool{"CLAUDE_CONFIG_DIR": true, "CLAUDECODE": true}
 // image blocks forwarded unchanged, deliberately) or when body is not valid
 // JSON (the error is jsonpy's parse error, matching rewrite()'s contract so
 // callers can treat both the same way).
-func applyVision(body []byte, cfg profiles.Profile) ([]byte, error) {
+// allowDescribe=false means: serve what is already cached, and placeholder
+// everything else without spawning a child. That is the ZDR mode — see the call
+// site in relay.
+func applyVision(body []byte, cfg profiles.Profile, allowDescribe bool) ([]byte, error) {
 	if !visionEnabled() {
 		return body, nil
 	}
@@ -95,7 +98,7 @@ func applyVision(body []byte, cfg profiles.Profile) ([]byte, error) {
 				placeholderRemaining(root)
 			}
 		}()
-		rewriteImages(root, cacheDir)
+		rewriteImages(root, cacheDir, allowDescribe)
 	})
 }
 
@@ -115,12 +118,12 @@ func visionEnabled() bool {
 // any depth, including nested in tool_result.content) for a text block.
 // A non-list messages value is left alone rather than crashing the walk,
 // matching rewrite_images's isinstance guard.
-func rewriteImages(root *jsonpy.OrderedValue, cacheDir string) {
+func rewriteImages(root *jsonpy.OrderedValue, cacheDir string, allowDescribe bool) {
 	messages := root.Get("messages")
 	if !messages.IsArray() {
 		return
 	}
-	w := &visionWalk{cacheDir: cacheDir, deadline: visionNow().Add(visionWallClock)}
+	w := &visionWalk{cacheDir: cacheDir, deadline: visionNow().Add(visionWallClock), allowDescribe: allowDescribe}
 	// The budget caps how many images may spawn a child on one request. Each
 	// child costs up to childTimeout and they run serially, so an uncapped
 	// transcript full of fresh images holds a single request for minutes and
@@ -150,6 +153,13 @@ type visionWalk struct {
 	cacheDir string
 	budget   int
 	deadline time.Time
+	// allowDescribe is false when the request must not leave its route. The
+	// describer child talks to real Anthropic Haiku on the machine's own
+	// subscription, which is a third party as far as a ZDR demand is concerned,
+	// so an image on such a request is placeholdered rather than described.
+	// Cache hits are still served: reading a description already on disk sends
+	// nothing anywhere.
+	allowDescribe bool
 }
 
 // spent reports whether this request may still spawn a describer. A cache hit
@@ -157,7 +167,7 @@ type visionWalk struct {
 // and refusing one would placeholder an image the proxy already has a
 // description for.
 func (w *visionWalk) exhausted() bool {
-	return w.budget <= 0 || !visionNow().Before(w.deadline)
+	return !w.allowDescribe || w.budget <= 0 || !visionNow().Before(w.deadline)
 }
 
 // rewriteBlocks walks one content list in place, replacing "image" blocks and

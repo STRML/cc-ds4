@@ -155,7 +155,7 @@ func TestVisionBudgetChargesFailedChildren(t *testing.T) {
 	cfg.Dir = t.TempDir()
 
 	const images = maxImagesPerRequest * 2
-	out, err := applyVision([]byte(imageBody(images)), cfg)
+	out, err := applyVision([]byte(imageBody(images)), cfg, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestVisionSkipsBodiesWithNoImages(t *testing.T) {
 	// Deliberately not canonically spaced: a re-emit would normalize it, so
 	// byte equality proves the body was never round-tripped.
 	body := []byte(`{"model":"ds4-flash-medium",   "max_tokens":32000,"messages":[]}`)
-	out, err := applyVision(body, cfg)
+	out, err := applyVision(body, cfg, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +447,7 @@ func TestVisionDeadlineStopsTheWalk(t *testing.T) {
 
 	cfg := testNous()
 	cfg.Dir = t.TempDir()
-	out, err := applyVision([]byte(imageBody(6)), cfg)
+	out, err := applyVision([]byte(imageBody(6)), cfg, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -780,7 +780,7 @@ func TestCachedImageIsServedPastTheBudget(t *testing.T) {
 	good := fakeClaudeBin(t, fakeResultJSON("a warmed description"))
 	t.Setenv("DS4_CLAUDE_BIN", good)
 	cached := imageBody(1)
-	if _, err := applyVision([]byte(cached), cfg); err != nil {
+	if _, err := applyVision([]byte(cached), cfg, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -799,7 +799,7 @@ func TestCachedImageIsServedPastTheBudget(t *testing.T) {
 	b.WriteString(`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + warm + `"}}`)
 	b.WriteString(`]}]}`)
 
-	out, err := applyVision([]byte(b.String()), cfg)
+	out, err := applyVision([]byte(b.String()), cfg, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -854,5 +854,66 @@ func TestFailoverOffSwitchStopsTheRescue(t *testing.T) {
 	}
 	if rr.Code == 200 {
 		t.Errorf("the caller got a 200 from somewhere with failover disabled: %s", rr.Body.String())
+	}
+}
+
+// TestZDRDemandStopsTheDescriber pins the ZDR boundary across vision.
+//
+// The describer child reaches real Anthropic Haiku on the machine's own
+// subscription — a third party as far as the caller's demand is concerned — and
+// it runs after the gate has already passed. So a ZDR-demanding request
+// carrying a screenshot shipped that screenshot somewhere the gate never
+// considered. The classifier branch is excluded from ZDR requests for exactly
+// this reason and the rescue re-checks; vision was the path nobody carried it
+// to.
+func TestZDRDemandStopsTheDescriber(t *testing.T) {
+	installProfiles(t, "openrouter")
+	bin, calls := failingClaudeBin(t)
+	t.Setenv("DS4_CLAUDE_BIN", bin)
+	t.Setenv("DS4_VISION", "1")
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer up.Close()
+
+	t.Setenv("DS4_KEY_OPENROUTER", "k")
+	cfg := withUpstream(testOpenRouter(), up.URL)
+	cfg.Dir = t.TempDir()
+	h := NewHandler(cfg, time.Minute)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(imageBody(3)))
+	req.Header.Set("authorization", "Bearer k")
+	req.Header.Set("x-ds4-require-zdr", "1")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want the request served with placeholders (%s)", rr.Code, rr.Body.String())
+	}
+	if n := calls(); n != 0 {
+		t.Errorf("spawned %d describer children for a ZDR request; the images left the route", n)
+	}
+}
+
+// TestXAPIKeyNeverReachesAnyUpstream pins the credential strip on the NORMAL
+// path, not just on failover. The proxy always supplies its own key, so a
+// client-sent x-api-key has no job here — and it was forwarded verbatim to
+// DeepSeek, OpenRouter and Nous on every request. A user with a real Anthropic
+// key exported in their shell authenticates on authorization, passes the gate,
+// and ships that key to three other providers every turn.
+func TestXAPIKeyNeverReachesAnyUpstream(t *testing.T) {
+	for _, failedOver := range []bool{false, true} {
+		client := http.Header{}
+		client.Set("authorization", "Bearer profile-key")
+		client.Set("x-api-key", "sk-ant-real-anthropic-key")
+		dst := http.Header{}
+
+		prepareUpstreamHeaders(dst, client, failedOver, "upstream-key", 10)
+
+		if got := dst.Get("x-api-key"); got != "" {
+			t.Errorf("failedOver=%v: x-api-key forwarded upstream: %q", failedOver, got)
+		}
 	}
 }

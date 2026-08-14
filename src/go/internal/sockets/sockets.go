@@ -112,6 +112,17 @@ func listenerFor(name string, ports map[string]int, requireOwned bool) (net.List
 		// silently leaving an extra listener nobody accepts on.
 		ln, lnErr := newListenerFromFD(fds[0])
 		if ln == nil {
+			// launchd holds this port bound whether or not we managed to wrap
+			// its fd. Skipping the profile here leaves the socket listening
+			// with nobody accepting, so a client connects, gets accepted by
+			// launchd, and hangs forever instead of being refused — strictly
+			// worse than connection-refused, and the failure the Sockets
+			// contract exists to avoid. Close what we were handed and make it
+			// fatal: this is NOT errNotOwned, so Listeners will not skip past
+			// it.
+			for _, fd := range fds {
+				closeFD(fd)
+			}
 			return nil, fmt.Errorf("%s: inherited fd %d: %w", name, fds[0], lnErr)
 		}
 		if lnErr != nil {

@@ -247,8 +247,9 @@ for d in "$HOME/.claude-ds4" "$HOME/.claude-or-ds4" "$HOME/.claude-nous"; do
 done
 
 BAR_DST="$BAR_DST" WANT_PROXY="$WANT_PROXY" PORT="$PORT" DIR="$DIR" OTHER_SETTINGS="$OTHER_SETTINGS" python3 - "$SETTINGS" <<'PY'
-import json, os, sys
+import json, os, shutil, sys, time
 p = sys.argv[1]
+stamp = time.strftime("%Y%m%d%H%M%S")
 with open(p) as fh:
     s = json.load(fh)
 s["statusLine"] = {"type": "command", "command": os.environ["BAR_DST"], "padding": 0}
@@ -295,7 +296,7 @@ def migrate(settings, label):
     anything changed."""
     changed = False
     for key, value in list(settings.setdefault("env", {}).items()):
-        if "MODEL" not in key or value not in OLD_SENTINELS:
+        if "MODEL" not in key or not isinstance(value, str) or value not in OLD_SENTINELS:
             continue
         # Opus moves to the pro family's medium effort rather than following
         # the mechanical map, which would put it on the main loop's tier.
@@ -313,7 +314,13 @@ def migrate(settings, label):
     # which reads as a broken account rather than stale config.
     for key in ("model", "fallbackModel"):
         value = settings.get(key)
-        if value in OLD_SENTINELS:
+        # isinstance first: `value in OLD_SENTINELS` raises TypeError on an
+        # unhashable value, and a top-level "model" is not guaranteed to be a
+        # string. Under `set -e` that aborted the whole run AFTER the symlinks
+        # had been re-pointed and BEFORE this profile's settings.json was
+        # written — a half-installed state from a settings file this script
+        # does not own the shape of.
+        if isinstance(value, str) and value in OLD_SENTINELS:
             settings[key] = OLD_SENTINELS[value]
             print(f"migrated: {label}{key} {value} -> {settings[key]}")
             changed = True
@@ -334,7 +341,20 @@ for other in os.environ.get("OTHER_SETTINGS", "").split("\n"):
     except (OSError, ValueError) as exc:
         print(f"warning: could not read {other} to migrate sentinels: {exc}")
         continue
-    if migrate(osettings, f"{other}: "):
+    try:
+        changed = migrate(osettings, f"{other}: ")
+    except Exception as exc:  # never abort the install over another profile
+        print(f"warning: could not migrate {other}: {exc}")
+        continue
+    if changed:
+        # Same backup the named profile gets. This script is rewriting a file
+        # the user owns and did not ask it to touch on this run.
+        try:
+            with open(other) as fh:
+                shutil.copyfileobj(fh, open(other + ".bak-" + stamp, "w"))
+        except OSError as exc:
+            print(f"warning: could not back up {other}: {exc}")
+            continue
         with open(other, "w") as fh:
             json.dump(osettings, fh, indent=2)
         os.chmod(other, 0o600)

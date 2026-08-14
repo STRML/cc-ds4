@@ -241,6 +241,33 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(got["model"], "ds4-pro-xhigh", got)
         self.assertEqual(got["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "ds4-flash-xhigh", got)
 
+    def test_migration_survives_a_non_string_model(self):
+        # `value in OLD_SENTINELS` raises TypeError on an unhashable value, and
+        # nothing guarantees a top-level "model" is a string. Under set -e that
+        # aborted the run after the symlinks were re-pointed and before the
+        # named profile's settings.json was written.
+        named = os.path.join(self.home, PROFILE_DIRS["direct"])
+        other = os.path.join(self.home, PROFILE_DIRS["nous"])
+        os.makedirs(named, exist_ok=True)
+        os.makedirs(other, exist_ok=True)
+        with open(os.path.join(named, "settings.json"), "w") as fh:
+            json.dump({"model": {"id": "something-structured"}, "env": {}}, fh)
+        with open(os.path.join(other, "settings.json"), "w") as fh:
+            json.dump({"model": ["also", "not", "a", "string"], "env": {}}, fh)
+
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env["PATH"] = self.bindir + os.pathsep + env["PATH"]
+        proc = subprocess.run(
+            ["bash", INSTALL, "--profile", "direct"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # And the file was still written, not left half-installed.
+        with open(os.path.join(named, "settings.json")) as fh:
+            got = json.load(fh)
+        self.assertEqual(got["model"], {"id": "something-structured"}, got)
+
     def test_no_proxy_does_not_delete_proxy_files(self):
         # --no-proxy leaves the proxy files alone: an earlier run's base URL
         # still points at the proxy port, so removing them would break it.

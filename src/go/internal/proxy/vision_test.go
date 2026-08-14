@@ -158,7 +158,7 @@ func TestApplyVisionDisabledPassesThrough(t *testing.T) {
 			map[string]any{"role": "user", "content": []any{imageBlock("image/png", "aGVsbG8=")}},
 		},
 	})
-	got, err := applyVision(body, profiles.Profile{Dir: t.TempDir()})
+	got, err := applyVision(body, profiles.Profile{Dir: t.TempDir()}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestApplyVisionPlaceholdersFileSource(t *testing.T) {
 			}},
 		},
 	})
-	got, err := applyVision(body, profiles.Profile{Dir: t.TempDir()})
+	got, err := applyVision(body, profiles.Profile{Dir: t.TempDir()}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestApplyVisionPlaceholdersMissingMetadata(t *testing.T) {
 				}},
 			},
 		})
-		got, err := applyVision(body, profiles.Profile{Dir: t.TempDir()})
+		got, err := applyVision(body, profiles.Profile{Dir: t.TempDir()}, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -273,7 +273,7 @@ func TestApplyVisionRecursesIntoToolResult(t *testing.T) {
 			}},
 		},
 	})
-	got, err := applyVision(body, profiles.Profile{Dir: t.TempDir()})
+	got, err := applyVision(body, profiles.Profile{Dir: t.TempDir()}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestApplyVisionDescribesAndCachesImage(t *testing.T) {
 		},
 	})
 
-	got, err := applyVision(body, cfg)
+	got, err := applyVision(body, cfg, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestApplyVisionDescribesAndCachesImage(t *testing.T) {
 	// longer exists) — a cache hit must not need it, since the cache check
 	// runs before bin resolution in transcribe().
 	t.Setenv("DS4_CLAUDE_BIN", "/does/not/exist")
-	got2, err := applyVision(body, cfg)
+	got2, err := applyVision(body, cfg, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func TestApplyVisionNoBinaryPlaceholders(t *testing.T) {
 			map[string]any{"role": "user", "content": []any{imageBlock("image/png", png)}},
 		},
 	})
-	got, err := applyVision(body, profiles.Profile{Dir: t.TempDir()})
+	got, err := applyVision(body, profiles.Profile{Dir: t.TempDir()}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +379,7 @@ func TestApplyVisionChildFailurePlaceholders(t *testing.T) {
 			map[string]any{"role": "user", "content": []any{imageBlock("image/png", png)}},
 		},
 	})
-	got, err := applyVision(body, profiles.Profile{Dir: t.TempDir()})
+	got, err := applyVision(body, profiles.Profile{Dir: t.TempDir()}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +501,7 @@ func TestVisionBudgetCapsChildSpawns(t *testing.T) {
 	body := []byte(`{"model":"ds4-flash-xhigh","max_tokens":32000,"messages":[{"role":"user","content":[` +
 		strings.Join(blocks, ",") + `]}]}`)
 
-	out, err := applyVision(body, cfg)
+	out, err := applyVision(body, cfg, true)
 	if err != nil {
 		t.Fatal(err)
 	}
