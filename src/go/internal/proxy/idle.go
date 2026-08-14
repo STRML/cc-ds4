@@ -20,7 +20,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -71,18 +73,13 @@ func IdlePollInterval(timeout time.Duration) time.Duration {
 // caller's way to stop the watch during tests or a graceful shutdown that
 // did not originate here.
 //
-// lastActivity must fold in-flight requests as well as the last-touched
-// timestamp: a request open longer than timeout (a slow stream) must
-// still read as "just now," or WatchIdle would shut the proxy out from
-// under it. Python does this with a separate _inflight counter ORed into
-// the exit condition (proxy.py:836-839); the Go shape asks the caller to
-// pre-combine that into one clock reading instead, so WatchIdle only ever
-// looks at one number. clock is time.Now in production and a fake in
-// tests, matching how lastActivity's caller-side clock is compared.
+// clock is time.Now in production and a fake in tests, matching the clock
+// Activity's timestamps are compared against.
 //
 // timeout <= 0 disables the watch (mirrors "while IDLE_EXIT > 0" — a 0
 // means run forever) and WatchIdle returns immediately without consuming
 // from tick.
+
 // Activity is the liveness the idle watch reads before deciding to exit.
 //
 // The two signals are separate on purpose. Python ORs a last-seen timestamp
@@ -182,14 +179,23 @@ func sessionsLive(dir string) bool {
 // watcher forever.
 const claudeRunningTimeout = 10 * time.Second
 
-// claudeRunning reports whether a live claude process is using this
-// profile. `ps -E` prints each process's environment, and Claude Code
-// always runs with CLAUDE_CONFIG_DIR set, so a session is visible however
-// it was launched — this does not depend on the launcher script. Mirrors
-// claude_running in proxy.py. A word boundary after the match keeps a
-// backup directory that has this one as a path prefix from pinning the
-// proxy up.
+// claudeRunning reports whether a live claude process is using this profile.
+// Claude Code always runs with CLAUDE_CONFIG_DIR set, so a session is visible
+// however it was launched; this does not depend on the launcher script. Both
+// implementations below compare the whole value, so a backup directory that has
+// this one as a path prefix does not pin the proxy up.
 func claudeRunning(dir string) bool {
+	// ps -E is BSD syntax for "show the environment". Linux ps spells that
+	// differently and silently means something else, so the ps path there
+	// would never match and the watch would exit out from under a live
+	// session. Read /proc instead, which is the same question asked natively.
+	if runtime.GOOS == "linux" {
+		return claudeRunningProc(dir)
+	}
+	return claudeRunningPS(dir)
+}
+
+func claudeRunningPS(dir string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), claudeRunningTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "ps", "-E", "-ax", "-o", "command=").Output()
@@ -199,4 +205,39 @@ func claudeRunning(dir string) bool {
 	pattern := regexp.QuoteMeta("CLAUDE_CONFIG_DIR="+dir) + `(\s|$)`
 	matched, err := regexp.Match(pattern, out)
 	return err == nil && matched
+}
+
+// claudeRunningProc scans /proc/<pid>/environ for the config dir.
+//
+// environ is NUL-separated, so an entry is compared whole rather than by
+// substring. That is what keeps a "-backup" profile whose path contains
+// another profile's path from pinning the shorter one up too.
+//
+// A process owned by another user returns EACCES here. That is not a case to
+// work around: the proxy only cares about sessions belonging to the user who
+// started it, and those are readable.
+func claudeRunningProc(dir string) bool {
+	want := "CLAUDE_CONFIG_DIR=" + dir
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue // not a pid
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", e.Name(), "environ"))
+		if err != nil {
+			continue // exited between readdir and read, or not ours
+		}
+		for _, kv := range strings.Split(string(raw), "\x00") {
+			if kv == want {
+				return true
+			}
+		}
+	}
+	return false
 }
