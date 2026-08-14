@@ -241,43 +241,51 @@ if os.environ["WANT_PROXY"] == "1":
     if not any(h.get("command") == cmd for h in hooks):
         hooks.append({"type": "command", "command": cmd, "timeout": 15})
 
-    # Migrate the pre-family sentinel names. They used to encode only a
-    # reasoning-effort level; they now encode a model family too. install.sh
-    # does not own these values (the profile prompt has the user set them by
-    # hand once), so an upgrade would otherwise leave a settings.json naming
-    # sentinels the proxy no longer knows. Those requests reach the upstream
-    # unrewritten and are rejected, and the auto-mode permission gate stops
-    # matching at the same time, so the failure is total and looks like a bad
-    # key. Rewriting here is a one-time migration, not a compatibility shim:
-    # the old names stay dead in the proxy.
-    OLD_SENTINELS = {
-        "ds4-max": "ds4-pro-xhigh",
-        "ds4-xhigh": "ds4-pro-xhigh",
-        "ds4-high": "ds4-flash-xhigh",
-        "ds4-low": "ds4-flash-medium",
-    }
-    for key, value in list(s["env"].items()):
-        if "MODEL" not in key or value not in OLD_SENTINELS:
-            continue
-        # Opus moves to the pro family's medium effort rather than following
-        # the mechanical map, which would put it on the main loop's tier.
-        new = ("ds4-pro-medium" if key == "ANTHROPIC_DEFAULT_OPUS_MODEL"
-               else OLD_SENTINELS[value])
-        s["env"][key] = new
-        print(f"migrated: {key} {value} -> {new}")
+# Migrate the pre-family sentinel names. This runs whatever WANT_PROXY says:
+# it rewrites settings.json, not the proxy, and --no-proxy does not remove an
+# ANTHROPIC_BASE_URL an earlier run already pointed at the proxy. Gating it
+# meant `install.sh --profile X --no-proxy` left that profile naming sentinels
+# the proxy no longer resolves, while the profile installed normally worked —
+# one binary serves all three, so the result is a single profile failing
+# totally, which is the exact outcome this migration exists to prevent.
+#
+# The names used to encode only a reasoning-effort level; they now encode a
+# model family too. install.sh does not own these values (the profile prompt
+# has the user set them by hand once), so an upgrade would otherwise leave a
+# settings.json naming sentinels the proxy no longer knows. Those requests
+# reach the upstream unrewritten and are rejected, and the auto-mode
+# permission gate stops matching at the same time. Rewriting here is a
+# one-time migration, not a compatibility shim: the old names stay dead in
+# the proxy.
+OLD_SENTINELS = {
+    "ds4-max": "ds4-pro-xhigh",
+    "ds4-xhigh": "ds4-pro-xhigh",
+    "ds4-high": "ds4-flash-xhigh",
+    "ds4-low": "ds4-flash-medium",
+}
+for key, value in list(s.setdefault("env", {}).items()):
+    if "MODEL" not in key or value not in OLD_SENTINELS:
+        continue
+    # Opus moves to the pro family's medium effort rather than following
+    # the mechanical map, which would put it on the main loop's tier.
+    new = ("ds4-pro-medium" if key == "ANTHROPIC_DEFAULT_OPUS_MODEL"
+           else OLD_SENTINELS[value])
+    s["env"][key] = new
+    print(f"migrated: {key} {value} -> {new}")
 
-    # The env block is not the only place a sentinel lives. The profile setup
-    # also writes a TOP-LEVEL "model" (and Claude Code writes "fallbackModel"
-    # when the picker is used), which is the session default the main loop
-    # actually sends. Migrating only env leaves that default naming a sentinel
-    # the proxy no longer knows, so the main loop 400s on every request while
-    # the subagent tiers work — which reads as a broken account, not a stale
-    # config.
-    for key in ("model", "fallbackModel"):
-        value = s.get(key)
-        if value in OLD_SENTINELS:
-            s[key] = OLD_SENTINELS[value]
-            print(f"migrated: {key} {value} -> {s[key]}")
+# The env block is not the only place a sentinel lives. The profile setup
+# also writes a TOP-LEVEL "model" (and Claude Code writes "fallbackModel"
+# when the picker is used), which is the session default the main loop
+# actually sends. Migrating only env leaves that default naming a sentinel
+# the proxy no longer knows, so the main loop 400s on every request while
+# the subagent tiers work — which reads as a broken account, not a stale
+# config.
+for key in ("model", "fallbackModel"):
+    value = s.get(key)
+    if value in OLD_SENTINELS:
+        s[key] = OLD_SENTINELS[value]
+        print(f"migrated: {key} {value} -> {s[key]}")
+
 with open(p, "w") as fh:
     json.dump(s, fh, indent=2)
 os.chmod(p, 0o600)

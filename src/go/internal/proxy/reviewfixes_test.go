@@ -302,3 +302,158 @@ func TestZDRRefusalReleasesTheTrial(t *testing.T) {
 		t.Error("a refused request consumed the trial")
 	}
 }
+
+// TestProbeDoesNotArmASecondTrial pins the exclusivity the breaker's comment
+// promises. A trial can be a long streaming turn that outlasts a whole recheck
+// interval; if the probe path arms another underneath it, trialClose becomes
+// ambiguous — whichever request finishes first clears trialActive, and the
+// other returns early without closing the circuit even when a recovered
+// upstream served it cleanly.
+func TestProbeDoesNotArmASecondTrial(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`)) // a clean probe
+	}))
+	defer up.Close()
+
+	t.Setenv("DS4_KEY_NOUS", "k")
+	cfg := withUpstream(testNous(), up.URL)
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "openrouter"
+	h := NewHandler(cfg, time.Minute)
+
+	// A trial is already in flight, and the recheck window has lapsed so the
+	// next request probes.
+	h.br.mu.Lock()
+	h.br.open = true
+	h.br.trialActive = true
+	h.br.probes = failoverProbesToClose - 1
+	h.br.lastProbe = time.Now().Add(-time.Duration(failoverRecheck+60) * time.Second)
+	h.br.mu.Unlock()
+
+	if _, trial := h.breakerOpen(); trial {
+		t.Error("a second trial was armed while one was still in flight")
+	}
+}
+
+// TestRescueToDrainedTargetExplainsItself pins the case where both accounts are
+// empty. Streaming the target's own refusal would put back the misdiagnosis the
+// whole drained path exists to remove: the CLI renders any 404 naming a model
+// as "that model may not exist".
+func TestRescueToDrainedTargetExplainsItself(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
+	const credits = `{"error":{"message":"requires available credits, balance too low"}}`
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(404)
+		_, _ = w.Write([]byte(credits))
+	}))
+	defer origin.Close()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(402)
+		_, _ = w.Write([]byte(`{"error":"payment required"}`))
+	}))
+	defer target.Close()
+
+	t.Setenv("DS4_KEY_NOUS", "k")
+	t.Setenv("DS4_KEY_OPENROUTER", "ok")
+	t.Setenv("DS4_UPSTREAM_OPENROUTER", target.URL)
+
+	cfg := withUpstream(testNous(), origin.URL)
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "openrouter"
+	h := NewHandler(cfg, time.Minute)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"ds4-flash-medium","max_tokens":32000,"messages":[]}`))
+	req.Header.Set("authorization", "Bearer k")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != 402 {
+		t.Fatalf("status = %d, want 402 explaining the balance (body %s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "nous") {
+		t.Errorf("the 402 does not name the drained profile: %s", rr.Body.String())
+	}
+}
+
+// TestRescueRefusesToBreakZDR pins the privacy gate across the rescue. The 409
+// gate runs against the profile picked at the top of the relay, and the rescue
+// swaps that profile afterwards — so without this check a demand that passed
+// the gate could still be served by a target enforcing nothing.
+func TestRescueRefusesToBreakZDR(t *testing.T) {
+	installProfiles(t, "nous", "openrouter")
+	var reached bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer target.Close()
+
+	t.Setenv("DS4_KEY_OPENROUTER", "k")
+	t.Setenv("DS4_KEY_NOUS", "nk")
+	t.Setenv("DS4_UPSTREAM_NOUS", target.URL)
+
+	// A ZDR-capable origin whose target is not ZDR-capable. The shipped table
+	// has no such pair today, but its own comments contemplate changing these
+	// rows, and a fail-open hole in a privacy gate should not wait for that.
+	cfg := testOpenRouter()
+	cfg.Dir = t.TempDir()
+	cfg.Failover = "nous"
+	h := NewHandler(cfg, time.Minute)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"ds4-flash-medium","max_tokens":32000,"messages":[]}`))
+	req.Header.Set("authorization", "Bearer k")
+	if h.rescueViaFailover(httptest.NewRecorder(), req,
+		[]byte(`{"model":"ds4-flash-medium","max_tokens":32000,"messages":[]}`),
+		cfg.Upstream+"/v1/messages", true) {
+		t.Error("a ZDR-demanding request was rescued onto a target that cannot enforce it")
+	}
+	if reached {
+		t.Error("the non-ZDR target received a request that demanded ZDR")
+	}
+}
+
+// TestVisionDeadlineStopsTheWalk pins the wall-clock bound. The count cap alone
+// does not bound time: the walk is serial and each child may run to
+// childTimeout, so a budget's worth of slow describes is minutes of held
+// request. Past the deadline the remaining images are placeholdered without
+// spawning anything.
+func TestVisionDeadlineStopsTheWalk(t *testing.T) {
+	bin, calls := failingClaudeBin(t)
+	t.Setenv("DS4_CLAUDE_BIN", bin)
+	t.Setenv("DS4_VISION", "1")
+
+	// A clock that jumps past the deadline once the walk has started, standing
+	// in for describes that each burn real time.
+	base := time.Now()
+	var ticks int
+	old := visionNow
+	visionNow = func() time.Time {
+		ticks++
+		if ticks <= 2 { // construction, then the first image's check
+			return base
+		}
+		return base.Add(visionWallClock + time.Second)
+	}
+	defer func() { visionNow = old }()
+
+	cfg := testNous()
+	cfg.Dir = t.TempDir()
+	out, err := applyVision([]byte(imageBody(6)), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := calls(); n > 1 {
+		t.Errorf("spawned %d children after the deadline passed, want at most the 1 in flight", n)
+	}
+	if strings.Contains(string(out), `"type": "image"`) {
+		t.Error("an image block reached the upstream body")
+	}
+}

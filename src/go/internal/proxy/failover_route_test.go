@@ -41,6 +41,7 @@ func TestEffectiveProfileClosedBreakerStaysHome(t *testing.T) {
 // row, marked as a target so the remap in rewrite runs.
 func TestEffectiveProfileOpenBreakerRoutesToTarget(t *testing.T) {
 	installProfiles(t, "nous", "openrouter")
+	t.Setenv("DS4_KEY_OPENROUTER", "target-key") // an installed target has one
 	cfg := testNous()
 	cfg.Dir = t.TempDir()
 	cfg.Failover = "openrouter"
@@ -196,6 +197,7 @@ func TestFailoverDoesNotRetryTheMainLoop(t *testing.T) {
 
 	t.Setenv("DS4_UPSTREAM_OPENROUTER", target.URL)
 	t.Setenv("DS4_KEY_NOUS", "origin-key")
+	t.Setenv("DS4_KEY_OPENROUTER", "target-key")
 
 	cfg := testNous()
 	cfg.Dir = t.TempDir()
@@ -388,12 +390,11 @@ func TestCleanProbeArmsButDoesNotClose(t *testing.T) {
 // along. With a target key present the override masks the bug, so this test
 // deliberately supplies none: the request must go out unauthenticated and fail,
 // never authenticated with a credential issued by someone else.
-func TestFailoverNeverLeaksTheOriginKey(t *testing.T) {
+func TestKeylessTargetIsNotATarget(t *testing.T) {
 	installProfiles(t, "nous", "openrouter")
-	var gotAuth string
 	var seen bool
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth, seen = r.Header.Get("authorization"), true
+		seen = true
 		w.Header().Set("content-type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
@@ -401,7 +402,7 @@ func TestFailoverNeverLeaksTheOriginKey(t *testing.T) {
 
 	t.Setenv("DS4_UPSTREAM_OPENROUTER", target.URL)
 	t.Setenv("DS4_KEY_NOUS", "origin-secret")
-	t.Setenv("DS4_KEY_OPENROUTER", "") // the target has no key here
+	t.Setenv("DS4_KEY_OPENROUTER", "") // installed, never finished configuring
 
 	cfg := testNous()
 	cfg.Dir = t.TempDir()
@@ -415,11 +416,10 @@ func TestFailoverNeverLeaksTheOriginKey(t *testing.T) {
 	req.Header.Set("authorization", "Bearer origin-secret")
 	h.ServeHTTP(httptest.NewRecorder(), req)
 
-	if !seen {
-		t.Fatal("the failover target never received the request")
-	}
-	if strings.Contains(gotAuth, "origin-secret") {
-		t.Errorf("the origin profile's key was sent to another provider: %q", gotAuth)
+	if seen {
+		t.Error("routed to a target with no credential; it can only answer 401, " +
+			"which hides the origin's real outage behind an auth error from a " +
+			"provider the user never configured")
 	}
 }
 

@@ -175,6 +175,42 @@ class InstallTest(unittest.TestCase):
         after = len([c for c in self.launchctl_calls() if c[0] == "bootout"])
         self.assertEqual(after, before + 1, self.launchctl_calls())
 
+    def test_sentinel_migration_runs_without_the_proxy(self):
+        # The migration rewrites settings.json, not the proxy, so gating it on
+        # the proxy install was wrong. --no-proxy does not remove an
+        # ANTHROPIC_BASE_URL an earlier run pointed at the proxy, and one
+        # binary serves all three profiles: a profile upgraded with --no-proxy
+        # kept naming sentinels the proxy no longer resolves, so every one of
+        # its requests failed while the other profiles worked.
+        profile_dir = os.path.join(self.home, PROFILE_DIRS["direct"])
+        os.makedirs(profile_dir, exist_ok=True)
+        settings = os.path.join(profile_dir, "settings.json")
+        with open(settings, "w") as fh:
+            json.dump({
+                "model": "ds4-xhigh",
+                "env": {
+                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:31500",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "ds4-high",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": "ds4-xhigh",
+                },
+            }, fh)
+
+        env = dict(os.environ)
+        env["HOME"] = self.home
+        env["PATH"] = self.bindir + os.pathsep + env["PATH"]
+        proc = subprocess.run(
+            ["bash", INSTALL, "--profile", "direct", "--no-proxy"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+        with open(settings) as fh:
+            got = json.load(fh)
+        self.assertEqual(got["model"], "ds4-pro-xhigh", got)
+        self.assertEqual(got["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "ds4-flash-xhigh", got)
+        # Opus takes the pro family's medium effort, not the mechanical map.
+        self.assertEqual(got["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "ds4-pro-medium", got)
+
     def test_no_proxy_does_not_delete_proxy_files(self):
         # --no-proxy leaves the proxy files alone: an earlier run's base URL
         # still points at the proxy port, so removing them would break it.

@@ -155,34 +155,14 @@ func (h *Handler) effectiveProfile() (profiles.Profile, string, bool) {
 	if !open || trial {
 		return eff, key, trial
 	}
-	// Failover: route to the target profile's upstream, key, and config. The
-	// target's upstream honors the DS4_UPSTREAM_<NAME> override (the harness
-	// points both sides at fakes). The direct target takes real model names
-	// and ignores reasoning_effort — its cfg.Model is "" (None), so rewrite()
-	// leaves the sentinel and FAILOVER_MODEL remaps it to flash.
-	target := h.cfg.Failover
-	for _, p := range profiles.All() {
-		if p.Name == target {
-			// A target that is not installed here has no key and no config.
-			// Routing to it turns the profile's own recoverable transient
-			// errors into an unauthenticated 401 storm against another
-			// provider, so failover is moot: stay home and keep failing in the
-			// way the caller can actually understand.
-			if info, err := os.Stat(p.Dir); err != nil || !info.IsDir() {
-				return h.cfg, key, false
-			}
-			eff = p
-			eff.FailoverTarget = true
-			if o := os.Getenv("DS4_UPSTREAM_" + strings.ToUpper(p.Name)); o != "" {
-				eff.Upstream = o
-			}
-			key = os.Getenv("DS4_KEY_" + strings.ToUpper(p.Name))
-			if key == "" {
-				key = readKeyFromDir(p.Dir)
-			}
-			return eff, key, false
-		}
+	// Failover: route to the target profile's upstream, key, and config.
+	// failoverTarget owns the rules for what counts as a usable target, so the
+	// routing decision and the rescue path cannot drift apart.
+	if target, tkey, ok := h.failoverTarget(); ok {
+		return target, tkey, false
 	}
+	// No usable target: stay home and keep failing in the way the caller can
+	// actually understand.
 	return eff, key, false
 }
 
@@ -364,7 +344,7 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 			// serve this. Learning that the upstream is still down is the point
 			// of a trial, but the client should not pay for the lesson, and the
 			// same applies to the window before the breaker has tripped.
-			if h.rescueViaFailover(w, r, body, upstreamURL, origTier) {
+			if h.rescueViaFailover(w, r, body, upstreamURL, requires) {
 				resp.Body.Close()
 				return
 			}
@@ -387,7 +367,7 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 	if trial {
 		h.trialClose(false)
 	}
-	if !failedOver && h.rescueViaFailover(w, r, body, upstreamURL, origTier) {
+	if !failedOver && h.rescueViaFailover(w, r, body, upstreamURL, requires) {
 		return
 	}
 	// Pre-first-byte failure: 502 "proxy upstream failure".
@@ -413,12 +393,20 @@ func (h *Handler) relay(w http.ResponseWriter, r *http.Request, body []byte, ups
 // Returns true when the target served the request. The breaker is deliberately
 // NOT told about the outcome here: these attempts measure the target, and only
 // the profile's own upstream decides whether its circuit opens or closes.
-func (h *Handler) rescueViaFailover(w http.ResponseWriter, r *http.Request, body []byte, upstreamURL, origTier string) bool {
+func (h *Handler) rescueViaFailover(w http.ResponseWriter, r *http.Request, body []byte, upstreamURL string, requiresZDR bool) bool {
 	if h.cfg.Failover == "" {
 		return false
 	}
 	target, key, ok := h.failoverTarget()
 	if !ok {
+		return false
+	}
+	if requiresZDR && (!target.ZDR || !zdrEnabled()) {
+		// The 409 gate ran against the profile chosen at the top of the relay,
+		// and this changes the profile serving the request afterwards. Rescuing
+		// a ZDR-demanding request onto a target that enforces nothing would walk
+		// around a privacy gate that already passed. Let the origin's error
+		// stand instead.
 		return false
 	}
 	// Re-run the rewrite for the target: its family map, its ZDR policy, and
@@ -442,9 +430,21 @@ func (h *Handler) rescueViaFailover(w http.ResponseWriter, r *http.Request, body
 	if err != nil {
 		return false
 	}
-	if isTransient(resp.StatusCode) {
-		// The target is failing too. Let the caller surface the origin's own
-		// error rather than swapping in a second, more confusing one.
+	var errBody []byte
+	if resp.StatusCode >= 400 {
+		errBody, _ = io.ReadAll(io.LimitReader(resp.Body, errPeekLimit))
+		resp.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(errBody), resp.Body), resp.Body}
+	}
+	if isTransient(resp.StatusCode) || creditExhausted(resp.StatusCode, errBody) {
+		// The target is failing too, or is out of credit itself. Let the caller
+		// surface the origin's own error rather than swapping in a second, more
+		// confusing one — and in the drained case that caller answers with the
+		// 402 that says what is actually wrong, which is the whole point of the
+		// path. Streaming the target's own 404 here would put back exactly the
+		// "that model may not exist" misdiagnosis.
 		resp.Body.Close()
 		return false
 	}
@@ -469,6 +469,16 @@ func (h *Handler) failoverTarget() (profiles.Profile, string, bool) {
 		key := os.Getenv("DS4_KEY_" + strings.ToUpper(p.Name))
 		if key == "" {
 			key = readKeyFromDir(p.Dir)
+		}
+		if key == "" {
+			// The directory exists but carries no credential — a profile
+			// created and never finished, most often. Relaying there strips the
+			// client's authorization (it belongs to this profile, not that one)
+			// and sends nothing in its place, so every request comes back 401
+			// from a provider the user never configured, hiding the origin's
+			// actual outage behind an auth error. A target we cannot
+			// authenticate to is not a target.
+			return profiles.Profile{}, "", false
 		}
 		return p, key, true
 	}

@@ -238,9 +238,17 @@ func (h *Handler) sendClassifier(raw []byte, endpoint string, token string, w ht
 // it on the profile's own upstream.
 //
 // This is a trust-boundary knob, not a performance one: "ds4" is an explicit
-// decision to let DeepSeek judge whether a tool call is safe, and "zdr" an
-// explicit decision to avoid both DeepSeek and the subscription. Ignoring it
-// would silently override the user on the one setting where that matters most.
+// decision to let DeepSeek judge whether a tool call is safe, and "zdr" a
+// preference for the ZDR route over the subscription. Ignoring it would
+// silently override the user on the one setting where that matters most.
+//
+// "zdr" is a preference and not a prohibition, which is worth being exact
+// about: when or-ds4 cannot serve the route — not installed, or no key — the
+// relay falls through to "anthropic" and then to ds4, matching Python's order.
+// So the one thing DS4_CLASSIFIER=zdr does not promise is that the classifier
+// never reaches the subscription. A user who needs that has to leave or-ds4
+// configured; there is deliberately no fail-closed mode, because a classifier
+// that cannot run at all would brick auto mode entirely.
 func classifierRoute() string {
 	switch r := os.Getenv("DS4_CLASSIFIER"); r {
 	case "zdr", "ds4", "anthropic":

@@ -36,6 +36,13 @@ const (
 	// must not hold the request for minutes.
 	maxImagesPerRequest = 8
 	childTimeout        = 120 * time.Second
+	// A count cap alone does not bound time: the walk is serial, so the
+	// budget's worth of children each burning childTimeout is
+	// maxImagesPerRequest * childTimeout of held request — far past any client
+	// timeout, and a broken describer hits that ceiling every turn while
+	// producing nothing. The deadline is what actually bounds the wait; the
+	// count bounds the spend.
+	visionWallClock = 3 * time.Minute
 	// A single-flight waiter gives the winning child a little longer than its
 	// own timeout to finish and write the cache before giving up, matching
 	// Python's waiter.wait(timeout=130).
@@ -113,6 +120,7 @@ func rewriteImages(root *jsonpy.OrderedValue, cacheDir string) {
 	if !messages.IsArray() {
 		return
 	}
+	w := &visionWalk{cacheDir: cacheDir, deadline: visionNow().Add(visionWallClock)}
 	// The budget caps how many images may spawn a child on one request. Each
 	// child costs up to childTimeout and they run serially, so an uncapped
 	// transcript full of fresh images holds a single request for minutes and
@@ -123,13 +131,33 @@ func rewriteImages(root *jsonpy.OrderedValue, cacheDir string) {
 	// promised did nothing. That was ported verbatim to keep the two
 	// implementations byte-identical while both existed. Python is gone, so
 	// the cap is now enforced (STRML/cc-ds4#42).
-	budget := maxImagesPerRequest
+	w.budget = maxImagesPerRequest
 	for _, msg := range messages.Items() {
 		if !msg.IsObject() {
 			continue
 		}
-		rewriteBlocks(msg.Get("content"), cacheDir, &budget)
+		w.blocks(msg.Get("content"))
 	}
+}
+
+// visionNow is time.Now, swappable so a test can prove the deadline stops the
+// walk without waiting out a real one.
+var visionNow = time.Now
+
+// visionWalk carries the per-request limits down the recursion: how many
+// describes may still be spawned, and the wall-clock past which none may be.
+type visionWalk struct {
+	cacheDir string
+	budget   int
+	deadline time.Time
+}
+
+// spent reports whether this request may still spawn a describer. A cache hit
+// is not gated by either limit — it costs neither money nor measurable time,
+// and refusing one would placeholder an image the proxy already has a
+// description for.
+func (w *visionWalk) exhausted() bool {
+	return w.budget <= 0 || !visionNow().Before(w.deadline)
 }
 
 // rewriteBlocks walks one content list in place, replacing "image" blocks and
@@ -137,7 +165,7 @@ func rewriteImages(root *jsonpy.OrderedValue, cacheDir string) {
 // Read/screenshot/MCP images; one left nested there is silently dropped
 // upstream). content.Items() returns the array's own backing slice, so
 // writing items[i] mutates the tree jsonpy will re-emit.
-func rewriteBlocks(content *jsonpy.OrderedValue, cacheDir string, budget *int) {
+func (w *visionWalk) blocks(content *jsonpy.OrderedValue) {
 	if !content.IsArray() {
 		return
 	}
@@ -148,12 +176,13 @@ func rewriteBlocks(content *jsonpy.OrderedValue, cacheDir string, budget *int) {
 		}
 		switch block.Get("type").String() {
 		case "image":
-			if *budget <= 0 {
-				// Out of budget: placeholder it without spawning a child.
+			if w.exhausted() {
+				// Out of budget or out of time: placeholder it without
+				// spawning a child.
 				items[i] = placeholderBlock()
 				continue
 			}
-			replacement, spent := swapImage(block, cacheDir)
+			replacement, spent := swapImage(block, w.cacheDir)
 			items[i] = replacement
 			// Budget is charged for time spent, not for descriptions
 			// obtained. A cache hit costs nothing and is exempt — charging it
@@ -164,10 +193,10 @@ func rewriteBlocks(content *jsonpy.OrderedValue, cacheDir string, budget *int) {
 			// case run unbounded: the cap fails open in the one situation it
 			// exists to bound.
 			if spent {
-				*budget--
+				w.budget--
 			}
 		case "tool_result":
-			rewriteBlocks(block.Get("content"), cacheDir, budget)
+			w.blocks(block.Get("content"))
 		}
 	}
 }

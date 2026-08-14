@@ -198,8 +198,15 @@ func (h *Handler) breakerOpen() (open, trial bool) {
 	if h.probeUpstream(h.cfg) {
 		h.br.mu.Lock()
 		b.probes++
-		if b.probes >= failoverProbesToClose {
+		if b.probes >= failoverProbesToClose && !b.trialActive {
 			// Arm and claim in one step: this request is the trial.
+			//
+			// Not while another trial is in flight. A long streaming trial can
+			// outlast a whole recheck interval, and a second one claimed
+			// underneath it makes trialClose ambiguous: whichever finishes
+			// first clears trialActive, and the other — possibly the one served
+			// cleanly by a recovered upstream — returns early without closing
+			// the circuit.
 			b.trial = false
 			b.trialActive = true
 			b.probes = 0
