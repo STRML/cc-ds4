@@ -201,19 +201,19 @@ KEY = "REPLACE_WITH_NOUS_API_KEY"   # from step 1
 overrides = {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:31502",
     "ANTHROPIC_AUTH_TOKEN": KEY,
-    "ANTHROPIC_MODEL": "ds4-xhigh",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "ds4-xhigh",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "ds4-high",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "ds4-low",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL": "ds4-max",
-    "CLAUDE_CODE_SUBAGENT_MODEL": "ds4-high",
+    "ANTHROPIC_MODEL": "ds4-pro-xhigh",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "ds4-pro-medium",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "ds4-flash-xhigh",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "ds4-flash-medium",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "ds4-pro-xhigh",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "ds4-flash-xhigh",
     "ENABLE_TOOL_SEARCH": "false",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1048576",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1048576",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "65536",
 }
 s.setdefault("env", {}).update(overrides)
-s["model"] = "ds4-xhigh"
+s["model"] = "ds4-pro-xhigh"
 s.pop("fallbackModel", None)
 s["env"]["ANTHROPIC_API_KEY"] = ""   # must be blank, not absent
 json.dump(s, open(dst, "w"), indent=2)
@@ -317,7 +317,7 @@ launchctl kickstart gui/$(id -u)/com.strml.cc-ds4.proxy
 sleep 1
 curl -s -o /dev/null -w "proxy responded: %{http_code}\n" -X POST \
   http://127.0.0.1:31502/v1/messages -H 'content-type: application/json' \
-  -d '{"model":"ds4-low","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"ds4-flash-medium","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
 A 401 is expected and correct without a key in the header: it proves the proxy
@@ -522,7 +522,7 @@ exposes no public credits endpoint. The `💰` figure is priced at the discounte
 90%-off rate; if the discount ends, the figure (and the fallback in
 `src/statusline/nous.py`) must be updated to match.
 
-If the proxy is down the model name shows as `ds4-xhigh (proxy?)` rather than the
+If the proxy is down the model name shows as `ds4-pro-xhigh (proxy?)` rather than the
 real slug, which makes a dead proxy visible at a glance.
 
 ## Final report to the user

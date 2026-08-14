@@ -7,9 +7,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.9 is not decoration: the launch agents run /usr/bin/python3, which is
-        # 3.9 on macOS, so the proxies have to import and run there. 3.12 is what
-        # a brew or pyenv user gets. The README claims 3.9+, so prove it.
+        # 3.9 is not decoration: the status line runs under /usr/bin/python3,
+        # which is 3.9 on macOS. 3.12 is what a brew or pyenv user gets. The
+        # README claims 3.9+, so prove it.
         python-version: ["3.9", "3.12"]
     steps:
       - uses: actions/checkout@v4
@@ -19,7 +19,7 @@ jobs:
       # install.sh builds the Go proxy before writing any profile files, and
       # build_go hard-fails when the installed toolchain is < 1.26 (go.mod pins
       # 1.26.5). The runner's preinstalled Go is older, so the install tests
-      # need the same setup-go the go-test/diff-harness jobs get.
+      # need the same setup-go the go-test job gets.
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
@@ -27,7 +27,7 @@ jobs:
       - run: python3 -m compileall -q src tools
 
   go-test:
-    # The Go proxy is the Phase A target. Build it, vet, and race-test the
+    # The Go proxy is the only implementation. Build it, vet, and race-test the
     # concurrency-critical packages on every push.
     runs-on: ubuntu-latest
     steps:
@@ -41,27 +41,6 @@ jobs:
           go vet ./...
           go test ./...
           go test -race ./internal/proxy/ ./internal/relay/
-
-  diff-harness:
-    # The differential harness proves the Go proxy is byte-identical to the
-    # Python oracle on the Phase A corpus. Boots the Python proxy in-process
-    # and the Go binary at the same fake upstreams, then compares.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26"
-      - name: build + differential harness
-        run: |
-          cd src/go
-          go build -o cmd/ds4-proxy/ds4-proxy ./cmd/ds4-proxy
-          cd ../..
-          mkdir -p "$HOME/.claude-ds4" "$HOME/.claude-or-ds4" "$HOME/.claude-nous"
-          python3 tests/diff/run_diff.py
 
   shell:
     runs-on: ubuntu-latest
@@ -79,21 +58,27 @@ jobs:
         run: bash tests/test_install.sh
 
   proxies-start:
-    # The unit tests import the proxies but never bind a socket. A proxy that is
-    # syntax-clean and still dies on startup breaks every profile, and that
-    # failure stays invisible until someone launches a session.
+    # The unit tests exercise the handler but never bind a socket. A proxy that
+    # builds and still dies on startup breaks every profile, and that failure
+    # stays invisible until someone launches a session.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          python-version: "3.12"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
       - name: each proxy binds its port and forwards
         run: |
           set -euo pipefail
+          cd src/go
+          go build -o cmd/ds4-proxy/ds4-proxy ./cmd/ds4-proxy
+          cd ../..
           # One process serves every profile whose directory exists, so make one.
           mkdir -p "$HOME/.claude-ds4" "$HOME/.claude-or-ds4" "$HOME/.claude-nous"
-          DS4_IDLE_EXIT=0 python3 src/proxy.py &
+          DS4_IDLE_EXIT=0 src/go/cmd/ds4-proxy/ds4-proxy &
           pid=$!
           for port in 31500 31501 31502; do
             for _ in $(seq 40); do
@@ -103,7 +88,7 @@ jobs:
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
               -X POST "http://127.0.0.1:$port/v1/messages" \
               -H 'content-type: application/json' \
-              -d '{"model":"ds4-low","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}' || true)
+              -d '{"model":"ds4-flash-medium","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}' || true)
             echo "port $port -> HTTP $code"
             # Any status proves it bound, parsed the body, and reached upstream.
             # 000 means curl got no response at all, which is the real failure.
