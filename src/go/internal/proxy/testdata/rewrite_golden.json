@@ -10,8 +10,8 @@
     "case": "main-loop",
     "profile": "openrouter",
     "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"hi\",\"role\":\"user\"}],\"model\":\"ds4-pro-xhigh\",\"thinking\":{\"type\":\"adaptive\"}}",
-    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"hi\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4-flash-0731:nitro\", \"thinking\": {\"type\": \"adaptive\"}, \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
-    "note": "ds4-pro-xhigh -> deepseek/deepseek-v4-flash-0731:nitro effort=xhigh"
+    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"hi\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4.1-flash\", \"thinking\": {\"type\": \"adaptive\"}, \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
+    "note": "ds4-pro-xhigh -> deepseek/deepseek-v4.1-flash effort=xhigh"
   },
   {
     "case": "main-loop",
@@ -31,8 +31,8 @@
     "case": "subagent",
     "profile": "openrouter",
     "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"summarize the diff\",\"role\":\"user\"},{\"content\":\"Done.\",\"role\":\"assistant\"},{\"content\":\"now the tests\",\"role\":\"user\"}],\"model\":\"ds4-flash-xhigh\",\"thinking\":{\"type\":\"adaptive\"}}",
-    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"summarize the diff\", \"role\": \"user\"}, {\"content\": \"Done.\", \"role\": \"assistant\"}, {\"content\": \"now the tests\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4-flash-0731:nitro\", \"thinking\": {\"type\": \"adaptive\"}, \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
-    "note": "ds4-flash-xhigh -> deepseek/deepseek-v4-flash-0731:nitro effort=xhigh"
+    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"summarize the diff\", \"role\": \"user\"}, {\"content\": \"Done.\", \"role\": \"assistant\"}, {\"content\": \"now the tests\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4.1-flash\", \"thinking\": {\"type\": \"adaptive\"}, \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
+    "note": "ds4-flash-xhigh -> deepseek/deepseek-v4.1-flash effort=xhigh"
   },
   {
     "case": "subagent",
@@ -52,8 +52,8 @@
     "case": "classifier",
     "profile": "openrouter",
     "body": "{\"max_tokens\":2048,\"messages\":[{\"content\":\"hi\",\"role\":\"user\"}],\"model\":\"ds4-flash-xhigh\",\"thinking\":{\"type\":\"adaptive\"}}",
-    "want": "{\"max_tokens\": 2048, \"messages\": [{\"content\": \"hi\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4-flash-0731:nitro\", \"thinking\": {\"type\": \"disabled\"}, \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
-    "note": "ds4-flash-xhigh -> deepseek/deepseek-v4-flash-0731:nitro effort=xhigh, max_tokens=2048 -> thinking disabled"
+    "want": "{\"max_tokens\": 2048, \"messages\": [{\"content\": \"hi\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4.1-flash\", \"thinking\": {\"type\": \"disabled\"}, \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
+    "note": "ds4-flash-xhigh -> deepseek/deepseek-v4.1-flash effort=xhigh, max_tokens=2048 -> thinking disabled"
   },
   {
     "case": "classifier",
@@ -73,8 +73,8 @@
     "case": "thinking-inject",
     "profile": "openrouter",
     "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"run it\",\"role\":\"user\"},{\"content\":[{\"id\":\"toolu_01\",\"input\":{\"command\":\"ls\"},\"name\":\"Bash\",\"type\":\"tool_use\"}],\"role\":\"assistant\"}],\"model\":\"ds4-pro-xhigh\"}",
-    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"run it\", \"role\": \"user\"}, {\"content\": [{\"id\": \"toolu_01\", \"input\": {\"command\": \"ls\"}, \"name\": \"Bash\", \"type\": \"tool_use\"}], \"role\": \"assistant\"}], \"model\": \"deepseek/deepseek-v4-flash-0731:nitro\", \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
-    "note": "ds4-pro-xhigh -> deepseek/deepseek-v4-flash-0731:nitro effort=xhigh"
+    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"run it\", \"role\": \"user\"}, {\"content\": [{\"id\": \"toolu_01\", \"input\": {\"command\": \"ls\"}, \"name\": \"Bash\", \"type\": \"tool_use\"}], \"role\": \"assistant\"}], \"model\": \"deepseek/deepseek-v4.1-flash\", \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
+    "note": "ds4-pro-xhigh -> deepseek/deepseek-v4.1-flash effort=xhigh"
   },
   {
     "case": "thinking-inject",
@@ -86,21 +86,21 @@
   {
     "case": "non-ascii",
     "profile": "direct",
-    "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"café 日本語 😀 <>& 1.0\",\"role\":\"user\"}],\"model\":\"ds4-pro-xhigh\"}",
+    "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"caf\u00e9 \u65e5\u672c\u8a9e \ud83d\ude00 <>& 1.0\",\"role\":\"user\"}],\"model\":\"ds4-pro-xhigh\"}",
     "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"caf\\u00e9 \\u65e5\\u672c\\u8a9e \\ud83d\\ude00 <>& 1.0\", \"role\": \"user\"}], \"model\": \"deepseek-v4-pro\"}",
     "note": "ds4-pro-xhigh -> deepseek-v4-pro"
   },
   {
     "case": "non-ascii",
     "profile": "openrouter",
-    "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"café 日本語 😀 <>& 1.0\",\"role\":\"user\"}],\"model\":\"ds4-pro-xhigh\"}",
-    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"caf\\u00e9 \\u65e5\\u672c\\u8a9e \\ud83d\\ude00 <>& 1.0\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4-flash-0731:nitro\", \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
-    "note": "ds4-pro-xhigh -> deepseek/deepseek-v4-flash-0731:nitro effort=xhigh"
+    "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"caf\u00e9 \u65e5\u672c\u8a9e \ud83d\ude00 <>& 1.0\",\"role\":\"user\"}],\"model\":\"ds4-pro-xhigh\"}",
+    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"caf\\u00e9 \\u65e5\\u672c\\u8a9e \\ud83d\\ude00 <>& 1.0\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4.1-flash\", \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
+    "note": "ds4-pro-xhigh -> deepseek/deepseek-v4.1-flash effort=xhigh"
   },
   {
     "case": "non-ascii",
     "profile": "nous",
-    "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"café 日本語 😀 <>& 1.0\",\"role\":\"user\"}],\"model\":\"ds4-pro-xhigh\"}",
+    "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"caf\u00e9 \u65e5\u672c\u8a9e \ud83d\ude00 <>& 1.0\",\"role\":\"user\"}],\"model\":\"ds4-pro-xhigh\"}",
     "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"caf\\u00e9 \\u65e5\\u672c\\u8a9e \\ud83d\\ude00 <>& 1.0\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4-flash-0731\", \"reasoning_effort\": \"xhigh\"}",
     "note": "ds4-pro-xhigh -> deepseek/deepseek-v4-flash-0731 effort=xhigh"
   },
@@ -115,8 +115,8 @@
     "case": "big-int",
     "profile": "openrouter",
     "body": "{\"max_tokens\":32000,\"model\":\"ds4-pro-xhigh\",\"temperature\":9007199254740993}",
-    "want": "{\"max_tokens\": 32000, \"model\": \"deepseek/deepseek-v4-flash-0731:nitro\", \"temperature\": 9007199254740993, \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
-    "note": "ds4-pro-xhigh -> deepseek/deepseek-v4-flash-0731:nitro effort=xhigh"
+    "want": "{\"max_tokens\": 32000, \"model\": \"deepseek/deepseek-v4.1-flash\", \"temperature\": 9007199254740993, \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
+    "note": "ds4-pro-xhigh -> deepseek/deepseek-v4.1-flash effort=xhigh"
   },
   {
     "case": "big-int",
@@ -136,8 +136,8 @@
     "case": "exponent-float",
     "profile": "openrouter",
     "body": "{\"max_tokens\":32000,\"model\":\"ds4-pro-xhigh\",\"temperature\":1.5e-07,\"top_p\":1e+100}",
-    "want": "{\"max_tokens\": 32000, \"model\": \"deepseek/deepseek-v4-flash-0731:nitro\", \"temperature\": 1.5e-07, \"top_p\": 1e+100, \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
-    "note": "ds4-pro-xhigh -> deepseek/deepseek-v4-flash-0731:nitro effort=xhigh"
+    "want": "{\"max_tokens\": 32000, \"model\": \"deepseek/deepseek-v4.1-flash\", \"temperature\": 1.5e-07, \"top_p\": 1e+100, \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
+    "note": "ds4-pro-xhigh -> deepseek/deepseek-v4.1-flash effort=xhigh"
   },
   {
     "case": "exponent-float",
@@ -157,8 +157,8 @@
     "case": "retry-503",
     "profile": "openrouter",
     "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"retry me\",\"role\":\"user\"}],\"model\":\"ds4-flash-xhigh\"}",
-    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"retry me\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4-flash-0731:nitro\", \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
-    "note": "ds4-flash-xhigh -> deepseek/deepseek-v4-flash-0731:nitro effort=xhigh"
+    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"retry me\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4.1-flash\", \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
+    "note": "ds4-flash-xhigh -> deepseek/deepseek-v4.1-flash effort=xhigh"
   },
   {
     "case": "retry-503",
@@ -178,8 +178,8 @@
     "case": "failover",
     "profile": "openrouter",
     "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"failover me\",\"role\":\"user\"}],\"model\":\"ds4-flash-xhigh\"}",
-    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"failover me\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4-flash-0731:nitro\", \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
-    "note": "ds4-flash-xhigh -> deepseek/deepseek-v4-flash-0731:nitro effort=xhigh"
+    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"failover me\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4.1-flash\", \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
+    "note": "ds4-flash-xhigh -> deepseek/deepseek-v4.1-flash effort=xhigh"
   },
   {
     "case": "failover",
@@ -199,8 +199,8 @@
     "case": "auth-missing",
     "profile": "openrouter",
     "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"who am i\",\"role\":\"user\"}],\"model\":\"ds4-flash-xhigh\"}",
-    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"who am i\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4-flash-0731:nitro\", \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
-    "note": "ds4-flash-xhigh -> deepseek/deepseek-v4-flash-0731:nitro effort=xhigh"
+    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"who am i\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4.1-flash\", \"reasoning_effort\": \"xhigh\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
+    "note": "ds4-flash-xhigh -> deepseek/deepseek-v4.1-flash effort=xhigh"
   },
   {
     "case": "auth-missing",
@@ -220,8 +220,8 @@
     "case": "medium-effort",
     "profile": "openrouter",
     "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"think less\",\"role\":\"user\"}],\"model\":\"ds4-flash-medium\"}",
-    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"think less\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4-flash-0731:nitro\", \"reasoning_effort\": \"medium\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
-    "note": "ds4-flash-medium -> deepseek/deepseek-v4-flash-0731:nitro effort=medium"
+    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"think less\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4.1-flash\", \"reasoning_effort\": \"medium\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
+    "note": "ds4-flash-medium -> deepseek/deepseek-v4.1-flash effort=medium"
   },
   {
     "case": "medium-effort",
@@ -241,8 +241,8 @@
     "case": "pro-family",
     "profile": "openrouter",
     "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"the big one\",\"role\":\"user\"}],\"model\":\"ds4-pro-medium\"}",
-    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"the big one\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4-flash-0731:nitro\", \"reasoning_effort\": \"medium\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
-    "note": "ds4-pro-medium -> deepseek/deepseek-v4-flash-0731:nitro effort=medium"
+    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"the big one\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4.1-flash\", \"reasoning_effort\": \"medium\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
+    "note": "ds4-pro-medium -> deepseek/deepseek-v4.1-flash effort=medium"
   },
   {
     "case": "pro-family",
@@ -262,8 +262,8 @@
     "case": "client-effort",
     "profile": "openrouter",
     "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"think hard\",\"role\":\"user\"}],\"model\":\"ds4-flash-medium\",\"reasoning_effort\":\"max\"}",
-    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"think hard\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4-flash-0731:nitro\", \"reasoning_effort\": \"max\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
-    "note": "ds4-flash-medium -> deepseek/deepseek-v4-flash-0731:nitro effort=max"
+    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"think hard\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4.1-flash\", \"reasoning_effort\": \"max\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
+    "note": "ds4-flash-medium -> deepseek/deepseek-v4.1-flash effort=max"
   },
   {
     "case": "client-effort",
@@ -283,8 +283,8 @@
     "case": "bad-effort",
     "profile": "openrouter",
     "body": "{\"max_tokens\":32000,\"messages\":[{\"content\":\"typo\",\"role\":\"user\"}],\"model\":\"ds4-flash-medium\",\"reasoning_effort\":\"banana\"}",
-    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"typo\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4-flash-0731:nitro\", \"reasoning_effort\": \"medium\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
-    "note": "ds4-flash-medium -> deepseek/deepseek-v4-flash-0731:nitro effort=medium"
+    "want": "{\"max_tokens\": 32000, \"messages\": [{\"content\": \"typo\", \"role\": \"user\"}], \"model\": \"deepseek/deepseek-v4.1-flash\", \"reasoning_effort\": \"medium\", \"provider\": {\"zdr\": true, \"data_collection\": \"deny\", \"ignore\": [\"Io Net\"]}}",
+    "note": "ds4-flash-medium -> deepseek/deepseek-v4.1-flash effort=medium"
   },
   {
     "case": "bad-effort",

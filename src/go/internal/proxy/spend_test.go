@@ -22,7 +22,7 @@ func TestBaseModel(t *testing.T) {
 		want  string
 	}{
 		{"nitro suffix stripped", "deepseek/deepseek-v4-flash-0731:nitro", "deepseek/deepseek-v4-flash-0731"},
-		{"no suffix untouched", "deepseek/deepseek-v4-flash-0731", "deepseek/deepseek-v4-flash-0731"},
+		{"no suffix untouched", "deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash"},
 		{"bare direct id untouched", "deepseek-v4-flash", "deepseek-v4-flash"},
 		{"empty model", "", ""},
 	}

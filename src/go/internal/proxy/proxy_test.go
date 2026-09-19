@@ -58,7 +58,7 @@ func TestRewriteFailoverTargetRemapsProfileID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model": "deepseek/deepseek-v4-flash-0731:nitro", "max_tokens": 32000, "messages": [], "provider": {"zdr": true, "data_collection": "deny", "ignore": ["Io Net"]}}`
+	want := `{"model": "deepseek/deepseek-v4.1-flash", "max_tokens": 32000, "messages": [], "provider": {"zdr": true, "data_collection": "deny", "ignore": ["Io Net"]}}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
 	}
@@ -70,12 +70,12 @@ func TestRewriteFailoverTargetRemapsProfileID(t *testing.T) {
 func TestRewriteFailoverTargetStripsVariantSuffix(t *testing.T) {
 	cfg := testDirect()
 	cfg.FailoverTarget = true
-	body := []byte(`{"model": "deepseek/deepseek-v4-flash-0731:nitro", "max_tokens": 32000, "messages": []}`)
+	body := []byte(`{"model": "deepseek/deepseek-v4.1-flash", "max_tokens": 32000, "messages": []}`)
 	got, err := rewrite(body, cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model": "deepseek/deepseek-v4-flash-0731:nitro", "max_tokens": 32000, "messages": []}`
+	want := `{"model": "deepseek/deepseek-v4.1-flash", "max_tokens": 32000, "messages": []}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
 	}
@@ -128,7 +128,7 @@ func TestRewriteMaxOutClamp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model": "deepseek/deepseek-v4-flash-0731:nitro", "max_tokens": 65536, "messages": [], "reasoning_effort": "xhigh", "provider": {"zdr": true, "data_collection": "deny", "ignore": ["Io Net"]}}`
+	want := `{"model": "deepseek/deepseek-v4.1-flash", "max_tokens": 65536, "messages": [], "reasoning_effort": "xhigh", "provider": {"zdr": true, "data_collection": "deny", "ignore": ["Io Net"]}}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
 	}
@@ -193,7 +193,7 @@ func TestRewriteZDR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"model": "deepseek/deepseek-v4-flash-0731:nitro", "max_tokens": 32000, "messages": [], "reasoning_effort": "medium", "provider": {"zdr": true, "data_collection": "deny", "ignore": ["Io Net"]}}`
+	want := `{"model": "deepseek/deepseek-v4.1-flash", "max_tokens": 32000, "messages": [], "reasoning_effort": "medium", "provider": {"zdr": true, "data_collection": "deny", "ignore": ["Io Net"]}}`
 	if string(got) != want {
 		t.Errorf("rewrite = %s\nwant %s", got, want)
 	}

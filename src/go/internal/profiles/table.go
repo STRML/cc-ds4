@@ -56,17 +56,17 @@ var table = []Profile{
 		Port:     31501,
 		Dir:      "~/.claude-or-ds4",
 		Upstream: "https://openrouter.ai/api",
-		// :nitro is OR's sort=throughput variant — the fastest providers. The
-		// suffix rides the model id into every request; exact-id consumers
-		// (pricing, the failover remap) strip it back to the base id first.
-		Model:  "deepseek/deepseek-v4-flash-0731:nitro",
+		// deepseek-v4.1-flash is the current flash generation (supersedes the
+		// pinned -0731 build). No :nitro suffix: OR's 4.1 pool is unsorted, so
+		// the suffix would request a variant OR does not list.
+		Model:  "deepseek/deepseek-v4.1-flash",
 		Effort: true,
 		// pro-0813 has no usable host on OR (404), so the pro family falls
 		// back to flash here. Never the unversioned originals — OR has them
 		// but they bill differently.
 		FamilyModels: map[string]string{
-			"pro":   "deepseek/deepseek-v4-flash-0731:nitro",
-			"flash": "deepseek/deepseek-v4-flash-0731:nitro",
+			"pro":   "deepseek/deepseek-v4.1-flash",
+			"flash": "deepseek/deepseek-v4.1-flash",
 		},
 		ZDR: true,
 		// pro-0813's only host is DeepSeek itself, which rejects the ZDR block

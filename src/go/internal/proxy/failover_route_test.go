@@ -173,7 +173,7 @@ func TestFailoverEndToEndRemapsModelAndHitsTarget(t *testing.T) {
 	}
 	// The sentinel resolves through the TARGET's family map, so the origin
 	// profile's plain id must not reach an upstream that does not serve it.
-	if !strings.Contains(gotBody, `"model": "deepseek/deepseek-v4-flash-0731:nitro"`) {
+	if !strings.Contains(gotBody, `"model": "deepseek/deepseek-v4.1-flash"`) {
 		t.Errorf("model not resolved for the target: %s", gotBody)
 	}
 	if gotAuth != "Bearer target-key" {

@@ -22,13 +22,13 @@ import (
 //
 // Both families land on flash: pro-0813 has no usable OpenRouter host.
 var failoverModel = map[string]string{
-	"ds4-pro-xhigh":    "deepseek/deepseek-v4-flash-0731:nitro",
-	"ds4-pro-medium":   "deepseek/deepseek-v4-flash-0731:nitro",
-	"ds4-flash-xhigh":  "deepseek/deepseek-v4-flash-0731:nitro",
-	"ds4-flash-medium": "deepseek/deepseek-v4-flash-0731:nitro",
-	// Nous's own qualified id. A :nitro variant strips to this base id first;
-	// without the key the plain id would ride onto the target unchanged.
-	"deepseek/deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash-0731:nitro",
+	"ds4-pro-xhigh":    "deepseek/deepseek-v4.1-flash",
+	"ds4-pro-medium":   "deepseek/deepseek-v4.1-flash",
+	"ds4-flash-xhigh":  "deepseek/deepseek-v4.1-flash",
+	"ds4-flash-medium": "deepseek/deepseek-v4.1-flash",
+	// Nous's own qualified id (the pinned -0731 build still serves there).
+	// Without the key the plain id would ride onto the target unchanged.
+	"deepseek/deepseek-v4-flash-0731": "deepseek/deepseek-v4.1-flash",
 }
 
 // sentinel is what a ds4-* model name decodes to: which model family serves

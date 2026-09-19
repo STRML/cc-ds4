@@ -16,7 +16,7 @@ import (
 
 const (
 	nousModel   = "deepseek/deepseek-v4-flash-0731"
-	orModel     = "deepseek/deepseek-v4-flash-0731:nitro"
+	orModel     = "deepseek/deepseek-v4.1-flash"
 	directPro   = "deepseek-v4-pro"
 	directFlash = "deepseek-v4-flash"
 )
