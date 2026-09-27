@@ -16,7 +16,7 @@ Run the CLI via a Bash call (read-only; the sandbox is fine):
 ```bash
 ~/.claude/skills/ds4-skill-family/bin/ds4-run \
   --profile {nous|openrouter|direct} \
-  --tier {pro-xhigh|pro-medium} \
+  --tier {flash-xhigh|pro-xhigh|pro-medium} \
   --role plan \
   [--model <id>] [--timeout <secs>] \
   --prompt-text '<what to plan>'
@@ -24,10 +24,11 @@ Run the CLI via a Bash call (read-only; the sandbox is fine):
 
 - `nous` (cheapest, no ZDR) or `openrouter` (ZDR, slower) for real work;
   `direct` for scratch. Details in `../ds4-skill-family/references/profiles.md`.
-- `pro-xhigh` is the default tier for planning; there is no tier above it.
-  On `direct` the effort half is ignored (the endpoint takes no
-  `reasoning_effort`), so `pro-xhigh` and `pro-medium` are the same request
-  there — but the family half still selects pro, which direct does serve.
+- Tier: `pro-xhigh` on `direct`, the one profile that serves the pro model.
+  The effort half is ignored there (the endpoint takes no `reasoning_effort`),
+  so `pro-xhigh` and `pro-medium` are the same request. On `openrouter`/`nous`
+  use `flash-xhigh`: both families are the same flash model there, and pro
+  gets fewer upstream retries.
 - The child cannot write files — it returns a proposal. Say so in the prompt
   ("propose an approach; do not write files") so it doesn't try to draft into a
   plan file.

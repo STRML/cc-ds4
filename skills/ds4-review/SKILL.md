@@ -16,7 +16,7 @@ Shells out via Bash. Read-only; no `dangerouslyDisableSandbox` needed.
 ```bash
 ~/.claude/skills/ds4-skill-family/bin/ds4-run \
   --profile {nous|openrouter} \
-  --tier {pro-xhigh|pro-medium} \
+  --tier {flash-xhigh|pro-xhigh|pro-medium} \
   --role review \
   --timeout 900 \
   --prompt-text '<diff or review prompt>'
@@ -25,15 +25,18 @@ Shells out via Bash. Read-only; no `dangerouslyDisableSandbox` needed.
 - Profile: prefer `openrouter` when the diff/context carries private code (ZDR).
   `nous` for scratch; `direct` for quick turnaround where privacy is unconstrained.
   Never silently fall back to `nous` for private code when `openrouter` fails.
-- Tier: `pro-xhigh` (default) for load-bearing merges, `pro-medium` when the
-  diff is small. or-ds4 runs are slow;
-  300 is too tight for a real review, use 900+.
+- Tier: on `openrouter`/`nous`, `flash-xhigh` (both families are the same flash
+  model there, and flash gets three upstream retries to pro's one). On `direct`,
+  `pro-xhigh` for load-bearing merges and `pro-medium` when the diff is small.
+  Money/security/irreversible changes follow the floor in
+  `../ds4-skill-family/references/roles.md`. or-ds4 runs are slow; 300 is too
+  tight for a real review, use 900+.
 - The child Reads the repo **from the spawn cwd** — so `cd` into the worktree that
   holds the commit under review, in the same command. Launching from the session's
   default directory silently reviews whatever branch happens to be checked out
   there. Echo `pwd && git rev-parse --abbrev-ref HEAD` ahead of the run to prove it.
 - Auth fails fast and cheap (`401 User not found` when a profile has no credentials
-  file). Before a long run, burn ten seconds on a `--tier pro-medium` probe that
+  file). Before a long run, burn ten seconds on a `--tier flash-medium` probe that
   just asks it to reply `AUTH OK`.
 
 ## What it is good at

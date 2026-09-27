@@ -1,6 +1,6 @@
 ---
 name: ds4-skill-family
-description: "Run headless DeepSeek-V4 subagents (ds4, or-ds4, nous-ds4) from any Claude profile for plan, implement, verify, and review work, with the opus-5 main loop as coordinator. Use when you want a task run on a cc-ds4 profile, spawn a ds4 worker, or dispatch a subagent on DeepSeek."
+description: "Run headless DeepSeek-V4 subagents (ds4, or-ds4, nous-ds4) from any Claude profile for plan, implement, verify, and review work, with the Anthropic main loop as coordinator. Use when you want a task run on a cc-ds4 profile, spawn a ds4 worker, or dispatch a subagent on DeepSeek."
 ---
 
 # ds4 subagent family
@@ -19,7 +19,7 @@ permission mode per role. The child returns `result:<text>` / `error:<text>`.
 
 Run the CLI via a Bash call. After `install.sh` the skill lands at
 `~/.claude/skills/ds4-skill-family`; from any cwd use that absolute path.
-If running from inside the cc-ds4 checkout the repo-relative path works:
+Inside the cc-ds4 checkout, `skills/ds4-skill-family/bin/ds4-run` also works.
 
 ```bash
 ~/.claude/skills/ds4-skill-family/bin/ds4-run \
@@ -42,12 +42,17 @@ Choose tier/role from `references/roles.md` and profile from `references/profile
 
 1. **Choose profile** — `nous` (cheapest, opportunistic) or `openrouter` (ZDR,
    safest) for real work; `direct` only for scratch. `references/profiles.md`.
-2. **Choose tier** — `pro-xhigh` for planning and load-bearing review;
-   `flash-xhigh` for implementation; `flash-medium` for mechanical sweeps and
-   quick verify. Never route money/security/irreversible work lower than
-   `flash-xhigh` with a Fable/Opus verify.
-   On `direct` the tier is ignored (the endpoint takes no `reasoning_effort` and
-   exposes only `deepseek-v4-flash`/`-pro`) — use or-ds4/nous for effort control.
+2. **Choose tier** — `flash-xhigh` for implementation, and for planning and
+   load-bearing review on `openrouter`/`nous`; `pro-xhigh` for planning and
+   load-bearing review on `direct`; `flash-medium` for mechanical sweeps and
+   quick verify. On `openrouter`/`nous`, `pro-*` is the same flash model with
+   fewer upstream retries, so it is never the better choice there.
+   Money/security/irreversible work never routes lower than `pro-xhigh`, and a
+   Claude/Opus or Fable pass verifies it. Only `direct` serves the pro model; on
+   `openrouter`/`nous` `pro-xhigh` is the flash model, so there the Claude/Fable
+   verify is what holds the floor.
+   On `direct` only the tier's family half applies (pro vs flash); the endpoint
+   takes no `reasoning_effort`, so use or-ds4/nous for effort control.
 3. **Run** via Bash. Wait for completion; the CLI blocks until the child exits.
 4. **Ground the result** — spot-check load-bearing claims against the code
    (`references/roles.md` verify floor: never verify with the same tier that

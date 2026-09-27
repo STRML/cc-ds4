@@ -80,7 +80,7 @@ the tree may declare them.
 | profile | port | upstream | model | zdr | max_out | failover |
 |---|---|---|---|---|---|---|
 | direct | 31500 | api.deepseek.com/anthropic | none (family map only) | no | 65536 | none |
-| openrouter | 31501 | openrouter.ai/api | deepseek/deepseek-v4-flash-0731:nitro | yes | 65536 | none |
+| openrouter | 31501 | openrouter.ai/api | deepseek/deepseek-v4.1-flash | yes | 65536 | none |
 | nous | 31502 | inference-api.nousresearch.com | deepseek/deepseek-v4-flash-0731 | no | 65536 | openrouter |
 
 Each profile maps a sentinel's model family to an id. Only direct serves pro:

@@ -60,7 +60,7 @@ OpenRouter** unless they say otherwise.
 
 | Backend | Base URL | Model ID | Auth | Notes |
 |---|---|---|---|---|
-| **OpenRouter** (default) | `https://openrouter.ai/api` | `deepseek/deepseek-v4-flash-0731` | real key required | 1M context. Hosted, nothing to run locally. |
+| **OpenRouter** (default) | `https://openrouter.ai/api` | `deepseek/deepseek-v4.1-flash` | real key required | 1M context. Hosted, nothing to run locally. |
 | **Local ds4-server** | `http://127.0.0.1:8765` | `deepseek-v4-flash` | none (any placeholder) | Requires the GGUF on disk and the server running. Context limited by what you launched with. |
 
 Both speak the Anthropic `/v1/messages` API, so Claude Code talks to either without
@@ -122,7 +122,7 @@ Each tier maps to a different effort:
 
 This cannot be done with model IDs alone. OpenRouter accepts `reasoning_effort` as a
 **request parameter**, and for this model there are no effort-suffixed slugs (no
-`deepseek/deepseek-v4-flash-0731-high` or similar — verify with
+`deepseek/deepseek-v4.1-flash-high` or similar — verify with
 `curl -s https://openrouter.ai/api/v1/models | grep v4-flash` if you want to confirm
 before building the proxy). `CLAUDE_CODE_EFFORT_LEVEL` is a single global with no
 per-tier variant. So a small proxy has to inject the parameter. Step 6 builds it.
@@ -589,7 +589,7 @@ That self-test exists for a reason. A wrapper that swallows exceptions is right 
 robustness, but it turns a plain `NameError` into a blank bar and exit 0. Silence is
 not success.
 
-Renders as `or-deepseek-v4-flash-0731 xhigh  ░░░░░░░░░░3%  💰 <$0.01 · 📆 7d $0.31 · 💳 $18.42 left`.
+Renders as `or-deepseek-v4.1-flash xhigh  ░░░░░░░░░░3%  💰 <$0.01 · 📆 7d $0.31 · 💳 $18.42 left`.
 
 The `or-` prefix names the **backend**, not the endpoint that served the request. That
 is deliberate: OpenRouter re-routes between providers request to request, so a bar

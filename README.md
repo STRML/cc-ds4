@@ -59,7 +59,7 @@ anything irreversible:
 | Profile | Provider | Model | Pins a dated build? | Extra process | Setup |
 |---|---|---|---|---|---|
 | `claude-ds4` | DeepSeek direct | `deepseek-v4-flash` / `-pro` | no | proxy on :31500 | [prompt](profiles/deepseek-direct.md) |
-| `claude-or-ds4` | OpenRouter | `deepseek-v4-flash-0731` | **yes** | proxy on :31501 | [prompt](profiles/openrouter.md) |
+| `claude-or-ds4` | OpenRouter | `deepseek-v4.1-flash` | no | proxy on :31501 | [prompt](profiles/openrouter.md) |
 | `claude-nous` | Nous Portal | `deepseek-v4-flash-0731` | **yes** | proxy on :31502 | [prompt](profiles/nous.md) |
 | `claude-kimi` | Moonshot | `kimi-k3` / `k3` | n/a | none | [prompt](profiles/kimi.md) |
 
@@ -108,10 +108,10 @@ Both profiles run a local proxy that has to be up, so that is no longer a reason
 prefer one. See [thinking mode](#thinking-mode-is-on-by-default-and-it-eats-the-small-calls)
 for why the direct profile grew one.
 
-**Use `claude-or-ds4` when a pinned build matters,** too. DeepSeek's own API accepts
-exactly two model names and has no dated variants, so `deepseek-v4-flash` floats to
-whatever they ship. OpenRouter serves `deepseek/deepseek-v4-flash-0731` explicitly at
-1,048,576 context.
+**Use `claude-nous` when a pinned build matters.** DeepSeek's own API accepts exactly
+two model names and has no dated variants, so `deepseek-v4-flash` floats to whatever
+they ship, and OpenRouter serves the `deepseek/deepseek-v4.1-flash` pool. Nous serves
+`deepseek/deepseek-v4-flash-0731` explicitly at 1,048,576 context.
 
 **`claude-kimi` is independent** of the other two and predates them. Same profile
 structure, different provider.
@@ -136,7 +136,8 @@ Facts worth knowing before you rely on it:
   retention. The only way to learn the ZDR pool is to send `zdr: true` and read back
   which provider answered.
 - **ZDR is not as restrictive as it sounds.** 7 of 11 endpoints survive the filter
-  for `deepseek-v4-flash-0731`:
+  for `deepseek-v4-flash-0731` (measured before OpenRouter moved the profile to
+  `deepseek-v4.1-flash`; re-check the pool for the new model):
 
   | | endpoints |
   |---|---|
@@ -182,7 +183,7 @@ per-tier effort proxy — the differences are the point:
   `urllib` User-Agent (`error code: 1010`). The proxy now sends a `curl`-style UA
   (`DS4_UA`) on every outbound request — required for Nous, harmless for the other
   profiles it forwards.
-- **Pinned build.** Like OpenRouter, Nous serves the dated `deepseek-v4-flash-0731`
+- **Pinned build.** Nous serves the dated `deepseek-v4-flash-0731`
   at 1,048,576 context, so the build does not float. It also lists a
   `~deepseek/...-latest` alias, which the setup deliberately avoids.
 
@@ -430,7 +431,7 @@ coordinator shells out via Bash:
 ```bash
 ~/.claude/skills/ds4-skill-family/bin/ds4-run \
   --profile {nous|openrouter|direct} \
-  --tier {pro-xhigh|pro-medium} \
+  --tier {pro-xhigh|pro-medium|flash-xhigh|flash-medium} \
   --role plan \
   --prompt-text 'propose an approach to X; do not write files'
 ```

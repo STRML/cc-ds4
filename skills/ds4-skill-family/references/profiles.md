@@ -19,7 +19,7 @@ direct runs pro, the one endpoint that serves it — but the effort half has
 nowhere to go, so `pro-xhigh` and `pro-medium` are the same request.
 Use or-ds4/nous when the task needs effort control or a verify floor.
 
-When `nous` fails over to `openrouter`, every tier runs `deepseek/deepseek-v4-flash-0731:nitro` —
+When `nous` fails over to `openrouter`, every tier runs `deepseek/deepseek-v4.1-flash` —
 the fallback is deliberately flash-only, never pro.
 
 Latency: `openrouter` (ZDR) is markedly slower than `nous`/`direct` per request —

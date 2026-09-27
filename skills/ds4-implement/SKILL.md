@@ -1,6 +1,6 @@
 ---
 name: ds4-implement
-description: "Dispatch a headless DeepSeek-V4 implementation subagent (ds4, or-ds4, nous-ds4) that writes code in the working tree and runs tests, with an opus-5 main loop as coordinator. Use for quick implementation changes executed by DeepSeek V4."
+description: "Dispatch a headless DeepSeek-V4 implementation subagent (ds4, or-ds4, nous-ds4) that writes code in the working tree and runs tests, with the Anthropic main loop as coordinator. Use for quick implementation changes executed by DeepSeek V4."
 ---
 
 # ds4-implement
@@ -9,9 +9,7 @@ Dispatch a write-capable, `--role implement` subagent on a cc-ds4 profile. The
 child edits files in the working tree and can run tests (Bash). **This is the
 only ds4 role that can write.**
 
-## CRITICAL: sandbox-disabled
-
-The Bash call MUST use `dangerouslyDisableSandbox: true`. The child's
+## Run with the sandbox disabled The child's
 `session-env/` writes hit an EPERM inside the coordinator's sandbox, so the
 dispatch Bash call must escape it. The child is scoped to the cwd (project
 working tree) and uses `--permission-mode acceptEdits` — it auto-accepts file
@@ -28,15 +26,18 @@ writes and auto-denies anything outside `--add-dir`.
   --prompt-text '<task description>'
 ```
 
-**`--timeout` is not optional.** Omit it and the 300s default silently yields a
-**no-op with exit 0** — no error, no edits, an empty `git diff`, and a result of
-just `error:timed out after 300s`. Any real implementation task needs 1800.
+**`--timeout` is not optional.** Omit it and the 300s default kills the child
+mid-task: `ds4-run` prints `error:timed out after 300s` and exits 1, often with
+partial or no edits in the tree. Any real implementation task needs 1800.
 
 - Profile: prefer `nous` for cheap edits; `openrouter` (ZDR) when the context
   carries private code. Never silently fall back to `nous` for private code when
   `openrouter` fails — that is a data decision, so surface it.
-- Tier: default `flash-xhigh`. Use `pro-xhigh` for the hardest bugs;
-  `flash-medium` for mechanical sweeps and boilerplate.
+- Tier: default `flash-xhigh`; `flash-medium` for mechanical sweeps and
+  boilerplate. For the hardest bugs, `pro-xhigh` is a real step up only on
+  `direct`; on `nous`/`openrouter` it is the same flash model.
+  Money/security/irreversible work follows the floor in
+  `../ds4-skill-family/references/roles.md`.
 - The child sees the repo from the coordinator's cwd. Give it a specific task
   and a clear acceptance check (test to run, invariant to verify).
 
