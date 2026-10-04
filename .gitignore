@@ -14,3 +14,8 @@ last-statusline-input.json
 # committing it would nest a second checkout of this repo inside itself.
 .claude/
 .serena/
+
+# Scratch and accidental dirs: CCR worktree clones + tarball, and a stray
+# profile-config dir created by an unexpanded tilde.
+.tmp/
+~/
